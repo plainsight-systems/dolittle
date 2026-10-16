@@ -2,27 +2,63 @@
 
 ## Active
 
-None.
+- Review the local explanatory project site. Home, Writing, About, two opening
+  articles, and RSS are implemented. Preview with `python3 scripts/site.py serve`.
+  Production URL is `https://dolittle.plainsight-systems.com/`; deployment is
+  being deployed through the new Pages workflow. GitHub `origin` and the site’s Code link point to
+  `plainsight-systems/dolittle`.
+  Andrew authorized the first push and deployment on 2026-10-16.
+  Engine architecture follows this site work; preserve the selected 8B pair
+  and block 24 reference contract.
 
 ## Next
 
-1. Inspect the exact Qwen3 4B/NLA checkpoints, activation conventions, precision
-   needs, and memory layout. Pin sources and record the budget for the 3090.
-2. Write the logical overview, change axes, and file mapping.
-3. Select and pin the Docker/CUDA/CMake toolchain, then implement the source
-   build and GPU verification entry point on the Linux machine.
+1. Write the logical overview, change axes, and file mapping around the pinned
+   8B reference contract and measured resource requirements. Include weight
+   loading, cache ownership, capture alignment, and explanation scheduling.
+2. Define numerical checks for the direct implementation and capture alignment.
+   Preserve reference outputs; distinguish transcript claims from activation
+   hypotheses and do not present raw reconstruction cosine as confidence.
+3. Prepare host NVIDIA Container Toolkit access, then select and pin the
+   Docker/CUDA/CMake toolchain and implement source-build/GPU checks.
 4. Implement the target-model and NLA paths and the synchronized browser
    interface, with concrete milestones defined by the architecture.
 
-## Deferred
+## Later platform work
 
-- Native macOS/Metal and other GPU platforms.
+- Implement Metal on macOS after Linux/NVIDIA. Design its native build path
+  and verify hardware requirements in that phase.
+- Decide whether to support AMD.
+
+## Deferred
 - Browser-only inference.
 - Explanation editing and causal steering.
 - Training an NLA, unless the selected model pairing requires it.
 
 ## Accepted
 
+- **Project site, 2026-10-16:** Andrew requested the site before engine
+  architecture, closer to Cradle's explanatory writing than a milestone-led
+  structure. Built the local Hugo site with the original artwork, two opening
+  articles, an About page, and RSS. Explanations, explorations, and milestones
+  share one Writing index. Five publication checks pass, including a subpath
+  build, draft/future exclusions, broken-link/asset rejection, and share metadata. Local preview
+  only; public copy and design are ready for review.
+
+- **Model selection, 2026-10-16:** Andrew selected Qwen3 8B with
+  `marco-bazzani/Qwen3-8B-nla`, using the revisions exercised in the comparison.
+  Initial capture layer is zero-based block 24. Preserve 4B as historical
+  comparison evidence; proceed to architecture for the selected 8B pair.
+- **4B/8B comparison, 2026-10-16:** pinned and verified the full 8B pair;
+  sequential BF16 reference run completed on the 3090 Ti. Peak allocated
+  memory 15.378 GiB, median thinking AV time 4.73 s, all twelve descriptions
+  complete. Full results and comparison limitations recorded; Andrew
+  subsequently selected 8B. No commit or push made.
+- **Reference feasibility pass, 2026-10-16:** pinned input manifests and all
+  adapter shapes checked; actual Linux/CUDA execution and shared-base memory
+  measured on an RTX 3090 Ti. Semantic faithfulness remains unverified.
+  The initial narrative-agreement gate was withdrawn after discussion.
+  Docker GPU access is unavailable until the host toolkit is configured.
 - **Repository bootstrap, 2026-10-16:** source layout, separate `app/` and
   `web/`, local workflow, license files, original README banner, and project
   memory established. The brief was moved to ignored `brief.md`. Setup

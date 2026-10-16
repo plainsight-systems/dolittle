@@ -1,0 +1,53 @@
+{{/* Shared family shell. All URLs honor the deployment subpath; no remote assets. Social metadata uses the page identity and a generated JPEG. */}}
+<!doctype html>
+<html lang="en" prefix="og: https://ogp.me/ns#">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ if not .IsHome }}{{ .Title }} · {{ end }}Dolittle</title>
+  <meta name="description" content="{{ .Description | default site.Params.description }}">
+  <link rel="canonical" href="{{ .Permalink }}">
+  <link rel="alternate" type="application/rss+xml" title="Dolittle writing" href="{{ "writing/index.xml" | absURL }}">
+  <meta property="og:title" content="{{ .Title }}">
+  <meta property="og:description" content="{{ .Description | default site.Params.description }}">
+  <meta property="og:type" content="{{ if and .IsPage (eq .Section "writing") }}article{{ else }}website{{ end }}">
+  <meta property="og:url" content="{{ .Permalink }}">
+  <meta property="og:site_name" content="Dolittle">
+  <meta property="og:locale" content="en_US">
+  {{ $art := resources.Get "art/dolittle-readme.png" }}
+  {{ $social := $art.Resize "1200x jpg q90" }}
+  <meta property="og:image" content="{{ $social.Permalink }}">
+  <meta property="og:image:type" content="image/jpeg">
+  <meta property="og:image:width" content="{{ $social.Width }}">
+  <meta property="og:image:height" content="{{ $social.Height }}">
+  {{ $imageAlt := "Dolittle’s engraved green parrot speaks into a brass horn as glowing marks become handwriting in a notebook." }}
+  <meta property="og:image:alt" content="{{ $imageAlt }}">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{ .Title }}">
+  <meta name="twitter:description" content="{{ .Description | default site.Params.description }}">
+  <meta name="twitter:image" content="{{ $social.Permalink }}">
+  <meta name="twitter:image:alt" content="{{ $imageAlt }}">
+  <link rel="preload" href="{{ "fonts/PlexSerif-Regular.woff2" | relURL }}" as="font" type="font/woff2" crossorigin>
+  {{ $css := resources.Get "site.css" | resources.Copy "css/site.css" | minify | fingerprint }}
+  <link rel="stylesheet" href="{{ $css.RelPermalink }}" integrity="{{ $css.Data.Integrity }}">
+  <link rel="icon" href="{{ "favicon.svg" | relURL }}" type="image/svg+xml">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="masthead">
+    <div class="wrap masthead-inner">
+      <a class="brand" href="{{ site.Home.RelPermalink }}" aria-label="Dolittle home">Dolittle</a>
+      <nav aria-label="Main navigation">
+        <a href="{{ "writing/" | relURL }}" {{ if eq .Section "writing" }}aria-current="{{ if .IsSection }}page{{ else }}true{{ end }}"{{ end }}>Writing</a>
+        <a href="{{ "about/" | relURL }}" {{ if eq .Section "about" }}aria-current="page"{{ end }}>About</a>
+        {{ with site.Params.repository }}<a href="{{ . }}">Code <span aria-hidden="true">↗</span></a>{{ end }}
+      </nav>
+    </div>
+  </header>
+  <main id="main" tabindex="-1">{{ block "main" . }}{{ end }}</main>
+  <footer class="footer">
+    <div class="wrap footer-top"><a class="brand" href="{{ site.Home.RelPermalink }}">Dolittle</a><a href="https://plainsight-systems.com/">A Plainsight Systems project <span aria-hidden="true">↗</span></a></div>
+    <div class="wrap footer-bottom"><span>Writing © {{ now.Year }} <a href="https://andrewphunter.com/">Andrew P Hunter</a></span><span><a href="https://creativecommons.org/licenses/by/4.0/">Writing: CC BY 4.0</a> · <a href="https://www.apache.org/licenses/LICENSE-2.0">Code: Apache 2.0</a></span></div>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,9 @@
+{{/* Article kind is independent of chronology; milestones use the same layout. */}}
+{{ $heading := .heading }}
+{{ with .page }}
+<article class="writing-entry">
+  <div class="entry-meta"><span class="eyebrow">{{ .Params.article_type | title }}{{ with .Params.milestone }} {{ . }}{{ end }}</span><time datetime="{{ .Date.Format "2006-01-02" }}">{{ .Date.Format "2 Jan 2006" }}</time></div>
+  {{ if eq $heading "h2" }}<h2>{{ else }}<h3>{{ end }}<a href="{{ .RelPermalink }}">{{ .Title }}</a>{{ if eq $heading "h2" }}</h2>{{ else }}</h3>{{ end }}
+  <div class="entry-description"><p>{{ .Description }}</p><a class="text-link" href="{{ .RelPermalink }}">Read the {{ .Params.article_type }} <span aria-hidden="true">→</span></a></div>
+</article>
+{{ end }}

@@ -11,5 +11,13 @@ Third-party components and weights
 =================================
 
 No third-party runtime implementation or model weights are bundled in this
-initial repository scaffold. Linked research and model repositories are
+repository. Linked research and model repositories are
 references. Record licenses and attribution here as dependencies are selected.
+
+IBM Plex fonts
+==============
+
+web/static/fonts/ contains IBM Plex Serif and IBM Plex Mono font files.
+Copyright 2017 IBM Corp. All rights reserved. Distributed under the SIL Open
+Font License 1.1; see web/static/fonts/OFL.txt. These fonts retain their own
+license and are not covered by the project code or artwork licenses.

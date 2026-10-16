@@ -1,0 +1,7 @@
+{{- /* Same publication boundary as HTML; bodies are intentionally omitted. */ -}}
+{{- printf "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>" | safeHTML }}
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+<channel><title>Dolittle writing</title><link>{{ .Permalink }}</link><description>{{ .Description }}</description><language>en-us</language><atom:link href="{{ .Permalink }}index.xml" rel="self" type="application/rss+xml" />
+{{ range .RegularPages.ByDate.Reverse }}{{ if and (not .Draft) (le .PublishDate now) }}
+<item><title>{{ .Title }}</title><link>{{ .Permalink }}</link><guid>{{ .Permalink }}</guid><pubDate>{{ .PublishDate.Format "Mon, 02 Jan 2006 15:04:05 -0700" }}</pubDate><description>{{ .Description }}</description><category>{{ .Params.article_type }}</category></item>
+{{ end }}{{ end }}</channel></rss>

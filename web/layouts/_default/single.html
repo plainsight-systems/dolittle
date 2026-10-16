@@ -1,0 +1,15 @@
+{{/* One native contents disclosure avoids duplicate anchor IDs across breakpoints. */}}
+{{ define "main" }}
+<article class="wrap page-space">
+  <header class="article-header">
+    {{ if eq .Section "writing" }}<a class="eyebrow" href="{{ "writing/" | relURL }}">← All writing</a><p class="article-kind eyebrow">{{ .Params.article_type | title }}{{ with .Params.milestone }} {{ . }}{{ end }}</p>{{ else }}<p class="eyebrow">The project</p>{{ end }}
+    <h1>{{ .Title }}</h1>
+    <p class="lead">{{ .Description }}</p>
+    {{ if eq .Section "writing" }}<p class="byline">By Andrew Hunter · <time datetime="{{ .Date.Format "2006-01-02" }}">{{ .Date.Format "2 January 2006" }}</time> · {{ .ReadingTime }} minute read</p>{{ end }}
+  </header>
+  <div class="article-layout">
+    <aside class="contents" aria-label="Article contents"><details open><summary>On this page</summary>{{ .TableOfContents }}</details></aside>
+    <div class="prose">{{ .Content }}<div class="article-end"><a href="{{ "writing/" | relURL }}">All writing</a><a href="#main">Back to top ↑</a></div></div>
+  </div>
+</article>
+{{ end }}

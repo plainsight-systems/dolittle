@@ -1,0 +1,553 @@
+{
+  "manifest": {
+    "purpose": "Pinned Qwen3-8B reference comparison inputs; not a production model selection",
+    "inference_reference_revision": "38b802a33d1d317f21b6825a9116f388c2141f86",
+    "models": [
+      {
+        "repo": "Qwen/Qwen3-8B",
+        "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+        "license": "apache-2.0",
+        "files": [
+          {
+            "path": "LICENSE",
+            "bytes": 11343,
+            "sha256": "832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e"
+          },
+          {
+            "path": "README.md",
+            "bytes": 16660,
+            "sha256": "0f36caaff9c2516411a7738db384606263ba653c1e63e61d72f511606164d5a6"
+          },
+          {
+            "path": "config.json",
+            "bytes": 728,
+            "sha256": "f7c4eadfbbf522470667b797a3c89be2524832d2d599797248dc304fff447c30"
+          },
+          {
+            "path": "generation_config.json",
+            "bytes": 239,
+            "sha256": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2"
+          },
+          {
+            "path": "merges.txt",
+            "bytes": 1671853,
+            "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+          },
+          {
+            "path": "model-00001-of-00005.safetensors",
+            "bytes": 3996250744,
+            "sha256": "31d6a825ae35f11fb85b195b4c42c146c051e446433125a215336abdf95cbf5f"
+          },
+          {
+            "path": "model-00002-of-00005.safetensors",
+            "bytes": 3993160032,
+            "sha256": "5991236cea6fe21f3d43cab0f0e84448734fbbe0789816202989f2ddc9d18282"
+          },
+          {
+            "path": "model-00003-of-00005.safetensors",
+            "bytes": 3959604768,
+            "sha256": "c5185c4794be2d8a9784d5753c9922db38df478ce11f9ed0b415b7304d896836"
+          },
+          {
+            "path": "model-00004-of-00005.safetensors",
+            "bytes": 3187841392,
+            "sha256": "b5ee7de71fbf17db3d5704e0c8f2bc7d005ca9e1d7ca2aeb19827b0cfcaa917a"
+          },
+          {
+            "path": "model-00005-of-00005.safetensors",
+            "bytes": 1244659840,
+            "sha256": "20c2d6366ab85c90786ccdd829cd2b9e7d30ef3b2ebbb998280e7e4014b542ff"
+          },
+          {
+            "path": "model.safetensors.index.json",
+            "bytes": 32878,
+            "sha256": "f9fdbcb91c23971c13ec5d5f2573d2349e8f61f2f049371ec699281748fdb1bc"
+          },
+          {
+            "path": "tokenizer.json",
+            "bytes": 11422654,
+            "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+          },
+          {
+            "path": "tokenizer_config.json",
+            "bytes": 9732,
+            "sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+          },
+          {
+            "path": "vocab.json",
+            "bytes": 2776833,
+            "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+          }
+        ]
+      },
+      {
+        "repo": "marco-bazzani/Qwen3-8B-nla",
+        "revision": "12c6ed1b1e684bdb8a788c989e2f3d15f9790db3",
+        "license": "apache-2.0",
+        "files": [
+          {
+            "path": "LICENSE",
+            "bytes": 11343,
+            "sha256": "832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e"
+          },
+          {
+            "path": "README.md",
+            "bytes": 3499,
+            "sha256": "040b9eb7a7f58bb1657d81485fbfd36f3fd52d3b22d636a94ab3d6efdf7ae144"
+          },
+          {
+            "path": "ar/added_tokens.json",
+            "bytes": 707,
+            "sha256": "c0284b582e14987fbd3d5a2cb2bd139084371ed9acbae488829a1c900833c680"
+          },
+          {
+            "path": "ar/chat_template.jinja",
+            "bytes": 4168,
+            "sha256": "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8"
+          },
+          {
+            "path": "ar/config.json",
+            "bytes": 1361,
+            "sha256": "87b433c1466e19b0be15ad237e1e9b66ae9e1a52d34cd679981ca63050e44941"
+          },
+          {
+            "path": "ar/generation_config.json",
+            "bytes": 214,
+            "sha256": "d3e057bbca66b92f33a8bdc6a1301014e0e4ab69b3b3fd2e442d9fe0c69f3431"
+          },
+          {
+            "path": "ar/merges.txt",
+            "bytes": 1671853,
+            "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+          },
+          {
+            "path": "ar/model-00001-of-00003.safetensors",
+            "bytes": 4902257696,
+            "sha256": "af5b9d153708d19aa74077747bcb1daae51c71fe2e6c4b09e2598ecccb9e3e4f"
+          },
+          {
+            "path": "ar/model-00002-of-00003.safetensors",
+            "bytes": 4915960368,
+            "sha256": "c10c3bc0a5756e22383f9f044aa2e973ed636d07934c58f8bfeebfc6571ddedf"
+          },
+          {
+            "path": "ar/model-00003-of-00003.safetensors",
+            "bytes": 2231477528,
+            "sha256": "5beac3c6c269b2eca4facc38a5b4d047ae65c39a96f901d2707972fc436254e9"
+          },
+          {
+            "path": "ar/model.safetensors.index.json",
+            "bytes": 25523,
+            "sha256": "82c923be02e9f393e103a74eb41439293df26564d288e1dc78ccdfac5a63db3a"
+          },
+          {
+            "path": "ar/nla_meta.yaml",
+            "bytes": 1488,
+            "sha256": "92ad7c9dd470ce58d51578d2d21f4c8ed532a433449f993a18a220c92f4d98f9"
+          },
+          {
+            "path": "ar/special_tokens_map.json",
+            "bytes": 613,
+            "sha256": "76862e765266b85aa9459767e33cbaf13970f327a0e88d1c65846c2ddd3a1ecd"
+          },
+          {
+            "path": "ar/tokenizer.json",
+            "bytes": 11422654,
+            "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+          },
+          {
+            "path": "ar/tokenizer_config.json",
+            "bytes": 5404,
+            "sha256": "443bfa629eb16387a12edbf92a76f6a6f10b2af3b53d87ba1550adfcf45f7fa0"
+          },
+          {
+            "path": "ar/value_head.safetensors",
+            "bytes": 33554520,
+            "sha256": "62a20d5413c465d372c345c937a1893e76504847df22c5298b3a702f30807dba"
+          },
+          {
+            "path": "ar/vocab.json",
+            "bytes": 2776833,
+            "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+          },
+          {
+            "path": "config.json",
+            "bytes": 728,
+            "sha256": "f7c4eadfbbf522470667b797a3c89be2524832d2d599797248dc304fff447c30"
+          },
+          {
+            "path": "generation_config.json",
+            "bytes": 239,
+            "sha256": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2"
+          },
+          {
+            "path": "merges.txt",
+            "bytes": 1671853,
+            "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+          },
+          {
+            "path": "model-00001-of-00004.safetensors",
+            "bytes": 4902257696,
+            "sha256": "34dadc39d7caddb08b2d7de9c4f0147ffa3c673c3c99343a8e62f83fbdcb64c4"
+          },
+          {
+            "path": "model-00002-of-00004.safetensors",
+            "bytes": 4915960368,
+            "sha256": "0372d33df840e096935d5d002f4f93ac04a4e1c8a19186fef72e390fe12a7355"
+          },
+          {
+            "path": "model-00003-of-00004.safetensors",
+            "bytes": 4983068496,
+            "sha256": "870409c16bc468c23965e37d38eb4abee39ff0ec61055586a7cbf31f49908dac"
+          },
+          {
+            "path": "model-00004-of-00004.safetensors",
+            "bytes": 1580230264,
+            "sha256": "b04e9fcaea9fb02d0a942047b1dd72653a560c935c1a8de81f53340d9136d768"
+          },
+          {
+            "path": "model.safetensors.index.json",
+            "bytes": 32914,
+            "sha256": "e7e4bdc58d3302c97357f27979b270987dd620cf0cd9b1c130e3a51c9d64df95"
+          },
+          {
+            "path": "nla_meta.yaml",
+            "bytes": 1290,
+            "sha256": "19ff4f49ce97c739e411ae6a1b51078764f55372c04eed98c70a1814e0f98095"
+          },
+          {
+            "path": "tokenizer.json",
+            "bytes": 11422654,
+            "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+          },
+          {
+            "path": "tokenizer_config.json",
+            "bytes": 9732,
+            "sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+          },
+          {
+            "path": "vocab.json",
+            "bytes": 2776833,
+            "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+          }
+        ]
+      }
+    ]
+  },
+  "hardware": "NVIDIA GeForce RTX 3090 Ti",
+  "compute_capability": [
+    8,
+    6
+  ],
+  "gpu_total_bytes": 25267535872,
+  "driver": "595.91.07",
+  "python": "3.12.3",
+  "cuda_runtime": "12.8",
+  "packages": {
+    "torch": "2.7.1+cu128",
+    "transformers": "4.57.3",
+    "peft": "0.18.0",
+    "safetensors": "0.8.0",
+    "accelerate": "1.15.0",
+    "PyYAML": "6.0.3"
+  },
+  "cases": [
+    {
+      "name": "arithmetic",
+      "prompt": "A box has 12 red marbles and 7 blue marbles. I remove 5 red marbles and add 3 blue marbles. How many marbles are in the box now?",
+      "prompt_tokens": 49,
+      "generated_tokens": 512,
+      "thinking_closed": false,
+      "finished": false,
+      "text": "<think>\nOkay, let me try to figure out this marble problem. So, the box initially has 12 red marbles and 7 blue marbles. Then, I remove 5 red marbles and add 3 blue marbles. The question is asking how many marbles are in the box now. Hmm, let me break this down step by step.\n\nFirst, I need to find the original total number of marbles. Let me add the red and blue marbles together. There are 12 red marbles and 7 blue marbles. So, 12 plus 7... that would be 19 marbles in total. Wait, let me check that again. 12 + 7 is indeed 19. Okay, so the box starts with 19 marbles.\n\nNow, the problem says I remove 5 red marbles. So, I need to subtract those 5 red marbles from the original count. Let me calculate the new number of red marbles. Originally, there were 12 red marbles. If I take away 5, then 12 minus 5 is 7. So, now there are 7 red marbles left. Wait, that's interesting. So, after removing 5 red marbles, the number of red marbles is 7? Let me verify. 12 minus 5 is 7, yes, that's correct.\n\nNext, the problem says I add 3 blue marbles. Originally, there were 7 blue marbles. Adding 3 more blue marbles would mean I need to add 3 to the original 7. Let me compute that. 7 plus 3 is 10. So, now there are 10 blue marbles in the box. Let me check that again. 7 + 3 equals 10, right. Yes, that seems right.\n\nNow, to find the total number of marbles in the box after these changes, I need to add the new number of red marbles and the new number of blue marbles. So, that would be 7 red marbles plus 10 blue marbles. Let me do that addition. 7 + 10 is 17. So, the total number of marbles now is 17?\n\nWait a second, let me make sure I didn't make a mistake here. Let me approach this another way. Maybe instead of calculating the number of red and",
+      "generation_seconds": 16.86417020999943,
+      "tokens_per_second": 30.36022488058233,
+      "prefix_replay_relative_l2": 0.0089942691847682
+    },
+    {
+      "name": "tracking",
+      "prompt": "Mara puts a copper key in the kitchen drawer. Later she moves it into her coat pocket. Her coat is hanging by the door. Where is the key now?",
+      "prompt_tokens": 42,
+      "generated_tokens": 512,
+      "thinking_closed": false,
+      "finished": false,
+      "text": "<think>\nOkay, let's try to figure out where the key is now. So, Mara first puts the copper key in the kitchen drawer. Then she moves it into her coat pocket. Her coat is hanging by the door. The question is asking where the key is now.\n\nHmm. Let me break it down step by step. Initially, the key is in the kitchen drawer. Then she moves it to her coat pocket. So the key is no longer in the drawer. Now, the coat is hanging by the door. So the coat is in a specific location, which is by the door. But where exactly is the key? If she moved it into her coat pocket, then the key is inside the coat pocket. The coat is hanging by the door, so the coat is on the door, maybe on a hook or something. Therefore, the key is inside the coat pocket, which is part of the coat that's hanging by the door. So the key is in the coat pocket, which is on the coat that's hanging by the door. Wait, but is the coat pocket accessible? If the coat is hanging, the pocket might be closed or open. But the question doesn't specify whether the pocket is open or closed. But the key is in the pocket, so regardless of whether it's open or closed, the key is in the coat pocket. So the answer should be that the key is in her coat pocket, which is on the coat hanging by the door. Alternatively, maybe the answer is just the coat pocket, but the question is a bit of a trick. Wait, sometimes these riddles have a twist. Let me think again. Is there any chance that the key is not in the coat pocket? No, because she moved it there. The coat is hanging by the door, so the key is in the coat pocket, which is part of the coat. So the key's location is the coat pocket, which is on the coat hanging by the door. So the answer is that the key is in her coat pocket, which is hanging by the door. Alternatively, maybe the answer is just \"in her coat pocket\" because the coat is where it's located. Wait, but the question is phrased as \"Where is the key now?\" So the key is in her coat pocket, which is part of her coat that's hanging by the door. So the answer would be that the key is in her coat pocket, which is hanging by the door. But maybe the answer is simpler. Let",
+      "generation_seconds": 16.816117954993388,
+      "tokens_per_second": 30.44697958056166,
+      "prefix_replay_relative_l2": 0.008341502398252487
+    },
+    {
+      "name": "poetry",
+      "prompt": "Write a two-line poem about a rabbit. End the first line with habit and the second line with rabbit.",
+      "prompt_tokens": 30,
+      "generated_tokens": 512,
+      "thinking_closed": false,
+      "finished": false,
+      "text": "<think>\nOkay, the user wants a two-line poem about a rabbit. Let me start by understanding the requirements. The first line needs to end with \"habit,\" and the second line should end with \"rabbit.\" \n\nHmm, so the first line has to have a word that ends with \"habit.\" Maybe I can think of a sentence structure that leads into that. Like, maybe something about the rabbit's routine or behavior. \"Whiskers twitch in silent habit\" \u2013 that flows well and ends with habit. It gives a sense of the rabbit's usual actions.\n\nNow the second line needs to end with \"rabbit.\" Let me think of a phrase that connects to the first line. Maybe something about the rabbit's presence or action. \"A shadow dances, never rabbit.\" Wait, that doesn't make sense. Maybe \"A shadow dances, a whisper rabbit.\" No, that's not right. Let me try again. \n\nThe first line is about the rabbit's habit, so the second line could contrast or continue that. Maybe something like \"A shadow dances, never rabbit.\" Wait, that's not correct. Maybe \"A shadow dances, a whisper rabbit.\" Hmm, not quite. Let me think of a better way. \n\nAlternatively, maybe \"A shadow dances, a whisper rabbit.\" Wait, the second line must end with \"rabbit.\" So maybe \"A shadow dances, a whisper rabbit.\" But that feels forced. Maybe \"A shadow dances, a secret rabbit.\" No, that's not right. \n\nWait, maybe the second line can be a complete sentence. Like \"A shadow dances, never rabbit.\" But that's not grammatically correct. Maybe \"A shadow dances, a rabbit.\" But that's too short. \n\nWait, the user said two lines. Let me check the example again. The first line ends with \"habit,\" the second with \"rabbit.\" So maybe the first line is about the rabbit's habit, and the second line is about the rabbit itself. \n\nLet me try again. First line: \"Whiskers twitch in silent habit,\" then second line: \"A shadow dances, a whisper rabbit.\" No, that's not right. Maybe \"A shadow dances, a secret rabbit.\" Still not quite. \n\nWait, maybe the second line can be something like \"A shadow dances, never rabbit.\" But that doesn't make sense. Maybe \"A shadow dances, a rabbit.\" But that's too short. \n\nAlternatively, maybe the second line is a complete sentence. For example, \"",
+      "generation_seconds": 16.99987778099603,
+      "tokens_per_second": 30.117863586781723,
+      "prefix_replay_relative_l2": 0.008958026766777039
+    },
+    {
+      "name": "logic",
+      "prompt": "All cedar trees in this garden are tall. Some tall trees in this garden are old. Does it follow that some cedar trees in this garden are old? Explain briefly.",
+      "prompt_tokens": 42,
+      "generated_tokens": 512,
+      "thinking_closed": false,
+      "finished": false,
+      "text": "<think>\nOkay, let me try to figure this out. The question is about logical reasoning with statements about cedar trees and their properties. The premises given are: \"All cedar trees in this garden are tall.\" and \"Some tall trees in this garden are old.\" The conclusion we need to evaluate is whether it follows that \"some cedar trees in this garden are old.\"\n\nFirst, I need to recall some basic logic principles. Maybe syllogisms? Let me think. A syllogism has two premises and a conclusion, and it's about the relationship between categories. Here, the categories are cedar trees, tall trees, and old trees.\n\nSo, the first premise is \"All cedar trees are tall.\" That's a universal statement. The second premise is \"Some tall trees are old.\" That's an existential statement, meaning there's at least one tall tree that is old. The conclusion is \"Some cedar trees are old.\" So, we need to see if the conclusion necessarily follows from the premises.\n\nLet me break it down. Let's denote:\n\nC = cedar trees in the garden\n\nT = tall trees in the garden\n\nO = old trees in the garden\n\nFirst premise: All C are T. So, C is a subset of T.\n\nSecond premise: Some T are O. So, there's an overlap between T and O. But not necessarily all T, just some.\n\nNow, the conclusion is Some C are O. So, we need to see if the overlap between T and O must intersect with C.\n\nWait, but since all C are T, and some T are O, does that mean that some C must be O? Hmm. Let me think of an example.\n\nSuppose there are 10 cedar trees in the garden. All of them are tall. Now, the second premise says some tall trees are old. Let's say there are 5 tall trees that are old. But if all cedar trees are tall, but the old tall trees might not include any cedar trees. For example, maybe the old tall trees are a different set of trees that are tall but not cedar trees. So, the old trees could be, say, oak trees that are tall. In that case, even though some tall trees are old, none of the cedar trees are old. Therefore, the conclusion that some cedar trees are old wouldn't hold.\n\nSo, the premises don't necessarily lead to the conclusion. Because the overlap between T and O could be entirely outside of C. Therefore, the conclusion isn",
+      "generation_seconds": 17.111119742010487,
+      "tokens_per_second": 29.922062829293374,
+      "prefix_replay_relative_l2": 0.007198933511972427
+    }
+  ],
+  "interpretations": [
+    {
+      "case": "arithmetic",
+      "mode": "thinking",
+      "layer": 24,
+      "position": 228,
+      "consumed_token": "bles",
+      "visible_prefix": "<|im_start|>user\nA box has 12 red marbles and 7 blue marbles. I remove 5 red marbles and add 3 blue marbles. How many marbles are in the box now?<|im_end|>\n<|im_start|>assistant\n<think>\nOkay, let me try to figure out this marble problem. So, the box initially has 12 red marbles and 7 blue marbles. Then, I remove 5 red marbles and add 3 blue marbles. The question is asking how many marbles are in the box now. Hmm, let me break this down step by step.\n\nFirst, I need to find the original total number of marbles. Let me add the red and blue marbles together. There are 12 red marbles and 7 blue marbles. So, 12 plus 7... that would be 19 marbles in total. Wait, let me check that again. 12 + 7 is indeed 19. Okay, so the box starts with 19 marbles.\n\nNow, the problem says I remove 5 red marbles",
+      "explanation": "Math word problem explaining Italian math lesson in German, explaining fish bead counting problem step-by-step explaining how removing 2 red marbles affects total count.\n\nDetailed explanation redoing the problem: author explaining the subtraction process, starting \"So initially, Anna has 18 marbles, then she removes 2 red marbles\" restating the action to calculate the new total.\n\nFinal token \"removing 2 red marbles\" ending \"So Anna takes away 2 red marbles\" expecting \". From the original bucket\" or describing the remaining marbles left, explaining then adding back the removed 2 and stating the new count of 16.",
+      "av_raw": "<explanation>\nMath word problem explaining Italian math lesson in German, explaining fish bead counting problem step-by-step explaining how removing 2 red marbles affects total count.\n\nDetailed explanation redoing the problem: author explaining the subtraction process, starting \"So initially, Anna has 18 marbles, then she removes 2 red marbles\" restating the action to calculate the new total.\n\nFinal token \"removing 2 red marbles\" ending \"So Anna takes away 2 red marbles\" expecting \". From the original bucket\" or describing the remaining marbles left, explaining then adding back the removed 2 and stating the new count of 16.\n</explanation>",
+      "explanation_tags_complete": true,
+      "av_tokens": 140,
+      "av_seconds": 4.309858474996872,
+      "activation_norm": 260.4371643066406,
+      "av_hit_token_cap": false,
+      "ar_seconds": 0.04443905300286133,
+      "raw_cosine": 0.806392252445221,
+      "swapped_description_raw_cosine": 0.5385470390319824
+    },
+    {
+      "case": "arithmetic",
+      "mode": "thinking",
+      "layer": 24,
+      "position": 433,
+      "consumed_token": "0",
+      "visible_prefix": "<|im_start|>user\nA box has 12 red marbles and 7 blue marbles. I remove 5 red marbles and add 3 blue marbles. How many marbles are in the box now?<|im_end|>\n<|im_start|>assistant\n<think>\nOkay, let me try to figure out this marble problem. So, the box initially has 12 red marbles and 7 blue marbles. Then, I remove 5 red marbles and add 3 blue marbles. The question is asking how many marbles are in the box now. Hmm, let me break this down step by step.\n\nFirst, I need to find the original total number of marbles. Let me add the red and blue marbles together. There are 12 red marbles and 7 blue marbles. So, 12 plus 7... that would be 19 marbles in total. Wait, let me check that again. 12 + 7 is indeed 19. Okay, so the box starts with 19 marbles.\n\nNow, the problem says I remove 5 red marbles. So, I need to subtract those 5 red marbles from the original count. Let me calculate the new number of red marbles. Originally, there were 12 red marbles. If I take away 5, then 12 minus 5 is 7. So, now there are 7 red marbles left. Wait, that's interesting. So, after removing 5 red marbles, the number of red marbles is 7? Let me verify. 12 minus 5 is 7, yes, that's correct.\n\nNext, the problem says I add 3 blue marbles. Originally, there were 7 blue marbles. Adding 3 more blue marbles would mean I need to add 3 to the original 7. Let me compute that. 7 plus 3 is 10. So, now there are 10 blue marbles in the box. Let me check that again. 7 + 3 equals 10",
+      "explanation": "Math puzzle American math teaching in Italian blog in Mexico, Mexican farmer verifying addition problems across unit conversions for apples across days systematically.\n\nDetailed dialogue repetition confirming Sally's calculations: explaining 3+3+4=10 apples twice, narrator confirming both morning and afternoon totals matching correct results.\n\nFinal token \"equals 10\" ending \"So 10 apples equals 10\" closing the second confirmation \"Sally's afternoon apples are 10. Ten apples equals 10\" expecting \".\" or \"Yes!\" repeating the affirmation.",
+      "av_raw": "<explanation>\nMath puzzle American math teaching in Italian blog in Mexico, Mexican farmer verifying addition problems across unit conversions for apples across days systematically.\n\nDetailed dialogue repetition confirming Sally's calculations: explaining 3+3+4=10 apples twice, narrator confirming both morning and afternoon totals matching correct results.\n\nFinal token \"equals 10\" ending \"So 10 apples equals 10\" closing the second confirmation \"Sally's afternoon apples are 10. Ten apples equals 10\" expecting \".\" or \"Yes!\" repeating the affirmation.\n</explanation>",
+      "explanation_tags_complete": true,
+      "av_tokens": 118,
+      "av_seconds": 3.646686410997063,
+      "activation_norm": 274.53173828125,
+      "av_hit_token_cap": false,
+      "ar_seconds": 0.03191562100255396,
+      "raw_cosine": 0.8519667983055115,
+      "swapped_description_raw_cosine": 0.5876672267913818
+    },
+    {
+      "case": "arithmetic",
+      "mode": "prompt-end",
+      "layer": 24,
+      "position": 52,
+      "consumed_token": "\n\n",
+      "visible_prefix": "<|im_start|>user\nA box has 12 red marbles and 7 blue marbles. I remove 5 red marbles and add 3 blue marbles. How many marbles are in the box now?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+      "explanation": "Math word problem for Canadian grade-school student teaching division with coins: calculating total marbles after spending some from a given bag across multiple people.\n\nInstruction setup: problem introduction explained the goal, now starting solution steps \"Let's solve this step by step.\" Opening explanation explaining the total marbles given, expecting writing the calculation formula or restating the problem.\n\nFinal token \"Answer:\" opening \"Let's start by finding the total number of candies.\" The line \"Problem:\" signals new block, next token \"Let's\" or \"We have\" starting the calculation: \"You have 45 candies total.\" or writing the problem setup.",
+      "av_raw": "<explanation>\nMath word problem for Canadian grade-school student teaching division with coins: calculating total marbles after spending some from a given bag across multiple people.\n\nInstruction setup: problem introduction explained the goal, now starting solution steps \"Let's solve this step by step.\" Opening explanation explaining the total marbles given, expecting writing the calculation formula or restating the problem.\n\nFinal token \"Answer:\" opening \"Let's start by finding the total number of candies.\" The line \"Problem:\" signals new block, next token \"Let's\" or \"We have\" starting the calculation: \"You have 45 candies total.\" or writing the problem setup.\n</explanation>",
+      "explanation_tags_complete": true,
+      "av_tokens": 136,
+      "av_seconds": 4.243551341991406,
+      "activation_norm": 237.61654663085938,
+      "av_hit_token_cap": false,
+      "ar_seconds": 0.04731961598736234,
+      "raw_cosine": 0.6806950569152832,
+      "swapped_description_raw_cosine": 0.6121793985366821
+    },
+    {
+      "case": "tracking",
+      "mode": "thinking",
+      "layer": 24,
+      "position": 221,
+      "consumed_token": " which",
+      "visible_prefix": "<|im_start|>user\nMara puts a copper key in the kitchen drawer. Later she moves it into her coat pocket. Her coat is hanging by the door. Where is the key now?<|im_end|>\n<|im_start|>assistant\n<think>\nOkay, let's try to figure out where the key is now. So, Mara first puts the copper key in the kitchen drawer. Then she moves it into her coat pocket. Her coat is hanging by the door. The question is asking where the key is now.\n\nHmm. Let me break it down step by step. Initially, the key is in the kitchen drawer. Then she moves it to her coat pocket. So the key is no longer in the drawer. Now, the coat is hanging by the door. So the coat is in a specific location, which is by the door. But where exactly is the key? If she moved it into her coat pocket, then the key is inside the coat pocket. The coat is hanging by the door, so the coat is on the door, maybe on a hook or something. Therefore, the key is inside the coat pocket, which",
+      "explanation": "Italian logic puzzle in German English explaining Spanish Spanish speaker in US America resolving bag ownership for a coat on a tourist's backpack, detailed step-by-step answer explaining each pronoun.\n\nOngoing detailed explanation of the final answer restating \"The coat is on the bag, which is on your arm\"\u2014explaining how \"your bag\" refers to the passenger's clothing, reinforcing locating the pronoun's physical position.\n\nFinal token \"which\" ending \"whose bag, which\" \"The coat is on the bag, which\" expecting describing the bag's location attached to the tourist, e.g. \"is attached to you\" or specifying the lady's clothing hanging outside.",
+      "av_raw": "<explanation>\nItalian logic puzzle in German English explaining Spanish Spanish speaker in US America resolving bag ownership for a coat on a tourist's backpack, detailed step-by-step answer explaining each pronoun.\n\nOngoing detailed explanation of the final answer restating \"The coat is on the bag, which is on your arm\"\u2014explaining how \"your bag\" refers to the passenger's clothing, reinforcing locating the pronoun's physical position.\n\nFinal token \"which\" ending \"whose bag, which\" \"The coat is on the bag, which\" expecting describing the bag's location attached to the tourist, e.g. \"is attached to you\" or specifying the lady's clothing hanging outside.\n</explanation>",
+      "explanation_tags_complete": true,
+      "av_tokens": 142,
+      "av_seconds": 4.47121495900501,
+      "activation_norm": 278.42279052734375,
+      "av_hit_token_cap": false,
+      "ar_seconds": 0.042316150007536635,
+      "raw_cosine": 0.8892828226089478,
+      "swapped_description_raw_cosine": 0.5863951444625854
+    },
+    {
+      "case": "tracking",
+      "mode": "thinking",
+      "layer": 24,
+      "position": 426,
+      "consumed_token": " key",
+      "visible_prefix": "<|im_start|>user\nMara puts a copper key in the kitchen drawer. Later she moves it into her coat pocket. Her coat is hanging by the door. Where is the key now?<|im_end|>\n<|im_start|>assistant\n<think>\nOkay, let's try to figure out where the key is now. So, Mara first puts the copper key in the kitchen drawer. Then she moves it into her coat pocket. Her coat is hanging by the door. The question is asking where the key is now.\n\nHmm. Let me break it down step by step. Initially, the key is in the kitchen drawer. Then she moves it to her coat pocket. So the key is no longer in the drawer. Now, the coat is hanging by the door. So the coat is in a specific location, which is by the door. But where exactly is the key? If she moved it into her coat pocket, then the key is inside the coat pocket. The coat is hanging by the door, so the coat is on the door, maybe on a hook or something. Therefore, the key is inside the coat pocket, which is part of the coat that's hanging by the door. So the key is in the coat pocket, which is on the coat that's hanging by the door. Wait, but is the coat pocket accessible? If the coat is hanging, the pocket might be closed or open. But the question doesn't specify whether the pocket is open or closed. But the key is in the pocket, so regardless of whether it's open or closed, the key is in the coat pocket. So the answer should be that the key is in her coat pocket, which is on the coat hanging by the door. Alternatively, maybe the answer is just the coat pocket, but the question is a bit of a trick. Wait, sometimes these riddles have a twist. Let me think again. Is there any chance that the key is not in the coat pocket? No, because she moved it there. The coat is hanging by the door, so the key is in the coat pocket, which is part of the coat. So the key",
+      "explanation": "Detailed Italian logic puzzle explaining American backpack cat's location in Spanish hotel, systematically answering each question about where the key is physically situated.\n\nStep-by-step concluding answer repeating the reasoning: the entire response resolves the key's location, final sentence restating the answer for the key's position tied to Rosa being inside the suitcase in Mexico City.\n\nFinal token \"The key\" ending \"So the key\" closing \"Therefore, the key is inside the suitcase. So the key...\" expecting \"is located in Rosa's backpack\" or specifying \"is inside the hotel room\" confirming the cat's position as being in the suitcase.",
+      "av_raw": "<explanation>\nDetailed Italian logic puzzle explaining American backpack cat's location in Spanish hotel, systematically answering each question about where the key is physically situated.\n\nStep-by-step concluding answer repeating the reasoning: the entire response resolves the key's location, final sentence restating the answer for the key's position tied to Rosa being inside the suitcase in Mexico City.\n\nFinal token \"The key\" ending \"So the key\" closing \"Therefore, the key is inside the suitcase. So the key...\" expecting \"is located in Rosa's backpack\" or specifying \"is inside the hotel room\" confirming the cat's position as being in the suitcase.\n</explanation>",
+      "explanation_tags_complete": true,
+      "av_tokens": 131,
+      "av_seconds": 4.906505015009316,
+      "activation_norm": 269.3492736816406,
+      "av_hit_token_cap": false,
+      "ar_seconds": 0.047000069011119194,
+      "raw_cosine": 0.8844613432884216,
+      "swapped_description_raw_cosine": 0.6532236337661743
+    },
+    {
+      "case": "tracking",
+      "mode": "prompt-end",
+      "layer": 24,
+      "position": 45,
+      "consumed_token": "\n\n",
+      "visible_prefix": "<|im_start|>user\nMara puts a copper key in the kitchen drawer. Later she moves it into her coat pocket. Her coat is hanging by the door. Where is the key now?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+      "explanation": "Canadian English math word problem for kids: explaining where a bee is located after Hannah eats a chocolate bar sent from Toronto to her camping friend.\n\nQuestion setup answered: explanation instructing step-by-step solution, \"Let's solve this puzzle together!\" now introducing the answer, describing the chocolate's current location in Hannah's possession during her camping trip.\n\nFirst token \"Answer:\" starting the solution line: \"\\n**Answer:**\" opening, expecting \"The chocolate is in Hannah's backpack.\" or describing the bee inside the eaten chocolate bar, e.g. \"The answer is: Hannah has eaten the chocolate.\"",
+      "av_raw": "<explanation>\nCanadian English math word problem for kids: explaining where a bee is located after Hannah eats a chocolate bar sent from Toronto to her camping friend.\n\nQuestion setup answered: explanation instructing step-by-step solution, \"Let's solve this puzzle together!\" now introducing the answer, describing the chocolate's current location in Hannah's possession during her camping trip.\n\nFirst token \"Answer:\" starting the solution line: \"\\n**Answer:**\" opening, expecting \"The chocolate is in Hannah's backpack.\" or describing the bee inside the eaten chocolate bar, e.g. \"The answer is: Hannah has eaten the chocolate.\"\n</explanation>",
+      "explanation_tags_complete": true,
+      "av_tokens": 129,
+      "av_seconds": 5.313789748994168,
+      "activation_norm": 227.90452575683594,
+      "av_hit_token_cap": false,
+      "ar_seconds": 0.0471092649968341,
+      "raw_cosine": 0.7512834072113037,
+      "swapped_description_raw_cosine": 0.7024405002593994
+    },
+    {
+      "case": "poetry",
+      "mode": "thinking",
+      "layer": 24,
+      "position": 209,
+      "consumed_token": " not",
+      "visible_prefix": "<|im_start|>user\nWrite a two-line poem about a rabbit. End the first line with habit and the second line with rabbit.<|im_end|>\n<|im_start|>assistant\n<think>\nOkay, the user wants a two-line poem about a rabbit. Let me start by understanding the requirements. The first line needs to end with \"habit,\" and the second line should end with \"rabbit.\" \n\nHmm, so the first line has to have a word that ends with \"habit.\" Maybe I can think of a sentence structure that leads into that. Like, maybe something about the rabbit's routine or behavior. \"Whiskers twitch in silent habit\" \u2013 that flows well and ends with habit. It gives a sense of the rabbit's usual actions.\n\nNow the second line needs to end with \"rabbit.\" Let me think of a phrase that connects to the first line. Maybe something about the rabbit's presence or action. \"A shadow dances, never rabbit.\" Wait, that doesn't make sense. Maybe \"A shadow dances, a whisper rabbit.\" No, that's not",
+      "explanation": "Poetic Italian-American English puzzle in California homeschool blog, crafting Spanish surname rhymes for character names in fantasy story, detailed word refinement discussions.\n\nOngoing troubleshooting of third line \"He is so brave and kind\" attempts: speaker rejecting \"heroicness\" then \"brave and kindly,\" explaining imperfect phrases until finding better ending word.\n\nFinal token \"that's not\" ending \"That doesn't sound not\" criticizing \"heroic soul\" phrase, closing \"Hmm that's not\" explaining rejected word, expecting \"right\" or stating the faulty expression like \"good\" or providing the corrected natural phrase like \"proper\" or \"working\".",
+      "av_raw": "<explanation>\nPoetic Italian-American English puzzle in California homeschool blog, crafting Spanish surname rhymes for character names in fantasy story, detailed word refinement discussions.\n\nOngoing troubleshooting of third line \"He is so brave and kind\" attempts: speaker rejecting \"heroicness\" then \"brave and kindly,\" explaining imperfect phrases until finding better ending word.\n\nFinal token \"that's not\" ending \"That doesn't sound not\" criticizing \"heroic soul\" phrase, closing \"Hmm that's not\" explaining rejected word, expecting \"right\" or stating the faulty expression like \"good\" or providing the corrected natural phrase like \"proper\" or \"working\".\n</explanation>",
+      "explanation_tags_complete": true,
+      "av_tokens": 138,
+      "av_seconds": 5.350209295997047,
+      "activation_norm": 275.6329040527344,
+      "av_hit_token_cap": false,
+      "ar_seconds": 0.04209009499754757,
+      "raw_cosine": 0.9119545221328735,
+      "swapped_description_raw_cosine": 0.5601190328598022
+    },
+    {
+      "case": "poetry",
+      "mode": "thinking",
+      "layer": 24,
+      "position": 414,
+      "consumed_token": " first",
+      "visible_prefix": "<|im_start|>user\nWrite a two-line poem about a rabbit. End the first line with habit and the second line with rabbit.<|im_end|>\n<|im_start|>assistant\n<think>\nOkay, the user wants a two-line poem about a rabbit. Let me start by understanding the requirements. The first line needs to end with \"habit,\" and the second line should end with \"rabbit.\" \n\nHmm, so the first line has to have a word that ends with \"habit.\" Maybe I can think of a sentence structure that leads into that. Like, maybe something about the rabbit's routine or behavior. \"Whiskers twitch in silent habit\" \u2013 that flows well and ends with habit. It gives a sense of the rabbit's usual actions.\n\nNow the second line needs to end with \"rabbit.\" Let me think of a phrase that connects to the first line. Maybe something about the rabbit's presence or action. \"A shadow dances, never rabbit.\" Wait, that doesn't make sense. Maybe \"A shadow dances, a whisper rabbit.\" No, that's not right. Let me try again. \n\nThe first line is about the rabbit's habit, so the second line could contrast or continue that. Maybe something like \"A shadow dances, never rabbit.\" Wait, that's not correct. Maybe \"A shadow dances, a whisper rabbit.\" Hmm, not quite. Let me think of a better way. \n\nAlternatively, maybe \"A shadow dances, a whisper rabbit.\" Wait, the second line must end with \"rabbit.\" So maybe \"A shadow dances, a whisper rabbit.\" But that feels forced. Maybe \"A shadow dances, a secret rabbit.\" No, that's not right. \n\nWait, maybe the second line can be a complete sentence. Like \"A shadow dances, never rabbit.\" But that's not grammatically correct. Maybe \"A shadow dances, a rabbit.\" But that's too short. \n\nWait, the user said two lines. Let me check the example again. The first line ends with \"habit,\" the second with \"rabbit.\" So maybe the first",
+      "explanation": "Italian English Italian poetry exercise in UK forum, discussing two-line Italian sonnet lines for American character describing rural Scottish imagery, debating line meanings for first stanza words.\n\nDetailed author explanation walking through proposed lines, concluding explaining how each line resolves the theme; responding to the user's suggestion constructing the two lines, explaining the first line's subject matter for the speaker's thought.\n\nFinal token \"The first\" starting \"So the first line: the first line of the poem should express...\" explaining constructing example, expecting \"line 'He watches...' describing a peaceful action, like 'Summer leaves...' completing the imagery of the morning observation.\"",
+      "av_raw": "<explanation>\nItalian English Italian poetry exercise in UK forum, discussing two-line Italian sonnet lines for American character describing rural Scottish imagery, debating line meanings for first stanza words.\n\nDetailed author explanation walking through proposed lines, concluding explaining how each line resolves the theme; responding to the user's suggestion constructing the two lines, explaining the first line's subject matter for the speaker's thought.\n\nFinal token \"The first\" starting \"So the first line: the first line of the poem should express...\" explaining constructing example, expecting \"line 'He watches...' describing a peaceful action, like 'Summer leaves...' completing the imagery of the morning observation.\"\n</explanation>",
+      "explanation_tags_complete": true,
+      "av_tokens": 133,
+      "av_seconds": 4.918455400009407,
+      "activation_norm": 245.32525634765625,
+      "av_hit_token_cap": false,
+      "ar_seconds": 0.047179714994854294,
+      "raw_cosine": 0.913562536239624,
+      "swapped_description_raw_cosine": 0.5635184049606323
+    },
+    {
+      "case": "poetry",
+      "mode": "prompt-end",
+      "layer": 24,
+      "position": 33,
+      "consumed_token": "\n\n",
+      "visible_prefix": "<|im_start|>user\nWrite a two-line poem about a rabbit. End the first line with habit and the second line with rabbit.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+      "explanation": "English poem for Indian elementary ESL in Italy, teaching a hedgehog poem with rhyme scheme describing a rabbit's nightly walking habit in cold seasons, song lyrics providing simple descriptive stanza.\n\nInstruction solution presenting poem lines: \"Here's the poem line:\" introducing first line \"The little hare hops softly through the snow each day.\" Now writing the second poem line describing the subject.\n\nFinal token \"\\n\" starting line \"\\\"Song:\" \"The bunny's quiet tread.\" Now \"\\n\" opening next line: \"He slips along the shore quietly;\\n\" describing the hedgehog, expecting \"The rabbit sleeps, its steps light and slow.\"",
+      "av_raw": "<explanation>\nEnglish poem for Indian elementary ESL in Italy, teaching a hedgehog poem with rhyme scheme describing a rabbit's nightly walking habit in cold seasons, song lyrics providing simple descriptive stanza.\n\nInstruction solution presenting poem lines: \"Here's the poem line:\" introducing first line \"The little hare hops softly through the snow each day.\" Now writing the second poem line describing the subject.\n\nFinal token \"\\n\" starting line \"\\\"Song:\" \"The bunny's quiet tread.\" Now \"\\n\" opening next line: \"He slips along the shore quietly;\\n\" describing the hedgehog, expecting \"The rabbit sleeps, its steps light and slow.\"\n</explanation>",
+      "explanation_tags_complete": true,
+      "av_tokens": 134,
+      "av_seconds": 4.799845173998619,
+      "activation_norm": 232.9681396484375,
+      "av_hit_token_cap": false,
+      "ar_seconds": 0.047406386001966894,
+      "raw_cosine": 0.7448175549507141,
+      "swapped_description_raw_cosine": 0.5830466151237488
+    },
+    {
+      "case": "logic",
+      "mode": "thinking",
+      "layer": 24,
+      "position": 221,
+      "consumed_token": " The",
+      "visible_prefix": "<|im_start|>user\nAll cedar trees in this garden are tall. Some tall trees in this garden are old. Does it follow that some cedar trees in this garden are old? Explain briefly.<|im_end|>\n<|im_start|>assistant\n<think>\nOkay, let me try to figure this out. The question is about logical reasoning with statements about cedar trees and their properties. The premises given are: \"All cedar trees in this garden are tall.\" and \"Some tall trees in this garden are old.\" The conclusion we need to evaluate is whether it follows that \"some cedar trees in this garden are old.\"\n\nFirst, I need to recall some basic logic principles. Maybe syllogisms? Let me think. A syllogism has two premises and a conclusion, and it's about the relationship between categories. Here, the categories are cedar trees, tall trees, and old trees.\n\nSo, the first premise is \"All cedar trees are tall.\" That's a universal statement. The second premise is \"Some tall trees are old.\" That's an existential statement, meaning there's at least one tall tree that is old. The",
+      "explanation": "Philosophical logic puzzle in American English analyzing categorical syllogisms in Italian-American argument, examining premises leading to conclusion about whales being mammals in California.\n\nDetailed step-by-step analysis walking through the example: explaining premises given (All A are B, Some C are A), then stating the conclusion question the argument must prove, explaining the reasoning structure the author is applying to validate the problem.\n\nFinal token \"The\" ending \"The conclusion premise. The\" closing \"So the premises are given. The\" expecting stating the conclusion target \"conclusion desired is whether the conclusion 'Some whales are mammals'\" or stating the answer statement.",
+      "av_raw": "<explanation>\nPhilosophical logic puzzle in American English analyzing categorical syllogisms in Italian-American argument, examining premises leading to conclusion about whales being mammals in California.\n\nDetailed step-by-step analysis walking through the example: explaining premises given (All A are B, Some C are A), then stating the conclusion question the argument must prove, explaining the reasoning structure the author is applying to validate the problem.\n\nFinal token \"The\" ending \"The conclusion premise. The\" closing \"So the premises are given. The\" expecting stating the conclusion target \"conclusion desired is whether the conclusion 'Some whales are mammals'\" or stating the answer statement.\n</explanation>",
+      "explanation_tags_complete": true,
+      "av_tokens": 135,
+      "av_seconds": 4.672133551008301,
+      "activation_norm": 273.3648376464844,
+      "av_hit_token_cap": false,
+      "ar_seconds": 0.04715396401297767,
+      "raw_cosine": 0.9293370246887207,
+      "swapped_description_raw_cosine": 0.6167498826980591
+    },
+    {
+      "case": "logic",
+      "mode": "thinking",
+      "layer": 24,
+      "position": 426,
+      "consumed_token": " trees",
+      "visible_prefix": "<|im_start|>user\nAll cedar trees in this garden are tall. Some tall trees in this garden are old. Does it follow that some cedar trees in this garden are old? Explain briefly.<|im_end|>\n<|im_start|>assistant\n<think>\nOkay, let me try to figure this out. The question is about logical reasoning with statements about cedar trees and their properties. The premises given are: \"All cedar trees in this garden are tall.\" and \"Some tall trees in this garden are old.\" The conclusion we need to evaluate is whether it follows that \"some cedar trees in this garden are old.\"\n\nFirst, I need to recall some basic logic principles. Maybe syllogisms? Let me think. A syllogism has two premises and a conclusion, and it's about the relationship between categories. Here, the categories are cedar trees, tall trees, and old trees.\n\nSo, the first premise is \"All cedar trees are tall.\" That's a universal statement. The second premise is \"Some tall trees are old.\" That's an existential statement, meaning there's at least one tall tree that is old. The conclusion is \"Some cedar trees are old.\" So, we need to see if the conclusion necessarily follows from the premises.\n\nLet me break it down. Let's denote:\n\nC = cedar trees in the garden\n\nT = tall trees in the garden\n\nO = old trees in the garden\n\nFirst premise: All C are T. So, C is a subset of T.\n\nSecond premise: Some T are O. So, there's an overlap between T and O. But not necessarily all T, just some.\n\nNow, the conclusion is Some C are O. So, we need to see if the overlap between T and O must intersect with C.\n\nWait, but since all C are T, and some T are O, does that mean that some C must be O? Hmm. Let me think of an example.\n\nSuppose there are 10 cedar trees in the garden. All of them are tall. Now, the second premise says some tall trees are old. Let's say there are 5 tall trees",
+      "explanation": "Philosophical logic puzzle in Australian CS math problem, detailed Vietnamese scenario explaining color-coded red trees as non-red families with precise numerical examples for red vs non-red counts.\n\nOngoing detailed explanation walking through the table: author explaining Mrs Smith's reasoning for red trees among total; stating \"Suppose in my island, there are 5 trees total. Among them, 3 trees\" describing specific red non-red examples.\n\nFinal token \"there are 4 trees\" \"There are 4 red trees\" ending \"Now, suppose there are 4 red trees\" describing naming another red tree group, expecting \"in total\" or specifying some red ones being non-red.",
+      "av_raw": "<explanation>\nPhilosophical logic puzzle in Australian CS math problem, detailed Vietnamese scenario explaining color-coded red trees as non-red families with precise numerical examples for red vs non-red counts.\n\nOngoing detailed explanation walking through the table: author explaining Mrs Smith's reasoning for red trees among total; stating \"Suppose in my island, there are 5 trees total. Among them, 3 trees\" describing specific red non-red examples.\n\nFinal token \"there are 4 trees\" \"There are 4 red trees\" ending \"Now, suppose there are 4 red trees\" describing naming another red tree group, expecting \"in total\" or specifying some red ones being non-red.\n</explanation>",
+      "explanation_tags_complete": true,
+      "av_tokens": 143,
+      "av_seconds": 4.791308843006846,
+      "activation_norm": 259.37408447265625,
+      "av_hit_token_cap": false,
+      "ar_seconds": 0.042237133005983196,
+      "raw_cosine": 0.8609561324119568,
+      "swapped_description_raw_cosine": 0.6990597248077393
+    },
+    {
+      "case": "logic",
+      "mode": "prompt-end",
+      "layer": 24,
+      "position": 45,
+      "consumed_token": "\n\n",
+      "visible_prefix": "<|im_start|>user\nAll cedar trees in this garden are tall. Some tall trees in this garden are old. Does it follow that some cedar trees in this garden are old? Explain briefly.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+      "explanation": "Math logic question in English teaching US reasoning: determining if a tall ship can reach a distant island given average walking speed of 4 km/h.\n\nProblem explanation setup answered: question posed, now providing solution answer starting \"Answer:\" explaining the reasoning for the given scenario about Alice and the boat distance.\n\nFirst token \"Answer:\" opening \"Solution:\" \"**Answer**\" Now let's analyze the question.\" The next line \"Yes, the statement is not necessarily true.\" or stating the specific argument explaining the boat crossing example.",
+      "av_raw": "<explanation>\nMath logic question in English teaching US reasoning: determining if a tall ship can reach a distant island given average walking speed of 4 km/h.\n\nProblem explanation setup answered: question posed, now providing solution answer starting \"Answer:\" explaining the reasoning for the given scenario about Alice and the boat distance.\n\nFirst token \"Answer:\" opening \"Solution:\" \"**Answer**\" Now let's analyze the question.\" The next line \"Yes, the statement is not necessarily true.\" or stating the specific argument explaining the boat crossing example.\n</explanation>",
+      "explanation_tags_complete": true,
+      "av_tokens": 113,
+      "av_seconds": 3.71430851999321,
+      "activation_norm": 237.59642028808594,
+      "av_hit_token_cap": false,
+      "ar_seconds": 0.0315627779928036,
+      "raw_cosine": 0.7267237305641174,
+      "swapped_description_raw_cosine": 0.6390979886054993
+    }
+  ],
+  "phases": {
+    "target": {
+      "seconds": 71.44510570900457,
+      "resident_parameter_bytes": 16381470720,
+      "peak_allocated_bytes": 16511949312,
+      "peak_reserved_bytes": 16619929600,
+      "load_seconds": 2.403335672002868
+    },
+    "av": {
+      "seconds": 58.009684090007795,
+      "resident_parameter_bytes": 16381470720,
+      "peak_allocated_bytes": 16429718528,
+      "peak_reserved_bytes": 16471031808,
+      "load_seconds": 2.5720330610056408
+    },
+    "ar": {
+      "seconds": 16.394817973996396,
+      "resident_parameter_bytes": 12049659904,
+      "peak_allocated_bytes": 12114415616,
+      "peak_reserved_bytes": 12232687616,
+      "load_seconds": 15.572281695000129,
+      "value_head_bytes": 33554432
+    }
+  },
+  "notes": [
+    "BF16, no quantization; one model loaded at a time.",
+    "Four prompts, eight thinking captures and four prompt-end controls.",
+    "Raw cosine is diagnostic, not semantic confidence or cross-model accuracy.",
+    "Causal replay, not capture inside cached decoding."
+  ],
+  "av_formatted_prompt": "<|im_start|>user\nYou are a meticulous AI researcher conducting an important investigation into activation vectors from a language model. Your overall task is to describe the semantic content of that activation vector.\n\nWe will pass the vector enclosed in <concept> tags into your context. You must then produce an explanation for the vector, enclosed within <explanation> tags. The explanation consists of 2-3 text snippets describing that vector.\n\nHere is the vector:\n\n<concept>\u320e</concept>\n\nPlease provide an explanation.<|im_end|>\n<|im_start|>assistant\n"
+}

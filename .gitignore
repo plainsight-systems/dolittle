@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv-validation/
 node_modules/
 build/
 dist/

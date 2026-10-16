@@ -1,0 +1,30 @@
+# Production identity; scripts/site.py serve overrides this for loopback preview.
+baseURL = 'https://dolittle.plainsight-systems.com/'
+title = 'Dolittle'
+languageCode = 'en-us'
+timeZone = 'UTC'
+disableKinds = ['taxonomy', 'term']
+enableRobotsTXT = true
+
+[params]
+author = 'Andrew Hunter'
+description = 'Building a way to explore a model’s thinking text beside interpretations of its internal activations.'
+repository = 'https://github.com/plainsight-systems/dolittle'
+
+[outputs]
+home = ['HTML']
+section = ['HTML']
+
+[markup.highlight]
+style = 'github-dark'
+tabWidth = 4
+
+[markup.tableOfContents]
+startLevel = 2
+endLevel = 3
+
+[markup.goldmark.extensions.passthrough]
+enable = true
+[markup.goldmark.extensions.passthrough.delimiters]
+block = [['\[', '\]'], ['$$', '$$']]
+inline = [['\(', '\)']]

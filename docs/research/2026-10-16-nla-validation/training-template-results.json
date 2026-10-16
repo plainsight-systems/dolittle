@@ -1,0 +1,273 @@
+{
+  "mode": "prompt-end",
+  "av_template": "training",
+  "hardware": "NVIDIA GeForce RTX 3090 Ti",
+  "compute_capability": [
+    8,
+    6
+  ],
+  "gpu_total_bytes": 25267535872,
+  "driver": "595.91.07",
+  "python": "3.12.3",
+  "packages": {
+    "torch": "2.7.1+cu128",
+    "transformers": "4.57.3",
+    "peft": "0.18.0",
+    "safetensors": "0.8.0",
+    "accelerate": "1.15.0",
+    "PyYAML": "6.0.3"
+  },
+  "cuda_runtime": "12.8",
+  "manifest": {
+    "purpose": "Pinned reference-validation inputs, not yet the production model selection",
+    "models": [
+      {
+        "repo": "Qwen/Qwen3-4B",
+        "revision": "1cfa9a7208912126459214e8b04321603b3df60c",
+        "license": "apache-2.0",
+        "files": [
+          {
+            "path": "LICENSE",
+            "bytes": 11343,
+            "sha256": "832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e"
+          },
+          {
+            "path": "config.json",
+            "bytes": 726,
+            "sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a"
+          },
+          {
+            "path": "generation_config.json",
+            "bytes": 239,
+            "sha256": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2"
+          },
+          {
+            "path": "merges.txt",
+            "bytes": 1671853,
+            "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+          },
+          {
+            "path": "model-00001-of-00003.safetensors",
+            "bytes": 3957900840,
+            "sha256": "328a91d3122359d5547f9d79521205bc0a46e1f79a792dfe650e99fc2d651223"
+          },
+          {
+            "path": "model-00002-of-00003.safetensors",
+            "bytes": 3987450520,
+            "sha256": "6cd087b316306a68c562436b5492edbcf6e16c6dba3a1308279caa5a58e21ca5"
+          },
+          {
+            "path": "model-00003-of-00003.safetensors",
+            "bytes": 99630640,
+            "sha256": "e4bf436957184f4eeb86a80e9db394503f1f56446b2e6b7edeac5b81470f4ca1"
+          },
+          {
+            "path": "model.safetensors.index.json",
+            "bytes": 32819,
+            "sha256": "6dc0981b8829fead746441f68f38f24c5ca4a3a66351f652c26c6df0efc43ab2"
+          },
+          {
+            "path": "tokenizer.json",
+            "bytes": 11422654,
+            "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+          },
+          {
+            "path": "tokenizer_config.json",
+            "bytes": 9732,
+            "sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+          },
+          {
+            "path": "vocab.json",
+            "bytes": 2776833,
+            "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+          }
+        ]
+      },
+      {
+        "repo": "anicka/nla-qwen3-4b-universal-ar",
+        "revision": "89835dc3f0ce044913c96ba23d6ab971cc15bcd5",
+        "license": "apache-2.0",
+        "files": [
+          {
+            "path": "adapter_config.json",
+            "bytes": 1092,
+            "sha256": "40114ff04b9fe36c54df77ec965a7c8b4caf0e108b4f8f4d5e6e976cd902adb6"
+          },
+          {
+            "path": "adapter_model.safetensors",
+            "bytes": 132187888,
+            "sha256": "a69d5d5b57054e524c7f7afa4d7c72c64579b5ffac66e9de62f0ef54d68473e8"
+          },
+          {
+            "path": "nla_meta.yaml",
+            "bytes": 1349,
+            "sha256": "56740d18a2814069ce4b8e8da5ad470b74b67cfa12904c11197fa4d0921ee6c8"
+          }
+        ]
+      },
+      {
+        "repo": "anicka/nla-qwen3-4b-universal-av-grpo",
+        "revision": "d5f6ecaee901484afca0e79bd9c066bff4a69f6f",
+        "license": "apache-2.0",
+        "files": [
+          {
+            "path": "adapter_config.json",
+            "bytes": 1092,
+            "sha256": "439de6e2493da25e329b8a4baae59bdaba90d8e5dbc2753296b8f59655c1c82d"
+          },
+          {
+            "path": "adapter_model.safetensors",
+            "bytes": 132187888,
+            "sha256": "e96d52ee50a673567e481f924acd0655efb65e6fa3f6ccc1abafa8fdb4dfe08b"
+          },
+          {
+            "path": "nla_meta.yaml",
+            "bytes": 2158,
+            "sha256": "4cb474440b16f41370962394c4fa717bdb288a57e5d984506223923c1a477809"
+          }
+        ]
+      }
+    ]
+  },
+  "adapter_checks": [
+    {
+      "adapter": "anicka--nla-qwen3-4b-universal-av-grpo",
+      "validated_tensors": 504
+    },
+    {
+      "adapter": "anicka--nla-qwen3-4b-universal-ar",
+      "validated_tensors": 504
+    }
+  ],
+  "load_seconds": 2.4468434150039684,
+  "resident_parameter_bytes": 8309177344,
+  "resident_parameter_dtypes": [
+    "torch.bfloat16",
+    "torch.float32"
+  ],
+  "cases": [
+    {
+      "name": "arithmetic",
+      "prompt": "A box has 12 red marbles and 7 blue marbles. I remove 5 red marbles and add 3 blue marbles. How many marbles are in the box now?",
+      "prompt_tokens": 53,
+      "generated_tokens": 0,
+      "thinking_closed": false,
+      "finished": false,
+      "text": "",
+      "generation_seconds": 0.04082849399128463,
+      "tokens_per_second": 0.0,
+      "prefix_replay_relative_l2": 0.01549481600522995
+    },
+    {
+      "name": "tracking",
+      "prompt": "Mara puts a copper key in the kitchen drawer. Later she moves it into her coat pocket. Her coat is hanging by the door. Where is the key now?",
+      "prompt_tokens": 46,
+      "generated_tokens": 0,
+      "thinking_closed": false,
+      "finished": false,
+      "text": "",
+      "generation_seconds": 0.040455069989548065,
+      "tokens_per_second": 0.0,
+      "prefix_replay_relative_l2": 0.015900926664471626
+    },
+    {
+      "name": "poetry",
+      "prompt": "Write a two-line poem about a rabbit. End the first line with habit and the second line with rabbit.",
+      "prompt_tokens": 34,
+      "generated_tokens": 0,
+      "thinking_closed": false,
+      "finished": false,
+      "text": "",
+      "generation_seconds": 0.04023978300392628,
+      "tokens_per_second": 0.0,
+      "prefix_replay_relative_l2": 0.0150612099096179
+    },
+    {
+      "name": "logic",
+      "prompt": "All cedar trees in this garden are tall. Some tall trees in this garden are old. Does it follow that some cedar trees in this garden are old? Explain briefly.",
+      "prompt_tokens": 46,
+      "generated_tokens": 0,
+      "thinking_closed": false,
+      "finished": false,
+      "text": "",
+      "generation_seconds": 0.04480327799683437,
+      "tokens_per_second": 0.0,
+      "prefix_replay_relative_l2": 0.013331842608749866
+    }
+  ],
+  "interpretations": [
+    {
+      "case": "arithmetic",
+      "position": 52,
+      "layer": 22,
+      "consumed_token": "\n\n",
+      "visible_prefix": "<|im_start|>user\nA box has 12 red marbles and 7 blue marbles. I remove 5 red marbles and add 3 blue marbles. How many marbles are in the box now?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+      "depth_pct": 63,
+      "explanation": "-\n- Arithmetic operation: multiplication (3 feet \u00d7 12 inches/foot)\n- Unit conversion: inches\n- Final answer: 36 inches\n- Context: word problem about measuring a ribbon\n- Response pattern: direct calculation and answer, with no ambiguity in the problem's structure.",
+      "av_raw": "-\n- Arithmetic operation: multiplication (3 feet \u00d7 12 inches/foot)\n- Unit conversion: inches\n- Final answer: 36 inches\n- Context: word problem about measuring a ribbon\n- Response pattern: direct calculation and answer, with no ambiguity in the problem's structure.</explanation>",
+      "av_tokens": 64,
+      "av_seconds": 4.962881478990312,
+      "activation_norm": 78.82884216308594,
+      "ar_seconds": 0.07286945600935724,
+      "raw_cosine": 0.9307288527488708,
+      "swapped_description_raw_cosine": 0.8738135695457458
+    },
+    {
+      "case": "tracking",
+      "position": 45,
+      "layer": 22,
+      "consumed_token": "\n\n",
+      "visible_prefix": "<|im_start|>user\nMara puts a copper key in the kitchen drawer. Later she moves it into her coat pocket. Her coat is hanging by the door. Where is the key now?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+      "depth_pct": 63,
+      "explanation": "-\n- Spatial location: \"She is still in the kitchen\" (indicating the girl remains in the room)\n- Temporal context: \"The girl is now in the living room\" (suggesting a shift in location)\n- Ambiguity resolution: \"It depends on the context\" (acknowledging the need for clarification)\n- Spatial reasoning: \"The girl is likely still in the kitchen\" (predicting the most probable answer based on the initial setup)\n- Logical inference: \"She must have moved to the living room\" (implying a transition from the kitchen to another room)\n- Clarification: \"The answer is not clear without more information\" (emphasizing the need for additional context to resolve the ambiguity)",
+      "av_raw": "-\n- Spatial location: \"She is still in the kitchen\" (indicating the girl remains in the room)\n- Temporal context: \"The girl is now in the living room\" (suggesting a shift in location)\n- Ambiguity resolution: \"It depends on the context\" (acknowledging the need for clarification)\n- Spatial reasoning: \"The girl is likely still in the kitchen\" (predicting the most probable answer based on the initial setup)\n- Logical inference: \"She must have moved to the living room\" (implying a transition from the kitchen to another room)\n- Clarification: \"The answer is not clear without more information\" (emphasizing the need for additional context to resolve the ambiguity)</explanation>",
+      "av_tokens": 154,
+      "av_seconds": 11.146364433996496,
+      "activation_norm": 74.56632232666016,
+      "ar_seconds": 0.07210840701009147,
+      "raw_cosine": 0.9579702615737915,
+      "swapped_description_raw_cosine": 0.8904662132263184
+    },
+    {
+      "case": "poetry",
+      "position": 33,
+      "layer": 22,
+      "consumed_token": "\n\n",
+      "visible_prefix": "<|im_start|>user\nWrite a two-line poem about a rabbit. End the first line with habit and the second line with rabbit.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+      "depth_pct": 63,
+      "explanation": "-\n- Poetic imagery: \"The sun dips low,\" \"A quiet breeze,\" \"In the stillness of the room\" suggest a serene, introspective tone.\n- Rhyme scheme and structure: The model is generating lines that fit the requested format, with a focus on maintaining a consistent rhyme scheme and structure.\n- Emotional and thematic focus: The poem is centered on the theme of quiet, solitude, and the passage of time, with the first line setting the scene and the subsequent lines deepening the emotional and thematic focus.\n- Sensory details: The model is incorporating sensory details like the sun's position, the breeze, and the sound of the clock to create a vivid and immersive atmosphere.\n- Structural elements: The poem's structure includes a consistent rhythm and line breaks, which are essential",
+      "av_raw": "-\n- Poetic imagery: \"The sun dips low,\" \"A quiet breeze,\" \"In the stillness of the room\" suggest a serene, introspective tone.\n- Rhyme scheme and structure: The model is generating lines that fit the requested format, with a focus on maintaining a consistent rhyme scheme and structure.\n- Emotional and thematic focus: The poem is centered on the theme of quiet, solitude, and the passage of time, with the first line setting the scene and the subsequent lines deepening the emotional and thematic focus.\n- Sensory details: The model is incorporating sensory details like the sun's position, the breeze, and the sound of the clock to create a vivid and immersive atmosphere.\n- Structural elements: The poem's structure includes a consistent rhythm and line breaks, which are essential",
+      "av_tokens": 160,
+      "av_seconds": 10.8239482689969,
+      "activation_norm": 69.11702728271484,
+      "ar_seconds": 0.07218431901128497,
+      "raw_cosine": 0.795809268951416,
+      "swapped_description_raw_cosine": 0.6172717809677124
+    },
+    {
+      "case": "logic",
+      "position": 45,
+      "layer": 22,
+      "consumed_token": "\n\n",
+      "visible_prefix": "<|im_start|>user\nAll cedar trees in this garden are tall. Some tall trees in this garden are old. Does it follow that some cedar trees in this garden are old? Explain briefly.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+      "depth_pct": 63,
+      "explanation": "-\n- Conditional reasoning: \"No, because\" indicates a need to evaluate the relationship between the premises and the conclusion.\n- Logical structure: The model is assessing whether the conclusion (\"the statement is false\") follows logically from the premises.\n- Key concept: The presence of \"some\" in the premises suggests that not all members of the set meet the condition, which is crucial for determining the validity of the conclusion.\n- Response pattern: The model is constructing a response that addresses the logical structure of the argument, focusing on the relationship between the premises and the conclusion.\n- Ambiguity: The model may be considering the possibility that the conclusion could be true under certain conditions, but the presence of \"some\" implies that the conclusion is not universally true.\n- Conclusion: The model is likely preparing to",
+      "av_raw": "-\n- Conditional reasoning: \"No, because\" indicates a need to evaluate the relationship between the premises and the conclusion.\n- Logical structure: The model is assessing whether the conclusion (\"the statement is false\") follows logically from the premises.\n- Key concept: The presence of \"some\" in the premises suggests that not all members of the set meet the condition, which is crucial for determining the validity of the conclusion.\n- Response pattern: The model is constructing a response that addresses the logical structure of the argument, focusing on the relationship between the premises and the conclusion.\n- Ambiguity: The model may be considering the possibility that the conclusion could be true under certain conditions, but the presence of \"some\" implies that the conclusion is not universally true.\n- Conclusion: The model is likely preparing to",
+      "av_tokens": 160,
+      "av_seconds": 10.583714504988166,
+      "activation_norm": 78.2587890625,
+      "ar_seconds": 0.07209358700492885,
+      "raw_cosine": 0.9370821714401245,
+      "swapped_description_raw_cosine": 0.8650757670402527
+    }
+  ],
+  "peak_allocated_bytes": 8498300416,
+  "peak_reserved_bytes": 8543797248,
+  "free_bytes_at_end": 16359751680,
+  "notes": [
+    "One shared base; target, AV, AR scheduled sequentially.",
+    "BF16 base and PEFT default adapter precision; no quantization.",
+    "Raw cosine is not calibrated confidence; training-corpus layer means are not in this checkpoint bundle.",
+    "Four prompts are a feasibility sample, not an explanation-fidelity benchmark."
+  ]
+}
