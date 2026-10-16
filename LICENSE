@@ -1,0 +1,12 @@
+Dolittle is distributed under a split license.
+
+Source code and configuration, including C++, CUDA kernels, application and
+website code, stylesheets, build scripts, tests, and configuration files, are
+licensed under the Apache License, Version 2.0. See LICENSE-CODE.
+
+Documentation, prose, and original visual assets are licensed under the
+Creative Commons Attribution 4.0 International license. See LICENSE-CONTENT.
+
+Each work is governed by the applicable scope above; the two licenses are not
+cumulative requirements on every file. Third-party components and model
+weights retain their own licenses. Attribution is recorded in NOTICE.
