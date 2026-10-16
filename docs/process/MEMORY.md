@@ -9,7 +9,7 @@
 - **Remote:** `origin` is https://github.com/plainsight-systems/dolittle.git.
   The site’s Code link points to this repository. Andrew authorized the first
   push and Pages deployment on 2026-10-16.
-- **Production site:** https://dolittle.plainsight-systems.com/ (configured, not deployed).
+- **Production site:** https://dolittle.plainsight-systems.com/ (deployed; HTTPS certificate pending at first verification).
 
 ## Decisions made 2026-10-16
 
@@ -122,8 +122,11 @@ opening articles, RSS, and 404. Its architecture and publication rules are in
 real subpath build, draft/future exclusion, milestone rendering, and rejection
 of broken assets/anchors, stale share metadata, missing share images, or
 unintended documents. The GitHub Pages workflow now validates PRs and deploys
-main with a pinned Hugo installer. First push/deployment is authorized; its
-result will be recorded after the workflow completes.
+main with a pinned Hugo installer. The first push (`47f560a`) and deployment succeeded on 2026-10-16:
+https://github.com/plainsight-systems/dolittle/actions/runs/38967736528.
+The custom domain returned HTTP 200 with the correct GitHub menu link and
+production share metadata. HTTPS certificate provisioning was still pending;
+the default github.io project URL redirects to the custom domain.
 
 See [QUEUE.md](QUEUE.md). Architecture starts at
 [`../architecture/README.md`](../architecture/README.md). Investigations are

@@ -2,12 +2,9 @@
 
 ## Active
 
-- Review the local explanatory project site. Home, Writing, About, two opening
-  articles, and RSS are implemented. Preview with `python3 scripts/site.py serve`.
-  Production URL is `https://dolittle.plainsight-systems.com/`; deployment is
-  being deployed through the new Pages workflow. GitHub `origin` and the site’s Code link point to
-  `plainsight-systems/dolittle`.
-  Andrew authorized the first push and deployment on 2026-10-16.
+- The project site is deployed at `dolittle.plainsight-systems.com`. The first
+  build and deployment passed; HTTP content, Code link, and share metadata are
+  verified. Check certificate provisioning before enabling enforced HTTPS.
   Engine architecture follows this site work; preserve the selected 8B pair
   and block 24 reference contract.
 
@@ -36,6 +33,12 @@
 - Training an NLA, unless the selected model pairing requires it.
 
 ## Accepted
+
+- **First publication, 2026-10-16:** pushed main and deployed the project site
+  through GitHub Pages. Five local and CI publication tests passed, as did the
+  production build and deploy job. Custom-domain HTTP is live; HTTPS certificate
+  provisioning remained pending at verification. The private brief/cache were
+  excluded. Workflow: https://github.com/plainsight-systems/dolittle/actions/runs/38967736528.
 
 - **Project site, 2026-10-16:** Andrew requested the site before engine
   architecture, closer to Cradle's explanatory writing than a milestone-led
