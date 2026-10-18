@@ -45,6 +45,67 @@ layout are implementation choices that must preserve these operations.
 
 ## Full model flow
 
+### Checkpoint loading and binding
+
+The setup path supplies an explicit artifact list with pinned sizes and hashes.
+The format reader verifies those files, checks named tensor layouts and extents,
+and owns immutable backing storage. Model configuration and shard-index bytes
+belong to the same verified source identity. Acquisition remains separate from
+loading; the reader does not discover extra weights or download replacements.
+
+The selected model binder interprets configuration, maps tensor names to its
+parameter slots, and validates every required shape and dtype. Missing or
+unsupported parameters fail before device execution. The bound checkpoint owns
+the archive and model description. Device residency belongs to a forward plan:
+upload required weights once through bounded staging, and reuse them for that
+plan's serial executions. Loading identity includes artifact hashes and the
+model's binding convention. Keeping files unchanged while mapped is a caller
+precondition; this design does not support concurrent mutation of weight files.
+
+### Preparing the first execution recipe
+
+The model emits a finite, ordered recipe of the supported operations with typed
+tensor slots. Parameters and token IDs are external inputs; each intermediate
+has one producer. Observation sites identify the tensor value at a semantic
+boundary. The executor validates dependencies, resolves requested observations,
+selects operation implementations and assigns storage. It does not reconstruct
+Qwen3 equations from a model name. This is a linear schedule, with no graph
+rewriting, autodifferentiation or arbitrary executable callbacks.
+
+Operation preparation declares supported layouts/numerical modes, workspace
+bytes and alignment before device allocation. The initial plan uses one ordered
+queue and reuses scratch only after its last reader, including requested capture
+copies. GPU copies at observation boundaries preserve values without a host
+wait at each block. A completion point after final readback establishes host
+readiness. Explicit waits report device failures; cleanup must not recycle
+storage while work is pending. A later backend can change allocation and launch
+mechanisms while consuming the same mathematical recipe.
+
+### Model computation
+
+The first slice separates pure preparation from execution. In-memory container
+header parsing, Qwen3 configuration parsing, operation/recipe validation,
+observation resolution and scratch placement do not open files or touch a GPU.
+Unit tests can exercise their contracts directly. File verification, residency,
+queue submission and full forward comparison belong to integration testing.
+Pure numerical comparison accepts ordinary arrays and does not launch a model.
+
+Scratch placement consumes checked resource lifetimes in the ordered schedule,
+including capture-copy reads. A producer and its readers occupy inclusive step
+intervals: two intervals sharing an endpoint cannot alias. Placement reports
+aligned extents and arena size; exact offsets are an implementation choice.
+Weights and retained outputs remain separate from reusable scratch. Admission
+adds those allocations, maximum operation workspace and staging explicitly.
+
+BF16 is a stored-bit format. Host conversion widens exactly to FP32 and narrows
+with round-to-nearest, ties-to-even; raw capture copies perform no conversion.
+Each CUDA operation states its FP32 intermediates and BF16 rounding boundaries.
+These must be checked against the reference rather than assuming that equal
+algebra implies equal reduced-precision execution. Initial projection uses
+FP32 accumulation without silently enabling TF32. Initial attention streams
+causal K/V tiles with an online softmax state and no full score matrix. Kernel
+tile choices are private tuning choices, not contracts asserted by unit tests.
+
 ```mermaid
 flowchart TD
     A[Token IDs] --> B[Embedding lookup]
@@ -166,6 +227,48 @@ one full forward pass without a persistent decoding cache. Validate its
 tokenizer/template suffix before execution.
 
 ## State and observation boundaries
+
+### Configurable observation points
+
+The model implementation advertises supported observation sites with semantic
+boundary, zero-based block index, vector width and numerical representation.
+The first Qwen3 observation kinds are block input and block output. Block
+output means the residual after that block's second residual addition.
+Other intermediates require an explicitly advertised site before use.
+
+The caller selects sites and token positions while preparing a forward run.
+The executor validates them against the model's catalog, resolves positions,
+computes checked output sizes, and plans copies before execution begins.
+Changing the selected block does not require recompiling the engine. Requests
+are fixed during that execution; this is not a callback interface that can
+modify activations or invoke arbitrary user code inside a kernel.
+
+The numerical harness may observe any advertised site. The selected NLA pair
+independently requires block-24 output and validates that requirement against
+the model catalog. Ability to capture another block does not establish NLA
+support for interpreting it. No shared executor or observation contract uses
+24 as a default, limit or special case.
+
+Each result identifies its semantic site, consumed token positions, shape,
+dtype and model execution identity. Retain original activation bits; any FP32
+conversion for comparison or NLA normalization is a separate operation.
+An empty request list creates no capture buffers or readbacks. Requested
+copies complete before source reuse, and returned host bytes become readable
+only after their completion. Compatible fusion must preserve requested sites.
+
+### First forward pass
+
+The first numerical slice evaluates a complete, unpadded multi-token sequence
+with causal attention and no persistent KV cache. K and V are still computed
+and used within the pass. Exact fixture token IDs isolate forward computation
+from tokenizer verification. Return selected logits and requested observations;
+do not sample a continuation or load the NLA during this check.
+
+Verify block-input/output identity, alternate capture blocks, capture-on/off
+outputs, prefix causality, and result lifetime independently of block 24.
+Then cached generation can be compared against this full-sequence baseline.
+
+### Storage lifetimes
 
 | State | Lifetime and rule |
 | --- | --- |

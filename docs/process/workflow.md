@@ -103,6 +103,45 @@ from the design, clarify that design before implementation.
 
 ## Verification
 
+### Test scope and stability
+
+Unit tests exercise one isolated unit of code directly, in process. They run
+the code under test, but do not launch builds, subprocesses, servers, containers,
+browsers, GPU workloads or complete application flows. They do not depend on
+live services, model downloads or external filesystem state. Use small in-memory
+inputs for parsing, validation and numerical helpers. Testing real file loading,
+device execution or cooperating components belongs to integration testing.
+
+Test stable contracts and invariants: valid results, rejected invalid inputs,
+bounds, ownership and state transitions. Exact expected values are appropriate
+when the contract specifies them, such as a mathematical result or serialization
+format. Do not assert private helper calls, incidental operation counts, source
+text, internal layouts or exact diagnostic wording unless those are explicitly
+part of the supported contract. Prefer observable behavior over mock call scripts
+that reproduce the implementation.
+
+A behavior-preserving refactor or an unrelated feature should not require
+rewriting unit assertions. Repeated churn is a signal to narrow the test to its
+actual contract. An intentional public-contract change can legitimately require
+test changes; do not preserve obsolete behavior just to keep tests unchanged.
+
+Integration tests are capped at **five across the repository**, not five per
+feature, directory or backend. Each must cover a distinct, essential interaction.
+Keep boundary cases in unit tests where possible. Before adding an integration
+test at the cap, replace or remove an existing scenario; do not bundle unrelated
+flows into one enormous test, hide independent workflows in parameterization,
+or rename integration tests as smoke checks or validation to bypass the limit.
+Build-only compilation checks and measurements are distinct activities, but
+renaming a correctness workflow does not change its integration-test scope.
+
+The existing five site publication tests are integration tests because their
+setup builds a real site, even though their runner is Python's `unittest`.
+They currently occupy the full integration budget. Rebalance that coverage
+before adding engine integration scenarios; isolate publication validation
+units where practical while retaining essential publication-flow coverage.
+
+### Numerical and device verification
+
 Verify GPU computation on the 3090 against appropriate independent reference
 results. Define numerical comparisons for logits, captured activations,
 injected inputs, and reconstructed vectors as those paths are designed.

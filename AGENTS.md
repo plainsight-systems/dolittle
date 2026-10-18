@@ -33,3 +33,9 @@ source. `CLAUDE.md` points to the same entry path.
 - Keep `app/` (the inference interface) separate from `web/` (the project site).
 - Report checks actually performed. A build is not evidence of GPU correctness
   or runtime performance.
+- Unit tests exercise isolated code contracts and invariants in process. They
+  must not launch builds, subprocesses, servers, GPU workloads or application
+  flows. Avoid assertions about private implementation or incidental structure.
+- Keep integration tests to a small handful: at most five across the repository.
+  Do not evade the limit by hiding separate workflows in one test or relabeling
+  them. Follow the test rules in `docs/process/workflow.md`.

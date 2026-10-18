@@ -46,6 +46,13 @@ The selected pair is Qwen3-8B with the community
 `marco-bazzani/Qwen3-8B-nla` release. Its initial capture location is the output
 of zero-based target block 24, after both residual additions.
 
+That location is a requirement supplied by the NLA pair to the model's
+configurable observation interface. The executor validates the requested site
+against the model catalog and prepares capture storage before generation.
+Block 24 is not embedded in the shared inference algorithm. The reference
+harness may request other advertised sites for numerical checks without
+claiming that this pair can interpret them.
+
 Format the prompt using the target's tokenizer and chat template. Retain the
 actual token sequence, including control tokens, the thinking-mode setting,
 sampling settings, seed, and termination limits. Thinking mode changes the

@@ -7,6 +7,15 @@
   as the baseline for file-header design. Preserve explicit implementation
   families and keep the selected model as their first concrete implementation.
 
+- Andrew accepted both groups of interface designs on 2026-10-18, including
+  model/loading/device/operation boundaries. The requested remaining first-slice
+  pass now adds BF16 conversion, scratch placement, pure parsing/validation and
+  numerical comparison boundaries, plus 21 implementation-file opening designs
+  (15 C++, six CUDA). All 18 headers pass standalone repeated-inclusion and two
+  combined include-order checks under C++20. Both corpora were queried and cited.
+  Source files contain design comments/includes only. Runtime implementation,
+  fixtures and GPU numerical verification remain pending.
+
 - The project site is deployed at `dolittle.plainsight-systems.com`. The first
   build and deployment passed; HTTP content, Code link, and share metadata are
   verified. Check certificate provisioning before enabling enforced HTTPS.
@@ -15,13 +24,21 @@
 
 ## Next
 
-1. Design file headers for the first implementation slice using the accepted
-   mapping. Query both local C++ corpus MCP servers during header design and
+1. Implement from the reviewed first-slice designs after the build/reference
+   prerequisites below. Query both corpora
+   again for implementation; keep local file designs current. Apply the
+   contract-focused unit-test rules and
+   repository-wide cap of five integration tests. The five existing publication
+   integration tests fill that budget; rebalance before adding engine scenarios.
+   The slice is a complete forward pass with current-pass K/V and no persistent
+   cache. Query both local C++ corpus MCP servers during header design and
    again during implementation. Headers must state contracts, describe their
    algorithm steps, and cite the retrieved rules and their application.
-2. Define numerical checks for the direct implementation and capture alignment.
-   Preserve reference outputs; distinguish transcript claims from activation
-   hypotheses and do not present raw reconstruction cosine as confidence.
+2. Produce independently pinned forward fixtures and justify numerical bounds
+   before accepting implementation results. Cover operation equations, model
+   binding, capture alignment, multiple observation blocks, capture-on/off and
+   prefix causality. Preserve reference outputs; distinguish transcript claims
+   from activation hypotheses and do not present cosine as confidence.
 3. Prepare host NVIDIA Container Toolkit access, then select and pin the
    Docker/CUDA/CMake toolchain and implement source-build/GPU checks.
 4. Implement the target-model and NLA paths and the synchronized browser
@@ -39,6 +56,18 @@
 - Training an NLA, unless the selected model pairing requires it.
 
 ## Accepted
+
+- **First-slice design checkpoint, 2026-10-18:** Andrew approved a commit point.
+  File-layout audit accounts for all 39 design files in the documented tree;
+  the forward-reference pair is now explicitly named. Include/dependency checks
+  and documentation/whitespace checks passed. The earlier 18-header C++20 checks
+  remain valid; no C++ declarations changed during this audit. This is a local
+  design commit, with no runtime or GPU validation and no push requested.
+
+- **Header designs and test policy, 2026-10-18:** both first-slice header groups
+  accepted. Unit tests exercise isolated contracts/invariants without launching
+  systems and must survive behavior-preserving refactors. Integration tests
+  remain a small handful, documented as a maximum of five repository-wide.
 
 - **File mapping and revised axes, 2026-10-17:** Andrew accepted the revised
   layout with explicit model, tokenizer, tensor-format/representation, cache,

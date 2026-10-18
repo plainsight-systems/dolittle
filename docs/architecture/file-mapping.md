@@ -14,9 +14,11 @@ they work already.
 
 ## Planned layout
 
-All engine/application files below are planned. Existing site, documentation,
-and reference files remain in place. `{h,cpp}` means a header/implementation
-pair; a contract-only header does not require an empty implementation file.
+The tree covers the full planned engine/application layout. The first-slice
+design files now exist; later-slice files remain planned. Existing site,
+documentation and reference files remain in place. `{h,cpp}` means a
+header/implementation pair; a contract-only header does not require an empty
+implementation file.
 
 ```text
 dolittle/
@@ -35,16 +37,17 @@ dolittle/
 │   ├── main.cpp                     # Composition of selected implementations
 │   ├── measurement.{h,cpp}
 │   ├── tensors/
-│   │   ├── tensor.h                 # Shape, strides, extent and borrowed views
+│   │   ├── tensor.{h,cpp}           # Shape, strides, extent and borrowed views
 │   │   ├── formats/
-│   │   │   ├── format.h             # Named tensor payload contract
+│   │   │   ├── format.{h,cpp}       # Named tensor payload/lifetime contract
 │   │   │   └── safetensors.{h,cpp}   # Initial serialized format
 │   │   └── representations/
 │   │       ├── representation.h     # Encoding and computation-mode declarations
-│   │       └── bf16.h               # Initial storage representation
+│   │       └── bf16.{h,cpp}         # Initial storage representation and conversion
 │   ├── models/
-│   │   ├── model.h                  # Architecture/forward-description contract
-│   │   ├── checkpoint.h             # Validated parameter-binding contract
+│   │   ├── model.{h,cpp}            # Forward-description contract and pure validation
+│   │   ├── observation.h            # Semantic sites advertised by a model
+│   │   ├── checkpoint.{h,cpp}       # Validated parameter-binding/lifetime contract
 │   │   └── qwen3/
 │   │       ├── model.{h,cpp}        # Qwen3 mathematics and observation points
 │   │       └── checkpoint.{h,cpp}   # Qwen3 tensor names, shapes and config binding
@@ -57,6 +60,8 @@ dolittle/
 │   ├── inference/
 │   │   ├── generation.{h,cpp}       # One sequence's progression and termination
 │   │   ├── executor.{h,cpp}         # Forward execution and resource planning
+│   │   ├── observations.{h,cpp}     # Resolve requests, sizes and immutable capture views
+│   │   ├── storage_plan.{h,cpp}     # Pure scratch lifetime/alignment placement
 │   │   ├── sampling/
 │   │   │   ├── sampler.h            # Token selection and independent RNG contract
 │   │   │   └── categorical.{h,cpp}  # Initial filtering/draw mechanism; greedy mode
@@ -76,9 +81,9 @@ dolittle/
 │   ├── gpu/
 │   │   ├── device.h                 # Device resources and completion contract
 │   │   └── cuda/
-│   │       └── device.cpp           # Initial device backend
+│   │       └── device.{h,cpp}       # CUDA composition entry and device backend
 │   ├── kernels/
-│   │   ├── operations.h             # Operation/capability contracts
+│   │   ├── operations.{h,cpp}       # Pure validation and operation preparation
 │   │   └── cuda/
 │   │       ├── projection.cu
 │   │       ├── normalization.cu
@@ -97,8 +102,11 @@ dolittle/
 ├── tests/
 │   ├── core/                        # Format/model/tokenizer/cache/sampling/state checks
 │   ├── gpu/                         # Numerical checks through production paths
+│   │   └── forward_reference.{h,cpp} # Completed-result comparison contract
 │   ├── app/
 │   ├── fixtures/
+│   ├── support/
+│   │   └── numerical.{h,cpp}        # Pure array error metrics; launches nothing
 │   └── test_site.py                 # Existing
 ├── web/                             # Existing public explanatory site
 └── docs/                            # Existing documentation and writing
@@ -222,17 +230,17 @@ files. Qwen3 checkpoint naming and Qwen3 mathematics are an example.
 | M3 Checkpoint interpretation | `src/models/checkpoint.h` | `src/models/qwen3/checkpoint.*` |
 | M4 Token encoding | `src/tokenizers/tokenizer.h` | `src/tokenizers/byte_bpe.*` |
 | M5 Text protocol | `src/text/protocol.h` | `src/text/qwen3_chat.*` |
-| M6 Transformer mathematics | `src/models/model.h` | `src/models/qwen3/model.*` |
+| M6 Transformer mathematics | `src/models/model.h`, `src/models/observation.h` | `src/models/qwen3/model.*` |
 | M7 NLA conversion | `src/nla/protocol.h` | `src/nla/pairs/qwen3_8b.*` |
 | R1 Sampling | `src/inference/sampling/sampler.h` | `src/inference/sampling/categorical.*` |
 | R2 Sequence progression | `src/inference/generation.*` | One sequence loop using selected contracts |
 | R3 Experiment scheduling | `src/experiment/run.*` | One-run sequential-residency policy |
 | R4 Observation records | `src/experiment/record.*` | Owned observations and variants |
 | R5 Reconstruction diagnostics | `src/nla/metrics/metric.h` | `src/nla/metrics/cosine.*` |
-| X1 Execution planning | `src/inference/executor.*` | Supported forward strategies and capability selection |
+| X1 Execution planning | `src/inference/executor.*` | `src/inference/observations.*`, `src/inference/storage_plan.*`; forward preparation and capability selection |
 | X2 KV storage | `src/inference/cache/cache.h` | `src/inference/cache/contiguous.*` |
-| X3 Numerical representation | `src/tensors/tensor.h`, `src/tensors/representations/representation.h` | `src/tensors/representations/bf16.h` |
-| X4 Device runtime | `src/gpu/device.h` | `src/gpu/cuda/device.cpp` |
+| X3 Numerical representation | `src/tensors/tensor.h`, `src/tensors/representations/representation.h` | `src/tensors/representations/bf16.*` |
+| X4 Device runtime | `src/gpu/device.h` | `src/gpu/cuda/device.*` |
 | X5 Operation implementation | `src/kernels/operations.h` | `src/kernels/cuda/*.cu` |
 | A1 Application transport | `src/server/http.*` | `app/client.js` implements the browser side |
 | A2 Interaction behavior | `app/controller.js` | User selection, requests and pending/error states |
@@ -247,6 +255,46 @@ implementations and launch geometry live in backend kernel files. A few small
 related kernels can share a file; this does not allow model formulas or device
 management to accumulate there. Split operation headers when independent
 consumers or size justify it.
+
+The M6 observation vocabulary lives in `models/observation.h`; model kinds
+advertise their supported sites using that vocabulary. X1 request resolution
+and capture views live in `inference/observations.*`. NLA pairing chooses the
+required site through these contracts. Neither the contract nor resolver is
+specific to block 24. First-slice header design starts with these boundaries,
+numerical representation, forward execution and the numerical harness; it does
+not create every file in the planned tree.
+
+The next header-design group adds tensor extents and verified safetensors
+loading, model recipes and checkpoint ownership, Qwen3 mathematics/binding,
+device resources and the operation catalog. The model produces an ordered
+recipe using a bounded set of operations; the executor chooses implementations
+and storage. `gpu/cuda/device.h` is the explicit CUDA factory used at composition.
+These remain declarations/contracts, without kernel bodies or a runtime build.
+
+The final first-slice design pass adds BF16 conversion, pure scratch placement
+and numerical comparison helpers, plus in-memory parsing and validation entry
+points in the existing owners. The `.cpp` and six CUDA `.cu` files now contain
+their opening contract/algorithm/cost/corpus comments and includes only. These
+are file-header designs for this slice, not stub implementations that return
+success, completed kernels or a runnable build.
+
+`storage_plan.*` is an X1 helper, not a new cache strategy or change axis. It
+places resources whose last uses include capture copies. Mathematical operation
+validation stays in `operations.*`; device capabilities remain a preparation
+concern. Safetensors and Qwen3 parsers accept in-memory inputs so unit tests do
+not have to launch a loader. Numerical array comparison is likewise separate
+from the integration harness that obtains completed model outputs.
+
+First-slice header design now covers loading through complete forward-result
+comparison. Tokenizers/text protocols, generation/sampling, persistent cache,
+AV/AR conventions, experiment scheduling, serving and application behavior
+remain subsequent slices. Do not generate those files ahead of their design.
+
+Checkpoint audit, 2026-10-18: all 39 C++/CUDA design files are individually
+represented in this tree (18 headers, 15 C++ sources, six CUDA sources). Include
+paths resolve, and model/format dependencies respect the boundaries below.
+The source files contain opening designs and includes only; this audit does
+not establish linked execution or GPU correctness.
 
 ## Composition and dependency direction
 
@@ -314,6 +362,8 @@ table are relative to `src/`.
 | C17 Text protocol | `text/protocol.h` | Selected formatting and delimiters preserve original token positions; no assumed thinking tags |
 | C18 Tensor format | `tensors/formats/format.h` | Named tensor metadata and readable payloads have validated extents and explicit lifetimes |
 | C19 Representation | `tensors/representations/representation.h` | Storage encoding and computation precision are declared; unsupported modes cannot be substituted silently |
+| C20 Observation site | `models/observation.h` | Semantic boundary and block identify a model-advertised site with explicit width and dtype |
+| C21 Observation plan | `inference/observations.h` | Requested sites/positions are validated and byte extents checked before execution; no arbitrary callbacks or silent dropped captures |
 
 Capture ownership is unchanged by the new layout. The executor arranges a
 copy before scratch is reused; generation associates it with the consumed
