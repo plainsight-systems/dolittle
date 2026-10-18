@@ -101,7 +101,79 @@
 - Source revisions, manifests, full outputs, costs, and caveats live in the
   [feasibility note](../research/2026-10-16-nla-validation/README.md).
 
+## Decisions made 2026-10-17
+
+- Andrew agreed to an experiment overlay that generates and captures first,
+  then interprets selected positions after switching from target to AV.
+  Reconstruction is optional and explicit. Start with one active experiment
+  on one GPU; pause–interpret–resume remains later work.
+- Retain exact tokens and raw block-24 captures. Align each capture with the
+  token consumed, not the token predicted. Make sampled AV variants and
+  neighboring-position comparison available; neither recurrence nor vector
+  reconstruction is semantic confidence.
+- Keep the experiment flow and transformer execution in separate algorithmic
+  overlay documents. The latter covers block mathematics, prefill/decode,
+  the different target/AV/AR paths, and observation boundaries across backends.
+  Derive change axes after reviewing both, then map files. Backend variation
+  must preserve capture semantics while remaining distinct from model changes.
+- The paper comparison supports frozen-target capture, embedding injection,
+  sampled verbalization, and optional AR use. Its causal interventions are
+  beyond the initial scope; the community 8B pair does not inherit the paper's
+  empirical results. Layer 24 is a checkpoint contract, not a universal best
+  layer for interpreting every behavior.
+
+The [experiment overlay](../architecture/logical-overview.md) and
+[transformer overlay](../architecture/transformer-execution.md) were reviewed
+and accepted by Andrew on 2026-10-17. They establish the design baseline for
+change-axis analysis, followed by file mapping. No engine implementation or
+new GPU validation accompanies them.
+
+A [change-axis design](../architecture/change-axes.md) was drafted at Andrew's
+request after overlay acceptance. It separates model/input semantics,
+generation and experiment behavior, execution planning, KV storage, numerical
+representation, device runtime, and operation implementations per backend.
+Application, build/launch, verification and measurement concerns are included.
+Andrew liked the design and authorized file/folder mapping, while expressing
+concern that overly specific axes could produce unnatural groupings. Sampling
+was his example; the subsequent mapping review tested and revised the boundaries.
+
+The revised [file and folder mapping](../architecture/file-mapping.md) and
+corresponding change-axis clarifications were accepted by Andrew on
+2026-10-17. The review corrected two structural issues:
+
+- Keep computation under `kernels/cuda/` and device resources under
+  `gpu/cuda/`, with corresponding Metal locations deferred.
+- The earlier generic tokenizer/checkpoint/cache layout overfit the selected
+  model. Families and their kinds must be visible in the folder structure;
+  supporting only one initially is not a reason to hide the extension points.
+
+The accepted mapping separates `models/qwen3/`, `tokenizers/`, tensor formats and
+representations, `inference/cache/`, `inference/sampling/`, NLA pairs and metric
+implementations. Shared contracts are distinct from named concrete kinds.
+This supersedes the earlier single sampler pair directly under inference and
+generic model/tokenizer/cache implementations. No alternate kinds, source
+stubs or engine code were built. File-header design and numerical verification
+planning are next. Cache and sampling baseline choices still require the
+cost/verification work stated in the mapping; layout acceptance is not a
+runtime or performance result.
+
 ## Current work
+
+Workflow requirement strengthened by Andrew on 2026-10-17: both C++ header
+design and implementation must query the locally running C++ best-practices
+and performance-corpus MCP servers. Opening file comments must include the
+contract and the specific algorithm responsibility/steps, and cite retrieved
+rules with their application. Both corpora are mandatory in both phases;
+implementation consultation is not satisfied by earlier header citations.
+The detailed process and unavailable-server handling are in
+[workflow.md](workflow.md). This documentation update introduces no C++ code.
+
+Andrew authorized committing and pushing this architecture/workflow checkpoint
+on 2026-10-17. Pre-push validation passed: local documentation links and
+structure, axis/contract coverage, derived storage calculations, whitespace,
+and all five site publication tests. The private brief and research cache
+remain ignored. These are documentation/publication checks, not engine or GPU
+validation.
 
 The requested [4B/8B comparison](../research/2026-10-16-nla-comparison/README.md)
 is complete. Qwen3 8B plus `marco-bazzani/Qwen3-8B-nla` runs sequentially in

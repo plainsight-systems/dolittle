@@ -12,6 +12,12 @@ source. `CLAUDE.md` points to the same entry path.
 - Do not import governance documents or add a governance submodule or symlinks.
 - Design the architecture before the engine: logical overview, change axes,
   then file mapping. Design each implementation change in its file headers.
+- Both C++ header design and implementation must query the local
+  `cpp-guidelines` and `cpp-perf-guidelines` MCP servers. Opening file comments
+  must cite the retrieved rules and explain their application, state the
+  file's contract, and describe its part of the algorithmic overlay. Follow
+  the detailed consultation and unavailable-server rules in
+  `docs/process/workflow.md`.
 - Treat inference, loading, memory residency, activation capture, and GPU
   dispatch as performance-sensitive.
 - Implement the core computation directly. Reference implementations may

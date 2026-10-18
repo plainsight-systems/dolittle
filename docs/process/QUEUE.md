@@ -2,6 +2,11 @@
 
 ## Active
 
+- Architecture review is complete: use the accepted
+  [file and folder mapping](../architecture/file-mapping.md) and change axes
+  as the baseline for file-header design. Preserve explicit implementation
+  families and keep the selected model as their first concrete implementation.
+
 - The project site is deployed at `dolittle.plainsight-systems.com`. The first
   build and deployment passed; HTTP content, Code link, and share metadata are
   verified. Check certificate provisioning before enabling enforced HTTPS.
@@ -10,9 +15,10 @@
 
 ## Next
 
-1. Write the logical overview, change axes, and file mapping around the pinned
-   8B reference contract and measured resource requirements. Include weight
-   loading, cache ownership, capture alignment, and explanation scheduling.
+1. Design file headers for the first implementation slice using the accepted
+   mapping. Query both local C++ corpus MCP servers during header design and
+   again during implementation. Headers must state contracts, describe their
+   algorithm steps, and cite the retrieved rules and their application.
 2. Define numerical checks for the direct implementation and capture alignment.
    Preserve reference outputs; distinguish transcript claims from activation
    hypotheses and do not present raw reconstruction cosine as confidence.
@@ -33,6 +39,20 @@
 - Training an NLA, unless the selected model pairing requires it.
 
 ## Accepted
+
+- **File mapping and revised axes, 2026-10-17:** Andrew accepted the revised
+  layout with explicit model, tokenizer, tensor-format/representation, cache,
+  sampling, NLA-pair, metric and backend families. Only initial kinds are to be
+  implemented. File-header design follows; no source scaffolding was created.
+
+- **Change-axis direction, 2026-10-17:** Andrew liked the axes and authorized
+  file/folder mapping. Granularity remains subject to evaluation against the
+  actual layout; an axis does not mandate a directory or a class hierarchy.
+
+- **Algorithmic overlays, 2026-10-17:** Andrew reviewed and accepted the
+  separate NLA experiment and transformer execution documents. They establish
+  the computation, capture semantics, state lifetimes, and backend variation
+  for the next change-axis design step. Engine implementation remains pending.
 
 - **First publication, 2026-10-16:** pushed main and deployed the project site
   through GitHub Pages. Five local and CI publication tests passed, as did the
