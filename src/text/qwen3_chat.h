@@ -33,6 +33,10 @@
  * Inputs are borrowed only during construction/calls; the protocol owns parsed
  * metadata. Errors and lifetimes follow protocol.h; limits include formatted
  * bytes and prevent size overflow before concatenation.
+ * Static-analysis design/implementation, 2026-10-19: named source records
+ * distinguish metadata roles without copying bytes. Core I.1 (#ri-explicit);
+ * performance CDSA.32 (source cited below): parse borrowed bytes once into owned
+ * lookup tables; no view is retained.
  * Reference: Qwen/Qwen3-8B at b968826d9c46dd6066d109eabc6255188de91218;
  * artifact hashes are in scripts/validation/models-8b.json.
  * Overlay: docs/architecture/logical-overview.md, "1 Establish the run".
@@ -48,8 +52,12 @@
 #include <memory>
 
 namespace dolittle::text {
-[[nodiscard]] std::unique_ptr<Protocol> make_qwen3_chat(std::string_view tokenizer_config_json,
-                                                        std::string_view generation_config_json,
-                                                        std::string_view verified_source_identity,
+// Named borrowed inputs are valid only for the duration of the factory call.
+struct Qwen3ChatSources {
+    std::string_view tokenizer_config_json;
+    std::string_view generation_config_json;
+    std::string_view verified_source_identity;
+};
+[[nodiscard]] std::unique_ptr<Protocol> make_qwen3_chat(Qwen3ChatSources sources,
                                                         std::size_t max_formatted_bytes);
 } // namespace dolittle::text

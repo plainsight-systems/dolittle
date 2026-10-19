@@ -11,6 +11,7 @@ import argparse
 import os
 from pathlib import Path
 import subprocess
+import tidy
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = "dolittle-build:cuda13.2"
@@ -20,7 +21,7 @@ def command(args, **kwargs):
     subprocess.run([str(arg) for arg in args], cwd=ROOT, check=True, **kwargs)
 
 
-def container_command(args, gpu=False, fixtures=None, force_ptx=False):
+def container_command(args, gpu=False, fixtures=None, force_ptx=False, image=IMAGE):
     result = ["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
               "--volume", f"{ROOT}:{ROOT}", "--workdir", ROOT]
     if gpu:
@@ -29,12 +30,13 @@ def container_command(args, gpu=False, fixtures=None, force_ptx=False):
         result += ["--volume", f"{fixtures}:{fixtures}:ro"]
     if force_ptx:
         result += ["--env", "CUDA_FORCE_PTX_JIT=1"]
-    return result + [IMAGE] + list(args)
+    return result + [image] + list(args)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
+    tidy.add_arguments(sub.add_parser("tidy", help="run pinned clang-tidy static analysis; findings are errors"))
     host = sub.add_parser("host", help="build and run isolated C++ units")
     host.add_argument("--build-dir", type=Path, default=ROOT / "build/host")
     build = sub.add_parser("cuda-build", help="build CUDA engine and integration drivers")
@@ -49,6 +51,21 @@ def main():
     archive = sub.add_parser("archive", help="run real checkpoint file integrity integration")
     archive.add_argument("--build-dir", type=Path, default=ROOT / "build/host")
     args = parser.parse_args()
+    if args.action == "tidy":
+        try:
+            if args.container:
+                if args.clang_tidy:
+                    parser.error("--clang-tidy selects a host tool; omit it with --container")
+                if not args.build_dir.resolve().is_relative_to(ROOT) or not args.report_dir.resolve().is_relative_to(ROOT):
+                    parser.error("container build/report directories must be inside the checkout")
+                command(["docker", "build", "--target", "analysis", "--tag", tidy.IMAGE, ROOT])
+                command(container_command(["python3", ROOT / "scripts/check.py", "tidy",
+                    "--build-dir", args.build_dir.resolve(), "--report-dir", args.report_dir.resolve(),
+                    "--jobs", str(args.jobs)], image=tidy.IMAGE))
+                return
+            raise SystemExit(tidy.run(args))
+        except (OSError, ValueError, subprocess.CalledProcessError) as error:
+            parser.exit(2, f"clang-tidy: {error}\n")
     build_dir = args.build_dir.resolve()
     if args.action in {"host", "cuda-build"}:
         configure = ["cmake", "-S", ROOT, "-B", build_dir,

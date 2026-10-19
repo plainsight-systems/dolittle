@@ -30,6 +30,7 @@
  * cpp-perf-guidelines CDSA.32: validate indexed metadata once before execution.
  * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
  */
+#include "bounds.h"
 #include "models/model.h"
 
 #include <array>
@@ -43,13 +44,13 @@
 namespace dolittle::models {
 namespace {
 
-bool same_layout(const tensors::Layout& left, const tensors::Layout& right) {
+bool same_layout(const tensors::Layout &left, const tensors::Layout &right) {
     if (left.element_type != right.element_type || left.shape != right.shape) {
         return false;
     }
     // Both layouts have already passed extent/rank/stride-unit validation.
     for (std::size_t axis = 0; axis < left.shape.size(); ++axis) {
-        if (left.shape[axis] > 1 && left.byte_strides[axis] != right.byte_strides[axis]) {
+        if (left.shape.at(axis) > 1 && left.byte_strides.at(axis) != right.byte_strides.at(axis)) {
             return false;
         }
     }
@@ -78,9 +79,9 @@ struct SiteState {
     std::optional<kernels::TensorId> tensor;
 };
 
-enum class Source { absent, external, operation };
+enum class Source : std::uint8_t { absent, external, operation };
 
-void validate_site(const ObservationSite& site, tensors::ComputationMode mode) {
+void validate_site(const ObservationSite &site, tensors::ComputationMode mode) {
     switch (site.point.boundary) {
     case ObservationBoundary::block_input:
     case ObservationBoundary::block_output:
@@ -93,16 +94,14 @@ void validate_site(const ObservationSite& site, tensors::ComputationMode mode) {
     }
 }
 
-}  // namespace
+} // namespace
 
 Model::Model() = default;
 Model::~Model() = default;
 
-void validate_recipe(
-    const Model& model, const ForwardRecipe& recipe, SequenceLength length,
-    tensors::ComputationMode mode, std::span<const TokenPosition> logit_positions) {
-    if (length.value == 0 || length.value > model.context_limit().value ||
-        model.vocabulary_size() == 0 ||
+void validate_recipe(const Model &model, const ForwardRecipe &recipe, SequenceLength length,
+                     tensors::ComputationMode mode, std::span<const TokenPosition> logit_positions) {
+    if (length.value == 0 || length.value > model.context_limit().value || model.vocabulary_size() == 0 ||
         model.vocabulary_size() - 1 > std::numeric_limits<std::uint32_t>::max()) {
         throw std::invalid_argument("invalid model or sequence dimensions");
     }
@@ -112,69 +111,69 @@ void validate_recipe(
         throw std::invalid_argument("unsupported recipe computation mode");
     }
     for (std::size_t i = 0; i < logit_positions.size(); ++i) {
-        if (logit_positions[i].value >= length.value ||
-            (i != 0 && logit_positions[i - 1].value >= logit_positions[i].value)) {
+        if (dolittle::at(logit_positions, i).value >= length.value ||
+            (i != 0 &&
+             dolittle::at(logit_positions, i - 1).value >= dolittle::at(logit_positions, i).value)) {
             throw std::invalid_argument("logit positions must increase in range");
         }
     }
-    for (const auto& layout : recipe.tensors) {
+    for (const auto &layout : recipe.tensors) {
         (void)tensors::required_bytes(layout);
     }
-    const auto layout_at = [&](kernels::TensorId id) -> const tensors::Layout& {
+    const auto layout_at = [&](kernels::TensorId id) -> const tensors::Layout & {
         if (id.value >= recipe.tensors.size()) {
             throw std::invalid_argument("recipe tensor ID is out of range");
         }
-        return recipe.tensors[id.value];
+        return recipe.tensors.at(id.value);
     };
-    const auto expected_tokens = tensors::contiguous_layout(
-        tensors::ElementType::uint32, std::array{length.value});
+    const auto expected_tokens =
+        tensors::contiguous_layout(tensors::ElementType::uint32, std::array{length.value});
     if (!same_layout(layout_at(recipe.token_input), expected_tokens)) {
         throw std::invalid_argument("token input must be dense uint32 sequence");
     }
     std::vector<Source> sources(recipe.tensors.size(), Source::absent);
-    sources[recipe.token_input.value] = Source::external;
+    sources.at(recipe.token_input.value) = Source::external;
 
     const auto specs = model.parameters();
     if (recipe.parameters.size() != specs.size()) {
         throw std::invalid_argument("recipe parameter membership is incomplete");
     }
     std::unordered_set<std::string_view> roles;
-    for (const auto& spec : specs) {
+    for (const auto &spec : specs) {
         (void)tensors::required_bytes(spec.layout);
         if (spec.role.empty() || !roles.insert(spec.role).second) {
             throw std::invalid_argument("parameter roles must be nonempty and unique");
         }
     }
     std::vector<bool> bound_parameters(specs.size(), false);
-    for (const auto& parameter : recipe.parameters) {
-        if (parameter.parameter.value >= specs.size() ||
-            bound_parameters[parameter.parameter.value]) {
+    for (const auto &parameter : recipe.parameters) {
+        if (parameter.parameter.value >= specs.size() || bound_parameters.at(parameter.parameter.value)) {
             throw std::invalid_argument("invalid or duplicate parameter assignment");
         }
-        const auto& layout = layout_at(parameter.tensor);
-        if (sources[parameter.tensor.value] != Source::absent ||
-            !same_layout(layout, specs[parameter.parameter.value].layout)) {
+        const auto &layout = layout_at(parameter.tensor);
+        if (sources.at(parameter.tensor.value) != Source::absent ||
+            !same_layout(layout, dolittle::at(specs, parameter.parameter.value).layout)) {
             throw std::invalid_argument("parameter slot or layout mismatch");
         }
-        bound_parameters[parameter.parameter.value] = true;
-        sources[parameter.tensor.value] = Source::external;
+        bound_parameters.at(parameter.parameter.value) = true;
+        sources.at(parameter.tensor.value) = Source::external;
     }
 
-    for (const auto& operation : recipe.operations) {
+    for (const auto &operation : recipe.operations) {
         const auto uses = kernels::validate_operation(operation, recipe.tensors, mode);
-        for (const auto& use : uses) {
+        for (const auto &use : uses) {
             if (use.access == kernels::OperandAccess::read &&
-                sources[use.tensor.value] == Source::absent) {
+                sources.at(use.tensor.value) == Source::absent) {
                 throw std::invalid_argument("recipe reads an unproduced tensor");
             }
             if (use.access == kernels::OperandAccess::write &&
-                sources[use.tensor.value] != Source::absent) {
+                sources.at(use.tensor.value) != Source::absent) {
                 throw std::invalid_argument("recipe overwrites a tensor source");
             }
         }
-        for (const auto& use : uses) {
+        for (const auto &use : uses) {
             if (use.access == kernels::OperandAccess::write) {
-                sources[use.tensor.value] = Source::operation;
+                sources.at(use.tensor.value) = Source::operation;
             }
         }
     }
@@ -187,7 +186,7 @@ void validate_recipe(
     std::unordered_map<ObservationPoint, SiteState, PointHash, PointEqual> sites;
     const auto catalog = model.observation_sites(mode);
     sites.reserve(catalog.size());
-    for (const auto& site : catalog) {
+    for (const auto &site : catalog) {
         validate_site(site, mode);
         if (!sites.emplace(site.point, SiteState{site, std::nullopt}).second) {
             throw std::invalid_argument("duplicate observation catalog point");
@@ -196,7 +195,7 @@ void validate_recipe(
     if (recipe.observations.size() != catalog.size()) {
         throw std::invalid_argument("recipe observation membership is incomplete");
     }
-    for (const auto& value : recipe.observations) {
+    for (const auto &value : recipe.observations) {
         validate_site(value.site, mode);
         const auto found = sites.find(value.site.point);
         if (found == sites.end() || found->second.tensor.has_value() ||
@@ -204,10 +203,10 @@ void validate_recipe(
             found->second.site.storage_type != value.site.storage_type) {
             throw std::invalid_argument("recipe observation differs from model catalog");
         }
-        const auto& layout = layout_at(value.tensor);
-        const auto expected = tensors::contiguous_layout(
-            value.site.storage_type, std::array{length.value, value.site.vector_width});
-        if (sources[value.tensor.value] != Source::operation || !same_layout(layout, expected)) {
+        const auto &layout = layout_at(value.tensor);
+        const auto expected = tensors::contiguous_layout(value.site.storage_type,
+                                                         std::array{length.value, value.site.vector_width});
+        if (sources.at(value.tensor.value) != Source::operation || !same_layout(layout, expected)) {
             throw std::invalid_argument("observation must name a produced full-sequence value");
         }
         found->second.tensor = value.tensor;
@@ -220,10 +219,10 @@ void validate_recipe(
         if (!recipe.logits) {
             throw std::invalid_argument("requested logits are absent");
         }
-        const auto& layout = layout_at(*recipe.logits);
+        const auto &layout = layout_at(*recipe.logits);
         const auto expected = tensors::contiguous_layout(
             mode.activation_storage, std::array{logit_positions.size(), model.vocabulary_size()});
-        if (sources[recipe.logits->value] != Source::operation || !same_layout(layout, expected)) {
+        if (sources.at(recipe.logits->value) != Source::operation || !same_layout(layout, expected)) {
             throw std::invalid_argument("selected logits layout or producer mismatch");
         }
     }
@@ -234,45 +233,57 @@ IncrementalRecipe Model::incremental_forward(SequenceLength, tensors::Computatio
 }
 void validate_incremental_recipe(const Model &model, const IncrementalRecipe &incremental,
                                  SequenceLength length, tensors::ComputationMode mode) {
-    if (!length.value)
+    if (!length.value) {
         throw std::invalid_argument("empty incremental chunk");
+    }
     const std::array<TokenPosition, 1> positions{{{length.value - 1}}};
     const auto &recipe = incremental.forward;
     validate_recipe(model, recipe, length, mode, positions);
-    if (incremental.cache_appends.empty() || incremental.logits_begin >= recipe.operations.size())
+    if (incremental.cache_appends.empty() || incremental.logits_begin >= recipe.operations.size()) {
         throw std::invalid_argument("incomplete incremental recipe");
-    const auto *gather = std::get_if<kernels::GatherRows>(&recipe.operations[incremental.logits_begin]);
-    if (!gather || gather->rows != std::vector<std::size_t>{length.value - 1})
+    }
+    const auto *gather = std::get_if<kernels::GatherRows>(&recipe.operations.at(incremental.logits_begin));
+    if (!gather || gather->rows != std::vector<std::size_t>{length.value - 1}) {
         throw std::invalid_argument("incremental output must select the last new row");
+    }
     std::size_t next = 0;
     for (std::size_t i = 0; i < recipe.operations.size(); ++i) {
-        const auto *attention = std::get_if<kernels::CausalAttention>(&recipe.operations[i]);
-        if (!attention)
+        const auto *attention = std::get_if<kernels::CausalAttention>(&recipe.operations.at(i));
+        if (!attention) {
             continue;
-        if (i >= incremental.logits_begin || next >= incremental.cache_appends.size())
+        }
+        if (i >= incremental.logits_begin || next >= incremental.cache_appends.size()) {
             throw std::invalid_argument("unbound incremental attention");
-        const auto &append = incremental.cache_appends[next];
+        }
+        const auto &append = incremental.cache_appends.at(next);
         if (append.block.value != next || append.attention_step != i ||
-            append.rotated_key.value != attention->key.value || append.value.value != attention->value.value)
+            append.rotated_key.value != attention->key.value ||
+            append.value.value != attention->value.value) {
             throw std::invalid_argument("invalid incremental cache binding");
+        }
         ++next;
     }
-    if (next != incremental.cache_appends.size())
+    if (next != incremental.cache_appends.size()) {
         throw std::invalid_argument("unused cache binding");
+    }
     for (std::size_t i = incremental.logits_begin; i < recipe.operations.size(); ++i) {
-        for (const auto &use : kernels::validate_operation(recipe.operations[i], recipe.tensors, mode)) {
-            if (use.access != kernels::OperandAccess::write)
+        for (const auto &use : kernels::validate_operation(recipe.operations.at(i), recipe.tensors, mode)) {
+            if (use.access != kernels::OperandAccess::write) {
                 continue;
-            for (const auto &observation : recipe.observations)
-                if (observation.tensor.value == use.tensor.value)
+            }
+            for (const auto &observation : recipe.observations) {
+                if (observation.tensor.value == use.tensor.value) {
                     throw std::invalid_argument("capture producer lies in optional logit tail");
+                }
+            }
         }
     }
     for (std::size_t i = incremental.logits_begin + 1; i < recipe.operations.size(); ++i) {
-        if (!std::holds_alternative<kernels::RmsNorm>(recipe.operations[i]) &&
-            !std::holds_alternative<kernels::Projection>(recipe.operations[i]))
+        if (!std::holds_alternative<kernels::RmsNorm>(recipe.operations.at(i)) &&
+            !std::holds_alternative<kernels::Projection>(recipe.operations.at(i))) {
             throw std::invalid_argument("unsupported incremental logit branch");
+        }
     }
 }
 
-}  // namespace dolittle::models
+} // namespace dolittle::models

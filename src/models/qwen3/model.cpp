@@ -62,6 +62,7 @@
  * cpp-perf-guidelines CDSA.32: resolve semantic roles into ordered recipe inputs.
  * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
  */
+#include "bounds.h"
 #include "models/qwen3/model.h"
 
 #include <cmath>
@@ -74,6 +75,11 @@
 
 namespace dolittle::models::qwen3 {
 namespace {
+inline constexpr std::size_t parameters_per_block = 11;
+inline constexpr std::size_t tensors_per_block = 32;
+inline constexpr std::size_t global_tensor_capacity = 8;
+inline constexpr std::size_t operations_per_block = 19;
+
 using kernels::TensorId;
 using tensors::ElementType;
 
@@ -84,8 +90,12 @@ std::size_t checked_product(std::size_t a, std::size_t b) {
     return a * b;
 }
 
-std::size_t metadata_count(std::size_t blocks, std::size_t per_block,
-                           std::size_t other) {
+struct MetadataCounts {
+    std::size_t per_block;
+    std::size_t other;
+};
+std::size_t metadata_count(std::size_t blocks, MetadataCounts counts) {
+    const auto [per_block, other] = counts;
     const auto count = checked_product(blocks, per_block);
     if (other > std::numeric_limits<std::size_t>::max() - count) {
         throw std::length_error("Qwen3 metadata count overflows");
@@ -97,23 +107,21 @@ tensors::Layout layout(ElementType type, std::initializer_list<std::size_t> shap
     return tensors::contiguous_layout(type, {shape.begin(), shape.size()});
 }
 
-void validate_config(const Config& config) {
-    if (config.block_count == 0 || config.residual_width == 0 ||
-        config.query_heads == 0 || config.kv_heads == 0 ||
-        config.head_width == 0 || config.mlp_width == 0 ||
+void validate_config(const Config &config) {
+    if (config.block_count == 0 || config.residual_width == 0 || config.query_heads == 0 ||
+        config.kv_heads == 0 || config.head_width == 0 || config.mlp_width == 0 ||
         config.vocabulary_size == 0 || config.context_limit.value == 0 ||
         config.query_heads % config.kv_heads != 0 || config.head_width % 2 != 0 ||
-        !std::isfinite(config.rms_epsilon) || config.rms_epsilon <= 0 ||
-        !std::isfinite(config.rope_theta) || config.rope_theta <= 0 ||
-        (config.weight_type != ElementType::bfloat16 &&
-         config.weight_type != ElementType::float32) ||
+        !std::isfinite(config.rms_epsilon) || config.rms_epsilon <= 0 || !std::isfinite(config.rope_theta) ||
+        config.rope_theta <= 0 ||
+        (config.weight_type != ElementType::bfloat16 && config.weight_type != ElementType::float32) ||
         config.vocabulary_size - 1 > std::numeric_limits<std::uint32_t>::max()) {
         throw std::invalid_argument("unsupported Qwen3 configuration");
     }
     (void)checked_product(config.query_heads, config.head_width);
     (void)checked_product(config.kv_heads, config.head_width);
-    (void)metadata_count(config.block_count, 11, 3);
-    (void)metadata_count(config.block_count, 2, 0);
+    (void)metadata_count(config.block_count, {.per_block = parameters_per_block, .other = 3});
+    (void)metadata_count(config.block_count, {.per_block = 2, .other = 0});
 }
 
 struct BlockParameters {
@@ -131,7 +139,7 @@ struct BlockParameters {
 };
 
 class Qwen3Model final : public Model {
-public:
+  public:
     explicit Qwen3Model(Config config) : config_(config) {
         validate_config(config_);
         const auto q_width = checked_product(config_.query_heads, config_.head_width);
@@ -141,7 +149,8 @@ public:
         (void)layout(config_.weight_type, {q_width, config_.residual_width});
         (void)layout(config_.weight_type, {kv_width, config_.residual_width});
         (void)layout(config_.weight_type, {config_.mlp_width, config_.residual_width});
-        parameters_.reserve(metadata_count(config_.block_count, 11, 3));
+        parameters_.reserve(
+            metadata_count(config_.block_count, {.per_block = parameters_per_block, .other = 3}));
         blocks_.reserve(config_.block_count);
         embedding_ = parameter("token_embedding", {config_.vocabulary_size, config_.residual_width});
         final_norm_ = parameter("final_norm", {config_.residual_width});
@@ -172,7 +181,7 @@ public:
     std::vector<ObservationSite> observation_sites(tensors::ComputationMode mode) const override {
         validate_mode(mode);
         std::vector<ObservationSite> sites;
-        sites.reserve(metadata_count(config_.block_count, 2, 0));
+        sites.reserve(metadata_count(config_.block_count, {.per_block = 2, .other = 0}));
         for (std::size_t i = 0; i < config_.block_count; ++i) {
             sites.push_back(site(ObservationBoundary::block_input, i));
             sites.push_back(site(ObservationBoundary::block_output, i));
@@ -181,13 +190,14 @@ public:
     }
 
     ForwardRecipe full_forward(SequenceLength length, tensors::ComputationMode mode,
-                              std::span<const TokenPosition> positions) const override {
+                               std::span<const TokenPosition> positions) const override {
         return build_forward(length, mode, positions, nullptr);
     }
     IncrementalRecipe incremental_forward(SequenceLength length,
                                           tensors::ComputationMode mode) const override {
-        if (!length.value)
+        if (!length.value) {
             throw std::invalid_argument("empty incremental chunk");
+        }
         IncrementalRecipe result{};
         const std::array<TokenPosition, 1> positions{{{length.value - 1}}};
         result.forward = build_forward(length, mode, positions, &result);
@@ -203,16 +213,18 @@ public:
             throw std::invalid_argument("Qwen3 sequence outside context limit");
         }
         for (std::size_t i = 0; i < positions.size(); ++i) {
-            if (positions[i].value >= length.value ||
-                (i != 0 && positions[i - 1].value >= positions[i].value)) {
+            if (dolittle::at(positions, i).value >= length.value ||
+                (i != 0 && dolittle::at(positions, i - 1).value >= dolittle::at(positions, i).value)) {
                 throw std::invalid_argument("Qwen3 logit positions must increase within sequence");
             }
         }
         ForwardRecipe recipe{};
-        recipe.tensors.reserve(metadata_count(config_.block_count, 32, 8));
-        recipe.operations.reserve(metadata_count(config_.block_count, 19, 4));
+        recipe.tensors.reserve(metadata_count(
+            config_.block_count, {.per_block = tensors_per_block, .other = global_tensor_capacity}));
+        recipe.operations.reserve(
+            metadata_count(config_.block_count, {.per_block = operations_per_block, .other = 4}));
         recipe.parameters.reserve(parameters_.size());
-        recipe.observations.reserve(metadata_count(config_.block_count, 2, 0));
+        recipe.observations.reserve(metadata_count(config_.block_count, {.per_block = 2, .other = 0}));
         const auto tensor = [&](tensors::Layout value) {
             const TensorId id{recipe.tensors.size()};
             recipe.tensors.push_back(std::move(value));
@@ -225,29 +237,29 @@ public:
         std::vector<TensorId> weights;
         weights.reserve(parameters_.size());
         for (std::size_t i = 0; i < parameters_.size(); ++i) {
-            const auto id = tensor(parameters_[i].layout);
+            const auto id = tensor(parameters_.at(i).layout);
             recipe.parameters.push_back({{i}, id});
             weights.push_back(id);
         }
         const auto norm = [&](TensorId input, ParameterId weight) {
-            const auto output = tensor(recipe.tensors[input.value]);
-            recipe.operations.emplace_back(kernels::RmsNorm{input, weights[weight.value], output,
-                                                            config_.rms_epsilon});
+            const auto output = tensor(recipe.tensors.at(input.value));
+            recipe.operations.emplace_back(
+                kernels::RmsNorm{input, weights.at(weight.value), output, config_.rms_epsilon});
             return output;
         };
         const auto project = [&](TensorId input, ParameterId weight,
                                  std::initializer_list<std::size_t> shape) {
             const auto output = activation(shape);
-            recipe.operations.emplace_back(kernels::Projection{input, weights[weight.value], output});
+            recipe.operations.emplace_back(kernels::Projection{input, weights.at(weight.value), output});
             return output;
         };
         const auto rotary = [&](TensorId input) {
-            const auto output = tensor(recipe.tensors[input.value]);
+            const auto output = tensor(recipe.tensors.at(input.value));
             recipe.operations.emplace_back(kernels::Rotary{input, output, 0, config_.rope_theta});
             return output;
         };
         const auto add = [&](TensorId left, TensorId right) {
-            const auto output = tensor(recipe.tensors[left.value]);
+            const auto output = tensor(recipe.tensors.at(left.value));
             recipe.operations.emplace_back(kernels::Add{left, right, output});
             return output;
         };
@@ -256,9 +268,10 @@ public:
         const auto d = config_.residual_width;
         const auto h = config_.head_width;
         auto residual = activation({n, d});
-        recipe.operations.emplace_back(kernels::Embedding{recipe.token_input, weights[embedding_.value], residual});
+        recipe.operations.emplace_back(
+            kernels::Embedding{recipe.token_input, weights.at(embedding_.value), residual});
         for (std::size_t i = 0; i < blocks_.size(); ++i) {
-            const auto& block = blocks_[i];
+            const auto &block = blocks_.at(i);
             recipe.observations.push_back({site(ObservationBoundary::block_input, i), residual});
             const auto normalized = norm(residual, block.input_norm);
             auto query = project(normalized, block.query_projection, {n, config_.query_heads, h});
@@ -267,8 +280,9 @@ public:
             query = rotary(norm(query, block.query_norm));
             key = rotary(norm(key, block.key_norm));
             const auto attention = activation({n, config_.query_heads, h});
-            if (incremental)
+            if (incremental) {
                 incremental->cache_appends.push_back({{i}, recipe.operations.size(), key, value});
+            }
             recipe.operations.emplace_back(kernels::CausalAttention{query, key, value, attention});
             residual = add(residual, project(attention, block.attention_projection, {n, d}));
             const auto post_attention = norm(residual, block.post_attention_norm);
@@ -279,8 +293,9 @@ public:
             residual = add(residual, project(activated, block.down_projection, {n, d}));
             recipe.observations.push_back({site(ObservationBoundary::block_output, i), residual});
         }
-        if (incremental)
+        if (incremental) {
             incremental->logits_begin = recipe.operations.size();
+        }
         if (!positions.empty()) {
             std::vector<std::size_t> rows;
             rows.reserve(positions.size());
@@ -295,7 +310,7 @@ public:
         return recipe;
     }
 
-private:
+  private:
     ParameterId parameter(std::string role, std::initializer_list<std::size_t> shape) {
         const ParameterId id{parameters_.size()};
         parameters_.push_back({std::move(role), layout(config_.weight_type, shape)});
@@ -320,9 +335,7 @@ private:
     ParameterId final_norm_{};
     ParameterId vocabulary_{};
 };
-}  // namespace
+} // namespace
 
-std::unique_ptr<Model> make_model(const Config& config) {
-    return std::make_unique<Qwen3Model>(config);
-}
-}  // namespace dolittle::models::qwen3
+std::unique_ptr<Model> make_model(const Config &config) { return std::make_unique<Qwen3Model>(config); }
+} // namespace dolittle::models::qwen3

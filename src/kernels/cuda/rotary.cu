@@ -43,15 +43,31 @@
  * cpp-guidelines I.7 (#ri-post): state the output and rounding guarantees.
  * cpp-perf-guidelines GPU.2: contiguous features map to adjacent threads.
  * Source: guidelines/gpu/GPU.2-shape-data-for-coalesced-lane-access.md.
+ * Static-analysis design/implementation, 2026-10-19: kernel arguments use
+ * named fields to distinguish operand and dimension roles. Core I.30
+ * (#ri-encapsulate) confines native pointer/array access to the guarded kernel;
+ * GDSA.2 preserves the exact partial ownership and arithmetic order. Source:
+ * guidelines/gpu-dsa/GDSA.2-declare-each-reductions-determinism.md.
  */
 #include "kernels/cuda/common.cuh"
 
 namespace dolittle::kernels::cuda {
 namespace {
-template <class T>
-__global__ void rotary(const T* input, T* output, std::size_t pairs,
-                       std::size_t heads, std::size_t width,
-                       std::size_t first_position, double theta) {
+template <class T> struct RotaryArguments {
+    const T *input;
+    T *output;
+    std::size_t pairs;
+    std::size_t heads;
+    std::size_t width;
+    std::size_t first_position;
+    double theta;
+};
+
+// Device-only indexing: preparation proves allocation extents; the loops
+// below guard tails and index shared/register arrays within their declared sizes.
+// NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+template <class T> __global__ void rotary(RotaryArguments<T> args) {
+    const auto [input, output, pairs, heads, width, first_position, theta] = args;
     const auto half = width / 2;
     const auto stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
     for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -73,29 +89,37 @@ __global__ void rotary(const T* input, T* output, std::size_t pairs,
         const auto first_sine = detail::storage_round<T>(__fmul_rn(first, sine));
         output[row * width + feature] = detail::narrow<T>(__fsub_rn(first_cosine, second_sine));
         output[row * width + feature + half] = detail::narrow<T>(__fadd_rn(second_cosine, first_sine));
-        if (pairs - index <= stride) break;
+        if (pairs - index <= stride) {
+            break;
+        }
         index += stride;
     }
 }
 
-template <class T>
-void submit(const void* input, void* output, std::size_t positions, std::size_t heads,
-            std::size_t width, std::size_t first_position, double theta,
-            cudaStream_t stream) {
-    const auto pairs = positions * heads * (width / 2);
-    rotary<<<detail::grid_blocks(detail::ceil_div(pairs, detail::threads)),
-             detail::threads, 0, stream>>>(static_cast<const T*>(input),
-        static_cast<T*>(output), pairs, heads, width, first_position, theta);
-}
-}  // namespace
+// NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
 
-void launch_rotary(tensors::ElementType type, const void* input, void* output,
-                   std::size_t positions, std::size_t heads, std::size_t width,
-                   std::size_t first_position, double theta, cudaStream_t stream) {
+template <class T>
+void submit(const void *input, void *output, std::size_t positions, std::size_t heads, std::size_t width,
+            std::size_t first_position, double theta, cudaStream_t stream) {
+    const auto pairs = positions * heads * (width / 2);
+    rotary<<<detail::grid_blocks(detail::ceil_div(pairs, detail::threads)), detail::threads, 0, stream>>>(
+        RotaryArguments<T>{.input = static_cast<const T *>(input),
+                           .output = static_cast<T *>(output),
+                           .pairs = pairs,
+                           .heads = heads,
+                           .width = width,
+                           .first_position = first_position,
+                           .theta = theta});
+}
+} // namespace
+
+void launch_rotary(tensors::ElementType type, const void *input, void *output, std::size_t positions,
+                   std::size_t heads, std::size_t width, std::size_t first_position, double theta,
+                   cudaStream_t stream) {
     if (detail::is_bfloat16(type)) {
         submit<__nv_bfloat16>(input, output, positions, heads, width, first_position, theta, stream);
     } else {
         submit<float>(input, output, positions, heads, width, first_position, theta, stream);
     }
 }
-}  // namespace dolittle::kernels::cuda
+} // namespace dolittle::kernels::cuda

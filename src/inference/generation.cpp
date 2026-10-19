@@ -74,22 +74,28 @@
 namespace dolittle::inference {
 GenerationResult generate(CachedForwardPlan &plan, const text::PreparedPrompt &prompt,
                           GenerationSettings settings, const sampling::TokenSelector &select, ExecutionId id,
-                          std::stop_token stop) {
+                          const std::stop_token &stop) {
     sampling::validate_settings(settings.sampling);
     if (!select || !plan.prefix().usable || plan.prefix().committed_positions || prompt.ids.empty() ||
         prompt.tokenizer_identity.empty() || prompt.protocol_identity.empty() || prompt.stop_ids.empty() ||
         prompt.ids.size() > plan.capacity() ||
         settings.max_new_tokens > plan.capacity() - prompt.ids.size() ||
-        settings.sampling.top_k > plan.vocabulary_size() || id.value != plan.sequence_id().value)
+        settings.sampling.top_k > plan.vocabulary_size() || id.value != plan.sequence_id().value) {
         throw std::invalid_argument("incompatible generation request");
-    for (auto token : prompt.ids)
-        if (token >= plan.vocabulary_size())
+    }
+    for (auto token : prompt.ids) {
+        if (token >= plan.vocabulary_size()) {
             throw std::invalid_argument("prompt ID outside vocabulary");
-    for (auto token : prompt.stop_ids)
-        if (token >= plan.vocabulary_size())
+        }
+    }
+    for (auto token : prompt.stop_ids) {
+        if (token >= plan.vocabulary_size()) {
             throw std::invalid_argument("stop ID outside vocabulary");
-    if (prompt.thinking != text::ThinkingMode::enabled && prompt.thinking != text::ThinkingMode::disabled)
+        }
+    }
+    if (prompt.thinking != text::ThinkingMode::enabled && prompt.thinking != text::ThinkingMode::disabled) {
         throw std::invalid_argument("invalid generation thinking mode");
+    }
     GenerationResult result{};
     result.execution_id = id;
     result.checkpoint_identity = plan.checkpoint_identity();
@@ -107,8 +113,9 @@ GenerationResult generate(CachedForwardPlan &plan, const text::PreparedPrompt &p
     result.captures.reserve(plan.capture_sites().size());
     for (auto site : plan.capture_sites()) {
         const auto row = site.vector_width * tensors::element_bytes(site.storage_type);
-        if (row && capacity > std::numeric_limits<std::size_t>::max() / row)
+        if (row && capacity > std::numeric_limits<std::size_t>::max() / row) {
             throw std::length_error("generation capture size overflow");
+        }
         OwnedCapture capture{site, {}, {}};
         capture.positions.reserve(capacity);
         capture.bytes.reserve(capacity * row);
@@ -119,8 +126,8 @@ GenerationResult generate(CachedForwardPlan &plan, const text::PreparedPrompt &p
     bool have_logits = false, last_stop = false;
     const auto accept = [&](ConsumedChunk chunk) {
         for (std::size_t i = 0; i < chunk.captures.size(); ++i) {
-            auto &into = result.captures[i];
-            const auto &from = chunk.captures[i];
+            auto &into = result.captures.at(i);
+            const auto &from = chunk.captures.at(i);
             into.positions.insert(into.positions.end(), from.positions.begin(), from.positions.end());
             into.bytes.insert(into.bytes.end(), from.bytes.begin(), from.bytes.end());
         }
@@ -128,12 +135,14 @@ GenerationResult generate(CachedForwardPlan &plan, const text::PreparedPrompt &p
         have_logits = chunk.next_logits.has_value();
         if (chunk.next_logits) {
             const auto &row = *chunk.next_logits;
-            if (row.storage_type == tensors::ElementType::float32)
+            if (row.storage_type == tensors::ElementType::float32) {
                 std::memcpy(logits.data(), row.bytes.data(), row.bytes.size());
-            else
-                for (std::size_t i = 0; i < logits.size(); ++i)
-                    logits[i] = tensors::to_float(
-                        tensors::read_le(std::span<const std::byte, 2>(row.bytes.data() + 2 * i, 2)));
+            } else {
+                for (std::size_t i = 0; i < logits.size(); ++i) {
+                    logits.at(i) = tensors::to_float(tensors::read_le(
+                        std::span<const std::byte, 2>(std::span(row.bytes).subspan(2 * i).data(), 2)));
+                }
+            }
         }
     };
     try {
@@ -146,6 +155,9 @@ GenerationResult generate(CachedForwardPlan &plan, const text::PreparedPrompt &p
                               stop.stop_requested()};
             const auto decision = next_action(progress);
             if (decision.action == Action::finish) {
+                if (!decision.reason) {
+                    throw std::logic_error("finished progression has no stop reason");
+                }
                 result.reason = *decision.reason;
                 plan.finish();
                 return result;
@@ -164,11 +176,13 @@ GenerationResult generate(CachedForwardPlan &plan, const text::PreparedPrompt &p
                     std::span<const std::uint32_t>(result.tokens).subspan(result.consumed_tokens, 1),
                     another));
             } else {
-                if (!have_logits)
+                if (!have_logits) {
                     throw std::logic_error("generation requested sampling without logits");
+                }
                 const auto token = select(logits, settings.sampling, rng);
-                if (token >= plan.vocabulary_size())
+                if (token >= plan.vocabulary_size()) {
                     throw std::invalid_argument("sampler returned out-of-vocabulary ID");
+                }
                 result.tokens.push_back(token);
                 last_stop =
                     std::find(result.stop_ids.begin(), result.stop_ids.end(), token) != result.stop_ids.end();
@@ -177,8 +191,9 @@ GenerationResult generate(CachedForwardPlan &plan, const text::PreparedPrompt &p
     } catch (const std::exception &e) {
         result.reason = StopReason::execution_failure;
         result.failure_message = e.what();
-        if (plan.prefix().usable)
+        if (plan.prefix().usable) {
             plan.finish();
+        }
         return result;
     }
 }

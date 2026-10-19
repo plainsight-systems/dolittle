@@ -36,15 +36,16 @@
  */
 #pragma once
 
+#include <cstdint>
 #include "tokenizers/tokenizer.h"
 #include <optional>
 
 namespace dolittle::text {
-enum class ThinkingMode { enabled, disabled };
+enum class ThinkingMode : std::uint8_t { enabled, disabled };
 struct Prompt {
     std::optional<std::string> system;
     std::string user;
-    ThinkingMode thinking;
+    ThinkingMode thinking{};
 };
 struct PreparedPrompt {
     std::string protocol_identity;
@@ -52,15 +53,20 @@ struct PreparedPrompt {
     std::string formatted_utf8;
     std::vector<tokenizers::TokenId> ids;
     std::vector<tokenizers::TokenId> stop_ids;
-    ThinkingMode thinking;
+    ThinkingMode thinking{};
 };
-enum class SegmentKind { unclassified, reasoning, answer, control };
+enum class SegmentKind : std::uint8_t { unclassified, reasoning, answer, control };
 struct TokenSegment {
     std::size_t position;
     SegmentKind kind;
 };
 class Protocol {
   public:
+    Protocol() = default;
+    Protocol(const Protocol &) = delete;
+    Protocol &operator=(const Protocol &) = delete;
+    Protocol(Protocol &&) = delete;
+    Protocol &operator=(Protocol &&) = delete;
     virtual ~Protocol() = default;
     [[nodiscard]] virtual PreparedPrompt prepare(const Prompt &, const tokenizers::Tokenizer &) const = 0;
     [[nodiscard]] virtual std::vector<TokenSegment> segment(std::span<const tokenizers::TokenId> generated,

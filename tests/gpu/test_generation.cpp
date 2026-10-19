@@ -46,6 +46,7 @@
  * every row a postcondition; GPU.1 keeps comparisons outside GPU timing;
  * GDSA.2 keeps exact cache/full-trace equality distinct from oracle accuracy.
  */
+#include "bounds.h"
 #include "gpu/cuda/device.h"
 #include "inference/generation.h"
 #include "inference/sampling/categorical.h"
@@ -65,34 +66,45 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <optional>
 #include <string>
 
 namespace {
-using namespace dolittle;
+namespace tensors = dolittle::tensors;
+namespace models = dolittle::models;
+namespace inference = dolittle::inference;
+namespace gpu = dolittle::gpu;
+namespace text = dolittle::text;
+namespace tokenizers = dolittle::tokenizers;
+namespace tests = dolittle::tests;
 using Json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
 double seconds(Clock::time_point start) {
     return std::chrono::duration<double>(Clock::now() - start).count();
 }
 tensors::ElementType dtype(const Json &value) {
-    if (value == "float32")
+    if (value == "float32") {
         return tensors::ElementType::float32;
-    if (value == "bfloat16")
+    }
+    if (value == "bfloat16") {
         return tensors::ElementType::bfloat16;
+    }
     throw std::invalid_argument("unsupported reference dtype");
 }
 std::vector<models::TokenPosition> positions(const Json &values) {
     std::vector<models::TokenPosition> result;
-    for (const auto &value : values)
+    for (const auto &value : values) {
         result.push_back({value.get<std::size_t>()});
+    }
     return result;
 }
 models::ObservationPoint point(const Json &value) {
     const auto boundary = value.at("boundary").get<std::string>();
-    if (boundary != "block_input" && boundary != "block_output")
+    if (boundary != "block_input" && boundary != "block_output") {
         throw std::invalid_argument("unknown observation boundary");
+    }
     return {boundary == "block_input" ? models::ObservationBoundary::block_input
                                       : models::ObservationBoundary::block_output,
             {value.at("block").get<std::size_t>()}};
@@ -120,8 +132,8 @@ tests::ForwardReferenceCase reference_case(const Json &bundle, const Json &value
     result.options = {{dtype(bundle.at("dtype")), tensors::ElementType::float32},
                       positions(value.at("logit_positions")),
                       {},
-                      {64 * 1024 * 1024, 1024 * 1024},
-                      std::size_t{23} * 1024 * 1024 * 1024};
+                      {64 * std::size_t{1024} * std::size_t{1024}, std::size_t{1024} * std::size_t{1024}},
+                      std::size_t{23} * std::size_t{1024} * std::size_t{1024} * std::size_t{1024}};
     result.logits = rows(value.at("logits"));
     for (const auto &capture : value.at("captures")) {
         result.captures.push_back({point(capture), rows(capture)});
@@ -129,13 +141,19 @@ tests::ForwardReferenceCase reference_case(const Json &bundle, const Json &value
     }
     return result;
 }
+struct ComparisonSources {
+    std::reference_wrapper<const Json> bundle;
+    std::reference_wrapper<const Json> value;
+};
 Json comparisons(const tests::ForwardReferenceCase &expected, const inference::ForwardResult &actual,
-                 const Json &bundle, const Json &value, bool &passed) {
+                 ComparisonSources sources, bool &passed) {
+    const auto &bundle = sources.bundle.get();
+    const auto &value = sources.value.get();
     auto metrics = tests::compare_forward(expected, actual, tolerance(bundle.at("tolerances").at("logits")),
                                           tolerance(bundle.at("tolerances").at("observations")));
     Json outputs = Json::array();
     for (std::size_t i = 0; i < metrics.size(); ++i) {
-        auto &metric = metrics[i];
+        auto &metric = metrics.at(i);
         // Tighten the bundle fallback with independently fixed per-output scales.
         const Json *source = i == 0   ? nullptr
                              : i == 1 ? &value.at("logits")
@@ -158,34 +176,42 @@ Json comparisons(const tests::ForwardReferenceCase &expected, const inference::F
 void check_boundaries(const inference::ForwardResult &result) {
     for (const auto &input : result.captures()) {
         if (input.site.point.boundary != models::ObservationBoundary::block_input ||
-            !input.site.point.block.value)
+            !input.site.point.block.value) {
             continue;
+        }
         for (const auto &output : result.captures()) {
             if (output.site.point.boundary != models::ObservationBoundary::block_output ||
-                output.site.point.block.value + 1 != input.site.point.block.value)
+                output.site.point.block.value + 1 != input.site.point.block.value) {
                 continue;
+            }
             if (std::ranges::equal(input.positions, output.positions, {}, &models::TokenPosition::value,
-                                   &models::TokenPosition::value))
+                                   &models::TokenPosition::value)) {
                 tests::check(equal_bytes(input.bytes, output.bytes), "adjacent block boundary values differ");
+            }
         }
     }
 }
 void check_prefix(const inference::ForwardResult &shorter, const inference::ForwardResult &longer) {
     if (shorter.token_ids().size() >= longer.token_ids().size() ||
-        !std::ranges::equal(shorter.token_ids(), longer.token_ids().first(shorter.token_ids().size())))
+        !std::ranges::equal(shorter.token_ids(), longer.token_ids().first(shorter.token_ids().size()))) {
         return;
+    }
     for (const auto &a : shorter.captures()) {
         for (const auto &b : longer.captures()) {
             if (a.site.point.block.value != b.site.point.block.value ||
-                a.site.point.boundary != b.site.point.boundary)
+                a.site.point.boundary != b.site.point.boundary) {
                 continue;
+            }
             const auto row_bytes = a.site.vector_width * tensors::element_bytes(a.site.storage_type);
-            for (std::size_t i = 0; i < a.positions.size(); ++i)
-                for (std::size_t j = 0; j < b.positions.size(); ++j)
-                    if (a.positions[i].value == b.positions[j].value)
+            for (std::size_t i = 0; i < a.positions.size(); ++i) {
+                for (std::size_t j = 0; j < b.positions.size(); ++j) {
+                    if (dolittle::at(a.positions, i).value == dolittle::at(b.positions, j).value) {
                         tests::check(equal_bytes(a.bytes.subspan(i * row_bytes, row_bytes),
                                                  b.bytes.subspan(j * row_bytes, row_bytes)),
                                      "future tokens changed earlier capture");
+                    }
+                }
+            }
         }
     }
 }
@@ -193,12 +219,14 @@ std::vector<float> widen(std::span<const std::byte> bytes, tensors::ElementType 
     const auto width = tensors::element_bytes(type);
     tests::check(bytes.size() % width == 0, "readback element extent");
     std::vector<float> values(bytes.size() / width);
-    if (type == tensors::ElementType::float32)
+    if (type == tensors::ElementType::float32) {
         std::memcpy(values.data(), bytes.data(), bytes.size());
-    else
-        for (std::size_t i = 0; i < values.size(); ++i)
-            values[i] =
-                tensors::to_float(tensors::read_le(std::span<const std::byte, 2>(bytes.data() + 2 * i, 2)));
+    } else {
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            values.at(i) = tensors::to_float(
+                tensors::read_le(std::span<const std::byte, 2>(bytes.subspan(2 * i).data(), 2)));
+        }
+    }
     return values;
 }
 Json compare_rows(const Json &reference, std::span<const std::byte> bytes, tensors::ElementType type,
@@ -216,27 +244,35 @@ Json compare_rows(const Json &reference, std::span<const std::byte> bytes, tenso
                                                   std::span(actual).subspan(row * width, width),
                                                   tolerance(reference.at("tolerance")));
         rows_passed = rows_passed && metric.passed;
-        row_metrics.push_back({{"position", first + row}, {"passed", metric.passed},
-                               {"max_absolute_error", metric.maximum_absolute_error},
-                               {"relative_l2", metric.relative_l2 ? Json(*metric.relative_l2) : Json(nullptr)}});
+        row_metrics.push_back(
+            {{"position", first + row},
+             {"passed", metric.passed},
+             {"max_absolute_error", metric.maximum_absolute_error},
+             {"relative_l2", metric.relative_l2 ? Json(*metric.relative_l2) : Json(nullptr)}});
     }
     if (!rows_passed) {
-        const Json diagnostic{{"first", first}, {"count", count}, {"width", width},
-                              {"boundary", reference.value("boundary", "logits")},
-                              {"block", reference.value("block", Json(nullptr))},
-                              {"max_absolute_error", comparison.maximum_absolute_error},
-                              {"relative_l2", comparison.relative_l2 ? Json(*comparison.relative_l2)
-                                                                      : Json(nullptr)},
-                              {"tolerance", reference.at("tolerance")}, {"rows", row_metrics}};
+        const Json diagnostic{
+            {"first", first},
+            {"count", count},
+            {"width", width},
+            {"boundary", reference.value("boundary", "logits")},
+            {"block", reference.value("block", Json(nullptr))},
+            {"max_absolute_error", comparison.maximum_absolute_error},
+            {"relative_l2", comparison.relative_l2 ? Json(*comparison.relative_l2) : Json(nullptr)},
+            {"tolerance", reference.at("tolerance")},
+            {"rows", row_metrics}};
         std::cerr << "numerical comparison failed: " << diagnostic.dump() << '\n';
     }
     passed = passed && rows_passed;
-    return {{"passed", rows_passed}, {"rows", std::move(row_metrics)},
+    return {{"passed", rows_passed},
+            {"rows", std::move(row_metrics)},
             {"max_absolute_error", comparison.maximum_absolute_error},
             {"relative_l2", comparison.relative_l2 ? Json(*comparison.relative_l2) : Json(nullptr)}};
 }
 std::string_view artifact_text(const tensors::formats::TensorArchive &archive, std::string_view name) {
     auto bytes = archive.artifact(name);
+    // Native API byte/address boundary; no unrelated typed object is dereferenced.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     return {reinterpret_cast<const char *>(bytes.data()), bytes.size()};
 }
 struct TextPair {
@@ -244,24 +280,32 @@ struct TextPair {
     std::unique_ptr<text::Protocol> protocol;
 };
 TextPair prepare_text(const tensors::formats::TensorArchive &archive, const Json &generation) {
-    if (generation.at("text").is_null())
+    if (generation.at("text").is_null()) {
         return {};
+    }
     const auto source = archive.identity().repository + "/" + archive.identity().revision + "/" +
                         archive.identity().artifact_digest;
-    auto tokenizer = tokenizers::make_byte_bpe(artifact_text(archive, "tokenizer.json"),
-                                               artifact_text(archive, "tokenizer_config.json"), source,
-                                               {128 * 1024 * 1024, 1024 * 1024, 1024 * 1024, 1024 * 1024});
+    auto tokenizer = tokenizers::make_byte_bpe(
+        {.tokenizer_json = artifact_text(archive, "tokenizer.json"),
+         .tokenizer_config_json = artifact_text(archive, "tokenizer_config.json"),
+         .verified_source_identity = source},
+        {128 * std::size_t{1024} * std::size_t{1024}, std::size_t{1024} * std::size_t{1024},
+         std::size_t{1024} * std::size_t{1024}, std::size_t{1024} * std::size_t{1024}});
     auto protocol =
-        text::make_qwen3_chat(artifact_text(archive, "tokenizer_config.json"),
-                              artifact_text(archive, "generation_config.json"), source, 1024 * 1024);
-    for (const auto &value : generation.at("text").at("vectors"))
+        text::make_qwen3_chat({.tokenizer_config_json = artifact_text(archive, "tokenizer_config.json"),
+                               .generation_config_json = artifact_text(archive, "generation_config.json"),
+                               .verified_source_identity = source},
+                              std::size_t{1024} * std::size_t{1024});
+    for (const auto &value : generation.at("text").at("vectors")) {
         tests::check(tokenizer->encode(value.at("text").get<std::string>()) ==
                          value.at("ids").get<std::vector<std::uint32_t>>(),
                      "tokenizer IDs differ from pinned reference");
+    }
     for (const auto &value : generation.at("text").at("prompts")) {
         std::optional<std::string> system;
-        if (!value.at("system").is_null())
+        if (!value.at("system").is_null()) {
             system = value.at("system").get<std::string>();
+        }
         const auto prepared = protocol->prepare(
             {system, value.at("user"),
              value.at("thinking").get<bool>() ? text::ThinkingMode::enabled : text::ThinkingMode::disabled},
@@ -281,28 +325,35 @@ Json check_generation(gpu::Device &device, const models::BoundCheckpoint &checkp
     const auto tokens = reference.at("token_ids").get<std::vector<std::uint32_t>>();
     const auto prompt_count = fixture.at("prompt_tokens").get<std::size_t>();
     const tensors::ComputationMode mode{dtype(bundle.at("dtype")), tensors::ElementType::float32};
-    inference::CachedForwardOptions options{mode,
-                                            {500},
-                                            tokens.size(),
-                                            4,
-                                            {},
-                                            {64 * 1024 * 1024, 1024 * 1024},
-                                            std::size_t{23} * 1024 * 1024 * 1024,
-                                            256 * 1024 * 1024};
-    for (const auto &capture : reference.at("captures"))
+    inference::CachedForwardOptions options{
+        mode,
+        {500},
+        tokens.size(),
+        4,
+        {},
+        {64 * std::size_t{1024} * std::size_t{1024}, std::size_t{1024} * std::size_t{1024}},
+        std::size_t{23} * std::size_t{1024} * std::size_t{1024} * std::size_t{1024},
+        256 * std::size_t{1024} * std::size_t{1024}};
+    for (const auto &capture : reference.at("captures")) {
         options.capture_sites.push_back(point(capture));
+    }
     Json report{{"chunks", Json::array()}};
     auto full_reference = reference_case(bundle, reference, std::string(checkpoint.identity()), 499);
     inference::ForwardResult full_result = [&] {
-        auto plan = inference::prepare_full_forward(device, checkpoint, {tokens.size()}, full_reference.options);
+        auto plan =
+            inference::prepare_full_forward(device, checkpoint, {tokens.size()}, full_reference.options);
         return plan.execute(tokens, {499});
     }();
-    report["full_trace"] = comparisons(full_reference, full_result, bundle, reference, passed);
-    report["full_trace_logit_rows"] = compare_rows(reference.at("logits"), full_result.logits().bytes,
-                                                  mode.activation_storage, 0, tokens.size(), passed);
-    for (const auto &metric : report["full_trace"])
-        if (!metric.at("passed").get<bool>())
+    report.emplace("full_trace", Json(comparisons(full_reference, full_result,
+                                                  {.bundle = bundle, .value = reference}, passed)));
+    report.emplace("full_trace_logit_rows",
+                   Json(compare_rows(reference.at("logits"), full_result.logits().bytes,
+                                     mode.activation_storage, 0, tokens.size(), passed)));
+    for (const auto &metric : report.at("full_trace")) {
+        if (!metric.at("passed").get<bool>()) {
             std::cerr << "uncached trace comparison failed: " << metric.dump() << '\n';
+        }
+    }
     {
         auto impossible = options;
         impossible.max_device_bytes = 0;
@@ -314,8 +365,8 @@ Json check_generation(gpu::Device &device, const models::BoundCheckpoint &checkp
             [&] { (void)inference::prepare_cached_forward(device, checkpoint, impossible); });
         const auto started = Clock::now();
         auto plan = inference::prepare_cached_forward(device, checkpoint, options);
-        report["prepare_seconds"] = seconds(started);
-        report["estimated_peak_device_bytes"] = plan.estimated_peak_device_bytes();
+        report.emplace("prepare_seconds", Json(seconds(started)));
+        report.emplace("estimated_peak_device_bytes", Json(plan.estimated_peak_device_bytes()));
         tests::expect_throws<std::invalid_argument>([&] { (void)plan.consume({}, true); });
         const std::array bad{static_cast<std::uint32_t>(checkpoint.model().vocabulary_size())};
         tests::expect_throws<std::invalid_argument>([&] { (void)plan.consume(bad, true); });
@@ -332,10 +383,14 @@ Json check_generation(gpu::Device &device, const models::BoundCheckpoint &checkp
             const auto consume_start = Clock::now();
             const auto chunk = plan.consume(std::span(tokens).subspan(first, count), true);
             const auto elapsed = seconds(consume_start);
+            if (!chunk.next_logits) {
+                throw std::runtime_error("requested chunk logits are missing");
+            }
             (first < prompt_count ? prefill_seconds : decode_seconds) += elapsed;
             logit_bytes += chunk.next_logits->bytes.size();
-            for (const auto &capture : chunk.captures)
+            for (const auto &capture : chunk.captures) {
                 capture_bytes += capture.bytes.size();
+            }
             tests::check(chunk.first_position.value == first && chunk.tokens.size() == count &&
                              plan.prefix().committed_positions == first + count,
                          "completed chunk advances prefix exactly");
@@ -345,34 +400,37 @@ Json check_generation(gpu::Device &device, const models::BoundCheckpoint &checkp
                                                  mode.activation_storage, first + count - 1, 1, passed)},
                          {"captures", Json::array()}};
             for (std::size_t i = 0; i < chunk.captures.size(); ++i) {
-                const auto &capture = chunk.captures[i];
-                for (std::size_t j = 0; j < count; ++j)
-                    tests::check(capture.positions[j].value == first + j, "absolute capture position");
-                metrics["captures"].push_back(compare_rows(reference.at("captures")[i], capture.bytes,
-                                                           mode.activation_storage, first, count, passed));
+                const auto &capture = chunk.captures.at(i);
+                for (std::size_t j = 0; j < count; ++j) {
+                    tests::check(capture.positions.at(j).value == first + j, "absolute capture position");
+                }
+                metrics.at("captures")
+                    .push_back(compare_rows(reference.at("captures").at(i), capture.bytes,
+                                            mode.activation_storage, first, count, passed));
             }
-            const auto logit_row_bytes = checkpoint.model().vocabulary_size() *
-                                          tensors::element_bytes(mode.activation_storage);
+            const auto logit_row_bytes =
+                checkpoint.model().vocabulary_size() * tensors::element_bytes(mode.activation_storage);
             tests::check(equal_bytes(chunk.next_logits->bytes,
-                                     full_result.logits().bytes.subspan(
-                                         (first + count - 1) * logit_row_bytes, logit_row_bytes)),
+                                     full_result.logits().bytes.subspan((first + count - 1) * logit_row_bytes,
+                                                                        logit_row_bytes)),
                          "cached logits differ from uncached execution of the same trace");
             for (std::size_t i = 0; i < chunk.captures.size(); ++i) {
-                const auto &capture = chunk.captures[i];
-                const auto row_bytes = capture.site.vector_width *
-                                       tensors::element_bytes(mode.activation_storage);
-                tests::check(equal_bytes(capture.bytes, full_result.captures()[i].bytes.subspan(
-                                                            first * row_bytes, count * row_bytes)),
-                             "cached captures differ from uncached execution of the same trace");
+                const auto &capture = chunk.captures.at(i);
+                const auto row_bytes =
+                    capture.site.vector_width * tensors::element_bytes(mode.activation_storage);
+                tests::check(
+                    equal_bytes(capture.bytes, dolittle::at(full_result.captures(), i)
+                                                   .bytes.subspan(first * row_bytes, count * row_bytes)),
+                    "cached captures differ from uncached execution of the same trace");
             }
-            report["chunks"].push_back(std::move(metrics));
+            report.at("chunks").push_back(std::move(metrics));
             first += count;
         }
-        report["replay_with_comparisons_seconds"] = seconds(execution);
-        report["prefill_host_ready_seconds"] = prefill_seconds;
-        report["decode_host_ready_seconds"] = decode_seconds;
-        report["logit_readback_bytes"] = logit_bytes;
-        report["capture_readback_bytes"] = capture_bytes;
+        report.emplace("replay_with_comparisons_seconds", Json(seconds(execution)));
+        report.emplace("prefill_host_ready_seconds", Json(prefill_seconds));
+        report.emplace("decode_host_ready_seconds", Json(decode_seconds));
+        report.emplace("logit_readback_bytes", Json(logit_bytes));
+        report.emplace("capture_readback_bytes", Json(capture_bytes));
         tests::expect_throws<std::invalid_argument>(
             [&] { (void)plan.consume(std::span(tokens).first(1), true); });
         plan.finish();
@@ -403,24 +461,26 @@ Json check_generation(gpu::Device &device, const models::BoundCheckpoint &checkp
         auto plan = inference::prepare_cached_forward(device, checkpoint, options);
         const auto start = Clock::now();
         generated = inference::generate(plan, prompt, settings, select, {500});
-        report["generation_seconds"] = seconds(start);
+        report.emplace("generation_seconds", Json(seconds(start)));
         tests::check(generated.failure_message.empty() &&
                          generated.reason == inference::StopReason::token_limit &&
                          generated.tokens == tokens && generated.consumed_tokens == tokens.size(),
                      "greedy generation trace/finalization differs from reference");
         tests::check(!plan.prefix().usable, "generation finishes plan");
     }
-    report["generated_ids"] = std::vector<std::uint32_t>(
-        generated.tokens.begin() + static_cast<std::ptrdiff_t>(prompt_count), generated.tokens.end());
-    report["captures"] = Json::array();
+    report.emplace("generated_ids", Json(std::vector<std::uint32_t>(
+                                        generated.tokens.begin() + static_cast<std::ptrdiff_t>(prompt_count),
+                                        generated.tokens.end())));
+    report.emplace("captures", Json(Json::array()));
     // Owned output is checked after the plan/cache has been destroyed.
     for (std::size_t i = 0; i < generated.captures.size(); ++i) {
-        const auto &capture = generated.captures[i];
+        const auto &capture = generated.captures.at(i);
         tests::check(capture.positions.size() == tokens.size() &&
                          capture.positions.back().value == tokens.size() - 1,
                      "final emitted token capture missing");
-        report["captures"].push_back(compare_rows(reference.at("captures")[i], capture.bytes,
-                                                  mode.activation_storage, 0, tokens.size(), passed));
+        report.at("captures")
+            .push_back(compare_rows(reference.at("captures").at(i), capture.bytes, mode.activation_storage, 0,
+                                    tokens.size(), passed));
     }
     {
         auto unobserved = options;
@@ -439,16 +499,20 @@ Json check_generation(gpu::Device &device, const models::BoundCheckpoint &checkp
             auto bounded = settings;
             auto request = prompt;
             std::stop_source stop;
-            if (scenario == 0)
+            if (scenario == 0) {
                 bounded.max_new_tokens = 0;
-            if (scenario == 1)
-                request.stop_ids = {tokens[prompt_count]};
+            }
+            if (scenario == 1) {
+                request.stop_ids = {tokens.at(prompt_count)};
+            }
             const inference::sampling::TokenSelector controlled = [&](auto logits, auto sampling,
                                                                       auto &rng) -> std::uint32_t {
-                if (scenario == 3)
+                if (scenario == 3) {
                     throw std::runtime_error("intentional selector failure");
-                if (scenario == 2)
+                }
+                if (scenario == 2) {
                     stop.request_stop();
+                }
                 return sampler.select(logits, sampling, rng);
             };
             const auto result =
@@ -457,20 +521,24 @@ Json check_generation(gpu::Device &device, const models::BoundCheckpoint &checkp
                                      inference::StopReason::user_stop,
                                      inference::StopReason::execution_failure};
             const auto consumed = prompt_count + ((scenario == 1 || scenario == 2) ? 1 : 0);
-            tests::check(result.reason == reasons[static_cast<std::size_t>(scenario)] &&
+            tests::check(result.reason == reasons.at(static_cast<std::size_t>(scenario)) &&
                              result.consumed_tokens == consumed && result.tokens.size() == consumed,
                          "stop/failure boundary consumed count");
-            for (const auto &capture : result.captures)
+            for (const auto &capture : result.captures) {
                 tests::check(capture.positions.size() == consumed, "stop/failure durable capture prefix");
+            }
         }
     }
-    report["tokenizer_vectors"] = fixture.at("text").is_null() ? 0 : fixture.at("text").at("vectors").size();
-    report["prompt_vectors"] = fixture.at("text").is_null() ? 0 : fixture.at("text").at("prompts").size();
+    report.emplace("tokenizer_vectors",
+                   Json(fixture.at("text").is_null() ? 0 : fixture.at("text").at("vectors").size()));
+    report.emplace("prompt_vectors",
+                   Json(fixture.at("text").is_null() ? 0 : fixture.at("text").at("prompts").size()));
     return report;
 }
 
 Json run(const std::filesystem::path &fixture) {
-    tests::check(std::filesystem::file_size(fixture) <= 128 * 1024 * 1024, "fixture exceeds harness budget");
+    tests::check(std::filesystem::file_size(fixture) <= 128 * std::size_t{1024} * std::size_t{1024},
+                 "fixture exceeds harness budget");
     std::ifstream stream(fixture);
     const auto bundle = Json::parse(stream);
     tests::check(bundle.at("schema_version") == 1, "unsupported fixture schema");
@@ -480,14 +548,16 @@ Json run(const std::filesystem::path &fixture) {
                                                        {},
                                                        bundle.at("shards").get<std::vector<std::string>>(),
                                                        std::nullopt,
-                                                       16 * 1024 * 1024,
-                                                       128 * 1024 * 1024,
+                                                       16 * std::size_t{1024} * std::size_t{1024},
+                                                       128 * std::size_t{1024} * std::size_t{1024},
                                                        100000};
-    if (!bundle.at("index").is_null())
+    if (!bundle.at("index").is_null()) {
         request.index = bundle.at("index").get<std::string>();
-    for (const auto &artifact : bundle.at("artifacts"))
+    }
+    for (const auto &artifact : bundle.at("artifacts")) {
         request.artifacts.push_back(
             {artifact.at("relative_path"), artifact.at("byte_size"), artifact.at("sha256")});
+    }
     const auto load_start = Clock::now();
     auto archive = tensors::formats::safetensors::open(request);
     auto text_pair = prepare_text(*archive, bundle.at("generation"));
@@ -499,9 +569,9 @@ Json run(const std::filesystem::path &fixture) {
                 {"reference", bundle.at("reference")},
                 {"tolerances", bundle.at("tolerances")}};
     auto device = gpu::cuda::open_device(0);
-    report["device"] = {{"name", device->info().name},
-                        {"architecture", device->info().architecture},
-                        {"driver", device->info().driver_version}};
+    report.emplace("device", Json({{"name", device->info().name},
+                                   {"architecture", device->info().architecture},
+                                   {"driver", device->info().driver_version}}));
     std::vector<tests::ForwardReferenceCase> expected;
     std::vector<inference::ForwardResult> results;
     std::uint64_t id = 1;
@@ -516,26 +586,28 @@ Json run(const std::filesystem::path &fixture) {
         {
             const auto prepare_start = Clock::now();
             auto plan = inference::prepare_full_forward(*device, *checkpoint, length, reference.options);
-            measurement["prepare_seconds"] = seconds(prepare_start);
-            measurement["estimated_peak_device_bytes"] = plan.estimated_peak_device_bytes();
-            measurement["host_output_bytes"] = plan.host_output_bytes();
+            measurement.emplace("prepare_seconds", Json(seconds(prepare_start)));
+            measurement.emplace("estimated_peak_device_bytes", Json(plan.estimated_peak_device_bytes()));
+            measurement.emplace("host_output_bytes", Json(plan.host_output_bytes()));
             auto bad_tokens = reference.token_ids;
-            bad_tokens[0] = static_cast<std::uint32_t>(checkpoint->model().vocabulary_size());
+            bad_tokens.at(0) = static_cast<std::uint32_t>(checkpoint->model().vocabulary_size());
             tests::expect_throws<std::invalid_argument>(
                 [&] { (void)plan.execute(bad_tokens, reference.execution_id); });
             const auto execute_start = Clock::now();
             results.push_back(plan.execute(reference.token_ids, reference.execution_id));
-            measurement["execute_host_ready_seconds"] = seconds(execute_start);
+            measurement.emplace("execute_host_ready_seconds", Json(seconds(execute_start)));
             // Reuse with different contents, then reproduce the original pass.
             auto changed = reference.token_ids;
-            changed[0] = (changed[0] + 1) % checkpoint->model().vocabulary_size();
+            changed.at(0) = (changed.at(0) + 1) % checkpoint->model().vocabulary_size();
             (void)plan.execute(changed, {10000 + reference.execution_id.value});
             auto repeated = plan.execute(reference.token_ids, reference.execution_id);
             tests::check(equal_bytes(repeated.logits().bytes, results.back().logits().bytes),
                          "serial plan reuse changed logits");
-            for (std::size_t i = 0; i < repeated.captures().size(); ++i)
-                tests::check(equal_bytes(repeated.captures()[i].bytes, results.back().captures()[i].bytes),
+            for (std::size_t i = 0; i < repeated.captures().size(); ++i) {
+                tests::check(equal_bytes(dolittle::at(repeated.captures(), i).bytes,
+                                         dolittle::at(results.back().captures(), i).bytes),
                              "serial reuse changed captures");
+            }
         }
         {
             auto no_capture = reference.options;
@@ -547,7 +619,7 @@ Json run(const std::filesystem::path &fixture) {
                          "observation selection changed logits");
         }
         expected.push_back(std::move(reference));
-        report["cases"].push_back(std::move(measurement));
+        report.at("cases").push_back(std::move(measurement));
     }
     tests::check(!results.empty(), "fixture contains no cases");
     {
@@ -560,34 +632,38 @@ Json run(const std::filesystem::path &fixture) {
             inference::prepare_full_forward(*device, *checkpoint, {expected.front().token_ids.size()}, empty);
         auto result = plan.execute(expected.front().token_ids, {99999});
         tests::check(result.logits().bytes.empty() && result.captures().size() == 1 &&
-                         result.captures()[0].bytes.empty(),
+                         dolittle::at(result.captures(), 0).bytes.empty(),
                      "empty selections did not preserve empty metadata");
     }
     bool passed = true;
-    report["generation"] = check_generation(*device, *checkpoint, bundle, text_pair, passed);
+    report.emplace("generation", Json(check_generation(*device, *checkpoint, bundle, text_pair, passed)));
     // All comparisons below deliberately run after the execution owners die.
     checkpoint.reset();
     device.reset();
     for (std::size_t i = 0; i < results.size(); ++i) {
-        report["cases"][i]["outputs"] =
-            comparisons(expected[i], results[i], bundle, bundle.at("cases")[i], passed);
-        check_boundaries(results[i]);
-        for (const auto &other : results)
-            check_prefix(results[i], other);
+        report.at("cases").at(i).emplace(
+            "outputs", Json(comparisons(expected.at(i), results.at(i),
+                                        {.bundle = bundle, .value = bundle.at("cases").at(i)}, passed)));
+        check_boundaries(results.at(i));
+        for (const auto &other : results) {
+            check_prefix(results.at(i), other);
+        }
     }
-    report["passed"] = passed;
+    report.emplace("passed", Json(passed));
     return report;
 }
 } // namespace
 
 int main(int argc, char **argv) {
     try {
-        if (argc < 2)
+        if (argc < 2) {
             throw std::invalid_argument("usage: test_generation FIXTURE.json [FIXTURE.json ...]");
+        }
         Json reports = Json::array();
         bool passed = true;
         for (int i = 1; i < argc; ++i) {
-            auto report = run(argv[i]);
+            auto report = run(
+                dolittle::at(std::span(argv, static_cast<std::size_t>(argc)), static_cast<std::size_t>(i)));
             passed = passed && report.at("passed").get<bool>();
             reports.push_back(std::move(report));
         }

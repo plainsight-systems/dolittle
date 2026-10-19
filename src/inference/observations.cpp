@@ -42,15 +42,13 @@ struct PointHash {
 };
 
 struct PointEqual {
-    bool operator()(models::ObservationPoint left,
-                    models::ObservationPoint right) const noexcept {
-        return left.boundary == right.boundary &&
-               left.block.value == right.block.value;
+    bool operator()(models::ObservationPoint left, models::ObservationPoint right) const noexcept {
+        return left.boundary == right.boundary && left.block.value == right.block.value;
     }
 };
 
 struct IndexedSite {
-    const models::ObservationSite* site;
+    const models::ObservationSite *site;
     bool requested = false;
 };
 
@@ -88,8 +86,7 @@ void validate_boundary(models::ObservationBoundary boundary) {
     throw std::invalid_argument("unknown observation boundary");
 }
 
-std::size_t row_count(const PositionSelection& selection,
-                      models::SequenceLength length) {
+std::size_t row_count(const PositionSelection &selection, models::SequenceLength length) {
     if (selection.valueless_by_exception()) {
         throw std::invalid_argument("missing observation position selection");
     }
@@ -99,52 +96,41 @@ std::size_t row_count(const PositionSelection& selection,
     return std::get<std::vector<models::TokenPosition>>(selection).size();
 }
 
-std::size_t payload_size(const models::ObservationSite& site, std::size_t rows) {
-    return checked_multiply(checked_multiply(rows, site.vector_width),
-                            storage_bytes(site.storage_type));
+std::size_t payload_size(const models::ObservationSite &site, std::size_t rows) {
+    return checked_multiply(checked_multiply(rows, site.vector_width), storage_bytes(site.storage_type));
 }
 
-}  // namespace
+} // namespace
 
 struct ObservationPlan::Impl {
-    models::SequenceLength length;
-    std::size_t payload_bytes;
+    models::SequenceLength length{};
+    std::size_t payload_bytes{};
     std::vector<models::TokenPosition> positions;
     std::vector<ResolvedObservation> entries;
 };
 
-ObservationPlan::ObservationPlan(std::unique_ptr<Impl> impl)
-    : impl_(std::move(impl)) {}
+ObservationPlan::ObservationPlan(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 
 ObservationPlan::~ObservationPlan() = default;
-ObservationPlan::ObservationPlan(ObservationPlan&&) noexcept = default;
-ObservationPlan& ObservationPlan::operator=(ObservationPlan&&) noexcept = default;
+ObservationPlan::ObservationPlan(ObservationPlan &&) noexcept = default;
+ObservationPlan &ObservationPlan::operator=(ObservationPlan &&) noexcept = default;
 
-std::span<const ResolvedObservation> ObservationPlan::entries() const noexcept {
-    return impl_->entries;
-}
+std::span<const ResolvedObservation> ObservationPlan::entries() const noexcept { return impl_->entries; }
 
-std::size_t ObservationPlan::payload_bytes() const noexcept {
-    return impl_->payload_bytes;
-}
+std::size_t ObservationPlan::payload_bytes() const noexcept { return impl_->payload_bytes; }
 
-models::SequenceLength ObservationPlan::sequence_length() const noexcept {
-    return impl_->length;
-}
+models::SequenceLength ObservationPlan::sequence_length() const noexcept { return impl_->length; }
 
-ObservationPlan prepare_observations(
-    std::span<const models::ObservationSite> catalog,
-    models::SequenceLength sequence_length,
-    std::span<const ObservationRequest> requests,
-    ObservationLimits limits) {
+ObservationPlan prepare_observations(std::span<const models::ObservationSite> catalog,
+                                     models::SequenceLength sequence_length,
+                                     std::span<const ObservationRequest> requests, ObservationLimits limits) {
     if (sequence_length.value == 0) {
         throw std::invalid_argument("observation sequence must be nonempty");
     }
 
-    std::unordered_map<models::ObservationPoint, IndexedSite, PointHash, PointEqual>
-        sites;
+    std::unordered_map<models::ObservationPoint, IndexedSite, PointHash, PointEqual> sites;
     sites.reserve(catalog.size());
-    for (const auto& site : catalog) {
+    for (const auto &site : catalog) {
         validate_boundary(site.point.boundary);
         if (site.vector_width == 0) {
             throw std::invalid_argument("observation vector width must be positive");
@@ -157,7 +143,7 @@ ObservationPlan prepare_observations(
 
     std::size_t total_rows = 0;
     std::size_t total_bytes = 0;
-    for (const auto& request : requests) {
+    for (const auto &request : requests) {
         validate_boundary(request.point.boundary);
         const auto found = sites.find(request.point);
         if (found == sites.end() || found->second.requested) {
@@ -165,19 +151,17 @@ ObservationPlan prepare_observations(
         }
         found->second.requested = true;
         const auto count = row_count(request.positions, sequence_length);
-        if (const auto* positions =
-                std::get_if<std::vector<models::TokenPosition>>(&request.positions)) {
+        if (const auto *positions = std::get_if<std::vector<models::TokenPosition>>(&request.positions)) {
             for (std::size_t i = 0; i < positions->size(); ++i) {
-                if ((*positions)[i].value >= sequence_length.value ||
-                    (i != 0 && (*positions)[i - 1].value >= (*positions)[i].value)) {
+                if ((*positions).at(i).value >= sequence_length.value ||
+                    (i != 0 && (*positions).at(i - 1).value >= (*positions).at(i).value)) {
                     throw std::invalid_argument("observation positions must increase in range");
                 }
             }
         }
         total_rows = checked_add(total_rows, count);
         total_bytes = checked_add(total_bytes, payload_size(*found->second.site, count));
-        if (total_rows > limits.max_position_entries ||
-            total_bytes > limits.max_payload_bytes) {
+        if (total_rows > limits.max_position_entries || total_bytes > limits.max_payload_bytes) {
             throw std::length_error("observation budget exceeded");
         }
     }
@@ -187,31 +171,30 @@ ObservationPlan prepare_observations(
     impl->payload_bytes = total_bytes;
     impl->positions.reserve(total_rows);
     impl->entries.reserve(requests.size());
-    for (const auto& request : requests) {
+    for (const auto &request : requests) {
         if (std::holds_alternative<AllPositions>(request.positions)) {
             for (std::size_t position = 0; position < sequence_length.value; ++position) {
                 impl->positions.push_back({position});
             }
         } else {
-            const auto& positions =
-                std::get<std::vector<models::TokenPosition>>(request.positions);
+            const auto &positions = std::get<std::vector<models::TokenPosition>>(request.positions);
             impl->positions.insert(impl->positions.end(), positions.begin(), positions.end());
         }
     }
 
     std::size_t row_offset = 0;
     std::size_t byte_offset = 0;
-    for (const auto& request : requests) {
-        const auto& site = *sites.at(request.point).site;
+    for (const auto &request : requests) {
+        const auto &site = *sites.at(request.point).site;
         const auto count = row_count(request.positions, sequence_length);
         const auto bytes = payload_size(site, count);
-        impl->entries.push_back({site,
-            std::span<const models::TokenPosition>(impl->positions).subspan(row_offset, count),
-            byte_offset, bytes});
-        row_offset += count;  // Totals were checked before allocation.
+        impl->entries.push_back(
+            {site, std::span<const models::TokenPosition>(impl->positions).subspan(row_offset, count),
+             byte_offset, bytes});
+        row_offset += count; // Totals were checked before allocation.
         byte_offset += bytes;
     }
     return ObservationPlan(std::move(impl));
 }
 
-}  // namespace dolittle::inference
+} // namespace dolittle::inference

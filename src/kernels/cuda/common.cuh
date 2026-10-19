@@ -24,6 +24,14 @@
  * participation preconditions; unsupported dtype never silently falls back.
  * cpp-perf-guidelines GPU.2: contiguous lane reduction storage. Source:
  * guidelines/gpu/GPU.2-shape-data-for-coalesced-lane-access.md.
+
+ * Static-analysis design/implementation, 2026-10-19:
+ * The native shared-memory reduction bounds each index by the 256-lane block.
+ * Its narrow indexing exception preserves the fixed reduction order.
+ * cpp-guidelines SL.con.3 (#rsl-bounds), I.30 (#ri-encapsulate): make checked
+ * host access explicit and confine necessary native API operations.
+ * cpp-perf-guidelines COPY.7: borrow spans/references without hidden payload copies.
+ * Source: guidelines/copy-move/COPY.7-eliminate-hidden-copies.md.
  */
 #pragma once
 
@@ -45,33 +53,37 @@ inline unsigned grid_blocks(std::size_t tasks) {
 }
 
 inline bool is_bfloat16(tensors::ElementType type) {
-    if (type == tensors::ElementType::bfloat16) return true;
-    if (type == tensors::ElementType::float32) return false;
+    if (type == tensors::ElementType::bfloat16) {
+        return true;
+    }
+    if (type == tensors::ElementType::float32) {
+        return false;
+    }
     throw std::invalid_argument("unsupported CUDA floating storage type");
 }
 
-template <class T>
-__device__ float widen(T value) { return static_cast<float>(value); }
+template <class T> __device__ float widen(T value) { return static_cast<float>(value); }
 
-template <>
-__device__ inline float widen(__nv_bfloat16 value) { return __bfloat162float(value); }
+template <> __device__ inline float widen(__nv_bfloat16 value) { return __bfloat162float(value); }
 
-template <class T>
-__device__ T narrow(float value) { return static_cast<T>(value); }
+template <class T> __device__ T narrow(float value) { return static_cast<T>(value); }
 
-template <>
-__device__ inline __nv_bfloat16 narrow(float value) { return __float2bfloat16_rn(value); }
+template <> __device__ inline __nv_bfloat16 narrow(float value) { return __float2bfloat16_rn(value); }
 
-template <class T>
-__device__ float storage_round(float value) { return widen(narrow<T>(value)); }
+template <class T> __device__ float storage_round(float value) { return widen(narrow<T>(value)); }
 
-__device__ inline float block_sum(float value, float* scratch) {
+// All 256 lanes participate; scratch has 256 elements and stride halves.
+// NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+__device__ inline float block_sum(float value, float *scratch) {
     scratch[threadIdx.x] = value;
     __syncthreads();
     for (unsigned stride = threads / 2; stride != 0; stride /= 2) {
-        if (threadIdx.x < stride) scratch[threadIdx.x] += scratch[threadIdx.x + stride];
+        if (threadIdx.x < stride) {
+            scratch[threadIdx.x] += scratch[threadIdx.x + stride];
+        }
         __syncthreads();
     }
     return scratch[0];
 }
-}  // namespace dolittle::kernels::cuda::detail
+// NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+} // namespace dolittle::kernels::cuda::detail

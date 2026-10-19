@@ -49,6 +49,15 @@
  * make normalization, matching and insertion behavior part of the contract.
  * cpp-perf-guidelines CDSA.32: compile vocabulary/merges into lookup tables once.
  * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
+
+ * Static-analysis design/implementation, 2026-10-19:
+ * Named source views distinguish metadata roles. C APIs alone inspect unsigned
+ * character views; checked match extents and table access prevent unchecked
+ * host indexing. Parsed tables own data; factory views are not retained.
+ * cpp-guidelines SL.con.3 (#rsl-bounds), I.30 (#ri-encapsulate): make checked
+ * host access explicit and confine necessary native API operations.
+ * cpp-perf-guidelines COPY.7: borrow spans/references without hidden payload copies.
+ * Source: guidelines/copy-move/COPY.7-eliminate-hidden-copies.md.
  */
 #include "tokenizers/byte_bpe.h"
 #include "tensors/formats/json_metadata.h"
@@ -67,12 +76,21 @@
 
 namespace dolittle::tokenizers {
 namespace {
+inline constexpr unsigned token_id_bits = 32;
+inline constexpr unsigned byte_alphabet_size = 256;
+inline constexpr unsigned ascii_graphic_first = 33;
+inline constexpr unsigned ascii_graphic_last = 126;
+inline constexpr unsigned latin1_graphic_first = 161;
+inline constexpr unsigned latin1_before_soft_hyphen = 172;
+inline constexpr unsigned latin1_after_soft_hyphen = 174;
+
 using Json = nlohmann::json;
 constexpr std::string_view pattern =
     R"((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+)";
 void require(bool condition) {
-    if (!condition)
+    if (!condition) {
         throw std::invalid_argument("unsupported or invalid byte-BPE metadata");
+    }
 }
 Json parse(std::string_view text, std::size_t budget) {
     return tensors::formats::detail::parse_metadata(std::as_bytes(std::span(text.data(), text.size())),
@@ -81,41 +99,43 @@ Json parse(std::string_view text, std::size_t budget) {
 }
 std::uint32_t id_value(const Json &j) {
     auto n = tensors::formats::detail::unsigned_integer(j);
-    if (n > std::numeric_limits<std::uint32_t>::max())
+    if (n > std::numeric_limits<std::uint32_t>::max()) {
         throw std::length_error("token ID overflow");
+    }
     return static_cast<std::uint32_t>(n);
 }
 std::string utf8(std::int32_t c) {
     std::array<utf8proc_uint8_t, 4> b{};
     auto n = utf8proc_encode_char(c, b.data());
-    if (n <= 0)
+    if (n <= 0) {
         throw std::invalid_argument("invalid Unicode scalar");
+    }
+    // Native API byte/address boundary; no unrelated typed object is dereferenced.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     return {reinterpret_cast<char *>(b.data()), static_cast<std::size_t>(n)};
 }
 void valid_utf8(std::string_view s) {
-    if (s.size() > static_cast<std::size_t>(std::numeric_limits<utf8proc_ssize_t>::max()))
+    if (s.size() > static_cast<std::size_t>(std::numeric_limits<utf8proc_ssize_t>::max())) {
         throw std::length_error("text too large");
+    }
     for (std::size_t i = 0; i < s.size();) {
         utf8proc_int32_t c = 0;
-        auto n = utf8proc_iterate(reinterpret_cast<const utf8proc_uint8_t *>(s.data() + i),
+        // UTF-8 C API reads the same character bytes as unsigned octets.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        auto n = utf8proc_iterate(reinterpret_cast<const utf8proc_uint8_t *>(s.substr(i).data()),
                                   static_cast<utf8proc_ssize_t>(s.size() - i), &c);
-        if (n <= 0)
+        if (n <= 0) {
             throw std::invalid_argument("malformed UTF-8");
+        }
         i += static_cast<std::size_t>(n);
     }
 }
-std::uint64_t pair_key(TokenId a, TokenId b) {
-    return (std::uint64_t{a} << 32) | b;
-}
+std::uint64_t pair_key(TokenId a, TokenId b) { return (std::uint64_t{a} << token_id_bits) | b; }
 struct RegexDelete {
-    void operator()(OnigRegex p) const {
-        onig_free(p);
-    }
+    void operator()(OnigRegex p) const { onig_free(p); }
 };
 struct RegionDelete {
-    void operator()(OnigRegion *p) const {
-        onig_region_free(p, 1);
-    }
+    void operator()(OnigRegion *p) const { onig_region_free(p, 1); }
 };
 struct ByteBpe final : Tokenizer {
     struct Merge {
@@ -127,30 +147,28 @@ struct ByteBpe final : Tokenizer {
         TokenId id;
     };
     std::string identity_;
-    ByteBpeLimits limits;
+    ByteBpeLimits limits{};
     std::unordered_map<std::string, TokenId> vocabulary;
     std::unordered_map<TokenId, std::string> decoded;
     std::unordered_map<std::uint64_t, Merge> merges;
-    std::array<TokenId, 256> alphabet{};
+    std::array<TokenId, byte_alphabet_size> alphabet{};
     std::vector<Added> added;
     std::unique_ptr<OnigRegexType, RegexDelete> regex;
-    std::string_view identity() const noexcept override {
-        return identity_;
-    }
-    bool contains(TokenId id) const noexcept override {
-        return decoded.contains(id);
-    }
+    std::string_view identity() const noexcept override { return identity_; }
+    bool contains(TokenId id) const noexcept override { return decoded.contains(id); }
     DecodedBytes decode(std::span<const TokenId> ids) const override {
-        if (ids.size() > limits.max_output_tokens)
+        if (ids.size() > limits.max_output_tokens) {
             throw std::length_error("decode token budget");
+        }
         DecodedBytes out;
         out.tokens.reserve(ids.size());
         for (auto id : ids) {
             auto start = out.bytes.size();
             auto it = decoded.find(id);
             if (it != decoded.end()) {
-                if (it->second.size() > limits.max_input_bytes - out.bytes.size())
+                if (it->second.size() > limits.max_input_bytes - out.bytes.size()) {
                     throw std::length_error("decode byte budget");
+                }
                 out.bytes += it->second;
             }
             out.tokens.push_back({id, start, out.bytes.size(), it != decoded.end()});
@@ -158,15 +176,18 @@ struct ByteBpe final : Tokenizer {
         return out;
     }
     void emit(std::vector<TokenId> &out, TokenId id) const {
-        if (out.size() == limits.max_output_tokens)
+        if (out.size() == limits.max_output_tokens) {
             throw std::length_error("encode token budget");
+        }
         out.push_back(id);
     }
     void piece(std::string_view bytes, std::vector<TokenId> &out) const {
-        if (bytes.size() > limits.max_piece_bytes)
+        if (bytes.size() > limits.max_piece_bytes) {
             throw std::length_error("BPE piece budget");
-        if (bytes.empty())
+        }
+        if (bytes.empty()) {
             return;
+        }
         struct Node {
             TokenId id;
             std::size_t prev, next, version = 0;
@@ -182,77 +203,108 @@ struct ByteBpe final : Tokenizer {
         std::vector<Node> nodes;
         nodes.reserve(bytes.size());
         const auto end = bytes.size();
-        for (std::size_t i = 0; i < end; ++i)
-            nodes.push_back({alphabet[static_cast<unsigned char>(bytes[i])], i ? i - 1 : end, i + 1});
+        for (std::size_t i = 0; i < end; ++i) {
+            nodes.push_back({alphabet.at(static_cast<unsigned char>(bytes.at(i))), i ? i - 1 : end, i + 1});
+        }
         std::priority_queue<Candidate, std::vector<Candidate>, decltype(later)> heap(later);
         const auto offer = [&](std::size_t i) {
-            if (i == end || !nodes[i].live || nodes[i].next == end)
+            if (i == end || !nodes.at(i).live || nodes.at(i).next == end) {
                 return;
-            auto r = nodes[i].next;
-            auto it = merges.find(pair_key(nodes[i].id, nodes[r].id));
-            if (it != merges.end())
-                heap.push({it->second.rank, i, r, nodes[i].version, it->second.output});
+            }
+            auto r = nodes.at(i).next;
+            auto it = merges.find(pair_key(nodes.at(i).id, nodes.at(r).id));
+            if (it != merges.end()) {
+                heap.push({it->second.rank, i, r, nodes.at(i).version, it->second.output});
+            }
         };
-        for (std::size_t i = 0; i < end; ++i)
+        for (std::size_t i = 0; i < end; ++i) {
             offer(i);
+        }
         while (!heap.empty()) {
             const auto c = heap.top();
             heap.pop();
-            auto &l = nodes[c.left];
-            auto &r = nodes[c.right];
-            if (!l.live || !r.live || l.next != c.right || l.version != c.version)
+            auto &l = nodes.at(c.left);
+            auto &r = nodes.at(c.right);
+            if (!l.live || !r.live || l.next != c.right || l.version != c.version) {
                 continue;
+            }
             // The right symbol may itself have merged since this entry was made.
             auto m = merges.find(pair_key(l.id, r.id));
-            if (m == merges.end() || m->second.rank != c.rank || m->second.output != c.output)
+            if (m == merges.end() || m->second.rank != c.rank || m->second.output != c.output) {
                 continue;
+            }
             l.id = c.output;
             l.next = r.next;
             ++l.version;
             r.live = false;
-            if (l.next != end)
-                nodes[l.next].prev = c.left;
+            if (l.next != end) {
+                nodes.at(l.next).prev = c.left;
+            }
             offer(l.prev);
             offer(c.left);
         }
-        for (std::size_t i = 0; i != end; i = nodes[i].next)
-            emit(out, nodes[i].id);
+        for (std::size_t i = 0; i != end; i = nodes.at(i).next) {
+            emit(out, nodes.at(i).id);
+        }
     }
     void ordinary(std::string_view raw, std::vector<TokenId> &out) const {
-        if (raw.empty())
+        if (raw.empty()) {
             return;
+        }
         utf8proc_uint8_t *result = nullptr;
-        auto size = utf8proc_map(reinterpret_cast<const utf8proc_uint8_t *>(raw.data()),
-                                 static_cast<utf8proc_ssize_t>(raw.size()), &result,
-                                 static_cast<utf8proc_option_t>(UTF8PROC_COMPOSE | UTF8PROC_STABLE));
+        // Native API byte/address boundary; no unrelated typed object is dereferenced.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        auto size =
+            // UTF-8 C API reads bytes; no unrelated typed object is accessed.
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+            utf8proc_map(reinterpret_cast<const utf8proc_uint8_t *>(raw.data()),
+                         static_cast<utf8proc_ssize_t>(raw.size()), &result,
+                         // utf8proc_option_t is a bitmask; the API accepts this documented flag combination.
+                         // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+                         static_cast<utf8proc_option_t>(UTF8PROC_COMPOSE | UTF8PROC_STABLE));
         std::unique_ptr<utf8proc_uint8_t, decltype(&std::free)> owner(result, &std::free);
-        if (size == UTF8PROC_ERROR_NOMEM)
+        if (size == UTF8PROC_ERROR_NOMEM) {
             throw std::bad_alloc();
-        if (size < 0)
+        }
+        if (size < 0) {
             throw std::invalid_argument("NFC normalization failed");
-        if (static_cast<std::size_t>(size) > limits.max_input_bytes)
+        }
+        if (static_cast<std::size_t>(size) > limits.max_input_bytes) {
             throw std::length_error("normalized text budget");
+        }
+        // Native API byte/address boundary; no unrelated typed object is dereferenced.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
         const std::string_view normalized(reinterpret_cast<const char *>(result),
                                           static_cast<std::size_t>(size));
         std::unique_ptr<OnigRegion, RegionDelete> region(onig_region_new());
-        if (!region)
+        if (!region) {
             throw std::bad_alloc();
+        }
+        // Native API byte/address boundary; no unrelated typed object is dereferenced.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
         const auto *begin = reinterpret_cast<const OnigUChar *>(normalized.data());
+        const std::span bytes(begin, normalized.size());
         std::size_t offset = 0;
         while (offset < normalized.size()) {
-            int rc = onig_search(regex.get(), begin, begin + normalized.size(), begin + offset,
-                                 begin + normalized.size(), region.get(), ONIG_OPTION_NONE);
-            if (rc < 0 || region->beg[0] < 0 || static_cast<std::size_t>(region->beg[0]) != offset ||
-                region->end[0] <= region->beg[0])
+            int rc = onig_search(regex.get(), begin, bytes.subspan(bytes.size()).data(),
+                                 bytes.subspan(offset).data(), bytes.subspan(bytes.size()).data(),
+                                 region.get(), ONIG_OPTION_NONE);
+            if (rc < 0 || region->num_regs < 1 || !region->beg || !region->end) {
+                throw std::invalid_argument("tokenizer regex returned no match bounds");
+            }
+            if (*region->beg < 0 || static_cast<std::size_t>(*region->beg) != offset ||
+                *region->end <= *region->beg) {
                 throw std::invalid_argument("tokenizer regex failed to cover text");
-            auto end = static_cast<std::size_t>(region->end[0]);
+            }
+            auto end = static_cast<std::size_t>(*region->end);
             piece(normalized.substr(offset, end - offset), out);
             offset = end;
         }
     }
     std::vector<TokenId> encode(std::string_view input) const override {
-        if (input.size() > limits.max_input_bytes)
+        if (input.size() > limits.max_input_bytes) {
             throw std::length_error("encode byte budget");
+        }
         valid_utf8(input);
         std::vector<TokenId> out;
         std::size_t offset = 0;
@@ -269,8 +321,9 @@ struct ByteBpe final : Tokenizer {
                 }
             }
             ordinary(input.substr(offset, next - offset), out);
-            if (!selected)
+            if (!selected) {
                 break;
+            }
             emit(out, selected->id);
             offset = next + selected->text.size();
         }
@@ -278,8 +331,8 @@ struct ByteBpe final : Tokenizer {
     }
 };
 } // namespace
-std::unique_ptr<Tokenizer> make_byte_bpe(std::string_view json, std::string_view config,
-                                         std::string_view source, ByteBpeLimits limits) {
+std::unique_ptr<Tokenizer> make_byte_bpe(ByteBpeSources sources, ByteBpeLimits limits) {
+    const auto [json, config, source] = sources;
     require(!source.empty() && limits.max_metadata_bytes && limits.max_input_bytes &&
             limits.max_piece_bytes && limits.max_output_tokens);
     require(limits.max_input_bytes <= static_cast<std::size_t>(std::numeric_limits<int>::max()));
@@ -311,13 +364,15 @@ std::unique_ptr<Tokenizer> make_byte_bpe(std::string_view json, std::string_view
         bpe->limits = limits;
         bpe->identity_ = std::string(source) + "/byte-bpe-v1/utf8proc-2.10.0/oniguruma-6.9.10";
         std::unordered_map<std::int32_t, unsigned char> inverse;
-        std::array<std::int32_t, 256> codes{};
-        std::int32_t extra = 256;
-        for (unsigned i = 0; i < 256; ++i) {
-            codes[i] = (i >= 33 && i <= 126) || (i >= 161 && i <= 172) || (i >= 174)
-                           ? static_cast<std::int32_t>(i)
-                           : extra++;
-            inverse.emplace(codes[i], static_cast<unsigned char>(i));
+        std::array<std::int32_t, byte_alphabet_size> codes{};
+        std::int32_t extra = byte_alphabet_size;
+        for (unsigned i = 0; i < byte_alphabet_size; ++i) {
+            codes.at(i) = (i >= ascii_graphic_first && i <= ascii_graphic_last) ||
+                                  (i >= latin1_graphic_first && i <= latin1_before_soft_hyphen) ||
+                                  (i >= latin1_after_soft_hyphen)
+                              ? static_cast<std::int32_t>(i)
+                              : extra++;
+            inverse.emplace(codes.at(i), static_cast<unsigned char>(i));
         }
         for (const auto &[token, value] : model.at("vocab").items()) {
             auto id = id_value(value);
@@ -326,23 +381,27 @@ std::unique_ptr<Tokenizer> make_byte_bpe(std::string_view json, std::string_view
             std::string bytes;
             for (std::size_t offset = 0; offset < token.size();) {
                 utf8proc_int32_t c = 0;
-                auto n = utf8proc_iterate(reinterpret_cast<const utf8proc_uint8_t *>(token.data() + offset),
-                                          static_cast<utf8proc_ssize_t>(token.size() - offset), &c);
+                const auto remaining = std::string_view(token).substr(offset);
+                // UTF-8 C API reads the same character bytes as unsigned octets.
+                // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+                const auto *input = reinterpret_cast<const utf8proc_uint8_t *>(remaining.data());
+                auto n = utf8proc_iterate(input, static_cast<utf8proc_ssize_t>(remaining.size()), &c);
                 require(n > 0 && inverse.contains(c));
                 bytes += static_cast<char>(inverse.at(c));
                 offset += static_cast<std::size_t>(n);
             }
             bpe->decoded.emplace(id, std::move(bytes));
         }
-        for (unsigned i = 0; i < 256; ++i) {
-            auto it = bpe->vocabulary.find(utf8(codes[i]));
+        for (unsigned i = 0; i < byte_alphabet_size; ++i) {
+            auto it = bpe->vocabulary.find(utf8(codes.at(i)));
             require(it != bpe->vocabulary.end());
-            bpe->alphabet[i] = it->second;
+            bpe->alphabet.at(i) = it->second;
         }
         std::size_t rank = 0;
         for (const auto &merge : model.at("merges")) {
-            require(merge.is_array() && merge.size() == 2 && merge[0].is_string() && merge[1].is_string());
-            auto a = merge[0].get<std::string>(), b = merge[1].get<std::string>();
+            require(merge.is_array() && merge.size() == 2 && merge.at(0).is_string() &&
+                    merge.at(1).is_string());
+            auto a = merge.at(0).get<std::string>(), b = merge.at(1).get<std::string>();
             require(bpe->vocabulary.contains(a) && bpe->vocabulary.contains(b) &&
                     bpe->vocabulary.contains(a + b));
             require(bpe->merges
@@ -369,18 +428,24 @@ std::unique_ptr<Tokenizer> make_byte_bpe(std::string_view json, std::string_view
         static std::once_flag initialized;
         std::call_once(initialized, [] {
             OnigEncoding enc = ONIG_ENCODING_UTF8;
-            if (onig_initialize(&enc, 1) != ONIG_NORMAL)
+            if (onig_initialize(&enc, 1) != ONIG_NORMAL) {
                 throw std::runtime_error("Oniguruma initialization failed");
+            }
         });
         OnigRegex regex = nullptr;
         OnigErrorInfo error{};
+        // Native API byte/address boundary; no unrelated typed object is dereferenced.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
         const auto *start = reinterpret_cast<const OnigUChar *>(pattern.data());
-        auto status = onig_new(&regex, start, start + pattern.size(), ONIG_OPTION_NONE, ONIG_ENCODING_UTF8,
-                               ONIG_SYNTAX_RUBY, &error);
-        if (status == ONIGERR_MEMORY)
+        const std::span pattern_bytes(start, pattern.size());
+        auto status = onig_new(&regex, start, pattern_bytes.subspan(pattern_bytes.size()).data(),
+                               ONIG_OPTION_NONE, ONIG_ENCODING_UTF8, ONIG_SYNTAX_RUBY, &error);
+        if (status == ONIGERR_MEMORY) {
             throw std::bad_alloc();
-        if (status != ONIG_NORMAL)
+        }
+        if (status != ONIG_NORMAL) {
             throw std::runtime_error("tokenizer regex compilation failed");
+        }
         bpe->regex.reset(regex);
         return bpe;
     } catch (const Json::exception &) {

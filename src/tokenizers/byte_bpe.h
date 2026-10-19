@@ -40,6 +40,10 @@
  * Invalid metadata/input -> invalid_argument; limits/overflow -> length_error;
  * allocation failure propagates. Input bytes are borrowed only for construction.
  *
+ * Static-analysis design/implementation, 2026-10-19: named source records
+ * distinguish metadata roles without copying bytes. Core I.1 (#ri-explicit);
+ * performance CDSA.32 (source cited below): parse borrowed bytes once into owned
+ * lookup tables; no view is retained.
  * Reference: Qwen/Qwen3-8B at b968826d9c46dd6066d109eabc6255188de91218,
  * tokenizer.json and tokenizer_config.json; hashes in scripts/validation/models-8b.json.
  * Overlay: docs/architecture/file-mapping.md, "Model data, tensor storage and
@@ -62,8 +66,11 @@ struct ByteBpeLimits {
     std::size_t max_piece_bytes;
     std::size_t max_output_tokens;
 };
-[[nodiscard]] std::unique_ptr<Tokenizer> make_byte_bpe(std::string_view tokenizer_json,
-                                                       std::string_view tokenizer_config_json,
-                                                       std::string_view verified_source_identity,
-                                                       ByteBpeLimits limits);
+// Named borrowed inputs are valid only for the duration of the factory call.
+struct ByteBpeSources {
+    std::string_view tokenizer_json;
+    std::string_view tokenizer_config_json;
+    std::string_view verified_source_identity;
+};
+[[nodiscard]] std::unique_ptr<Tokenizer> make_byte_bpe(ByteBpeSources sources, ByteBpeLimits limits);
 } // namespace dolittle::tokenizers

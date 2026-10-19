@@ -32,12 +32,14 @@ dolittle/
 ├── scripts/
 │   ├── run.py                       # Source-build and launch entry point
 │   ├── models.py                    # Acquire and verify declared artifacts
-│   ├── check.py                     # Host/archive/CUDA-build/GPU verification commands
+│   ├── check.py                     # Host/archive/CUDA-build/GPU/static-analysis commands
+│   ├── tidy.py                      # Pinned analysis of CMake host/CUDA commands
 │   ├── site.py                      # Existing independent site tooling
 │   └── validation/
 │       ├── forward_reference.py     # Independent tiny/8B forward fixture generation
 │       └── ...                      # Existing checkpoint-selection reference tools
 ├── src/
+│   ├── bounds.h                     # Checked host span access shared across metadata families
 │   ├── main.cpp                     # Composition of selected implementations
 │   ├── measurement.{h,cpp}
 │   ├── tensors/

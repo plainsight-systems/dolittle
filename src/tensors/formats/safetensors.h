@@ -56,12 +56,11 @@ struct HeaderLimits {
 };
 struct TensorRange {
     NamedTensor tensor;
-    std::uint64_t data_offset;
-    std::uint64_t byte_count;
+    std::uint64_t data_offset{};
+    std::uint64_t byte_count{};
 };
-[[nodiscard]] std::vector<TensorRange> parse_header(
-    std::span<const std::byte> header_json, std::uint64_t data_bytes,
-    HeaderLimits limits);
+[[nodiscard]] std::vector<TensorRange> parse_header(std::span<const std::byte> header_json,
+                                                    std::uint64_t data_bytes, HeaderLimits limits);
 
 struct OpenRequest {
     std::filesystem::path root;
@@ -75,6 +74,6 @@ struct OpenRequest {
     std::size_t max_tensor_count;
 };
 
-[[nodiscard]] std::unique_ptr<TensorArchive> open(const OpenRequest& request);
+[[nodiscard]] std::unique_ptr<TensorArchive> open(const OpenRequest &request);
 
-}  // namespace dolittle::tensors::formats::safetensors
+} // namespace dolittle::tensors::formats::safetensors

@@ -23,10 +23,12 @@
  * cpp-perf-guidelines GPU.1: keep transfers/conversions explicit and bounded.
  * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
  */
+#include "bounds.h"
 #include "models/qwen3/checkpoint.h"
 #include "tensors/formats/json_metadata.h"
 
 #include <algorithm>
+#include <array>
 #include <array>
 #include <charconv>
 #include <cmath>
@@ -38,64 +40,91 @@
 
 namespace dolittle::models::qwen3 {
 namespace {
-using tensors::formats::detail::Json;
 using tensors::ElementType;
+using tensors::formats::detail::Json;
 
-const Json& required(const Json& object, std::string_view key) {
+const Json &required(const Json &object, std::string_view key) {
     const auto found = object.find(key);
-    if (found == object.end()) throw std::invalid_argument("required Qwen3 config field is missing");
+    if (found == object.end()) {
+        throw std::invalid_argument("required Qwen3 config field is missing");
+    }
     return *found;
 }
 
-void require_string(const Json& value, std::string_view expected) {
-    if (!value.is_string() || value.get_ref<const std::string&>() != expected) {
+void require_string(const Json &value, std::string_view expected) {
+    if (!value.is_string() || value.get_ref<const std::string &>() != expected) {
         throw std::invalid_argument("unsupported Qwen3 string setting");
     }
 }
 
-void optional_false(const Json& object, std::string_view key) {
+void optional_false(const Json &object, std::string_view key) {
     const auto found = object.find(key);
     if (found != object.end() && (!found->is_boolean() || found->get<bool>())) {
         throw std::invalid_argument("unsupported enabled Qwen3 option");
     }
 }
 
-double finite_number(const Json& value) {
-    if (!value.is_number()) throw std::invalid_argument("Qwen3 constant must be numeric");
+double finite_number(const Json &value) {
+    if (!value.is_number()) {
+        throw std::invalid_argument("Qwen3 constant must be numeric");
+    }
     const auto number = value.get<double>();
-    if (!std::isfinite(number)) throw std::invalid_argument("Qwen3 constant must be finite");
+    if (!std::isfinite(number)) {
+        throw std::invalid_argument("Qwen3 constant must be finite");
+    }
     return number;
 }
 
 std::string serialized_name(std::string_view role) {
-    if (role == "token_embedding") return "model.embed_tokens.weight";
-    if (role == "final_norm") return "model.norm.weight";
-    if (role == "vocabulary_projection") return "lm_head.weight";
+    if (role == "token_embedding") {
+        return "model.embed_tokens.weight";
+    }
+    if (role == "final_norm") {
+        return "model.norm.weight";
+    }
+    if (role == "vocabulary_projection") {
+        return "lm_head.weight";
+    }
     constexpr std::string_view prefix = "blocks.";
-    if (!role.starts_with(prefix)) throw std::invalid_argument("unsupported Qwen3 parameter role");
+    if (!role.starts_with(prefix)) {
+        throw std::invalid_argument("unsupported Qwen3 parameter role");
+    }
     const auto separator = role.find('.', prefix.size());
-    if (separator == std::string_view::npos) throw std::invalid_argument("malformed Qwen3 parameter role");
+    if (separator == std::string_view::npos) {
+        throw std::invalid_argument("malformed Qwen3 parameter role");
+    }
     const auto block = role.substr(prefix.size(), separator - prefix.size());
     const auto suffix = role.substr(separator + 1);
-    constexpr std::pair<std::string_view, std::string_view> mappings[]{
-        std::pair<std::string_view, std::string_view>{"input_norm", "input_layernorm"},
-        {"query_projection", "self_attn.q_proj"}, {"key_projection", "self_attn.k_proj"},
-        {"value_projection", "self_attn.v_proj"}, {"query_norm", "self_attn.q_norm"},
-        {"key_norm", "self_attn.k_norm"}, {"attention_projection", "self_attn.o_proj"},
-        {"post_attention_norm", "post_attention_layernorm"}, {"gate_projection", "mlp.gate_proj"},
-        {"up_projection", "mlp.up_proj"}, {"down_projection", "mlp.down_proj"}};
-    for (const auto& [semantic, serialized] : mappings) {
-        if (suffix == semantic) return "model.layers." + std::string(block) + "." + std::string(serialized) + ".weight";
+    using NameMapping = std::pair<std::string_view, std::string_view>;
+    constexpr std::array mappings{NameMapping{"input_norm", "input_layernorm"},
+                                  NameMapping{"query_projection", "self_attn.q_proj"},
+                                  NameMapping{"key_projection", "self_attn.k_proj"},
+                                  NameMapping{"value_projection", "self_attn.v_proj"},
+                                  NameMapping{"query_norm", "self_attn.q_norm"},
+                                  NameMapping{"key_norm", "self_attn.k_norm"},
+                                  NameMapping{"attention_projection", "self_attn.o_proj"},
+                                  NameMapping{"post_attention_norm", "post_attention_layernorm"},
+                                  NameMapping{"gate_projection", "mlp.gate_proj"},
+                                  NameMapping{"up_projection", "mlp.up_proj"},
+                                  NameMapping{"down_projection", "mlp.down_proj"}};
+    for (const auto &[semantic, serialized] : mappings) {
+        if (suffix == semantic) {
+            return "model.layers." + std::string(block) + "." + std::string(serialized) + ".weight";
+        }
     }
     throw std::invalid_argument("unsupported Qwen3 parameter role");
 }
 
-bool same_layout(const tensors::Layout& left, const tensors::Layout& right) {
+bool same_layout(const tensors::Layout &left, const tensors::Layout &right) {
     (void)tensors::required_bytes(left);
     (void)tensors::required_bytes(right);
-    if (left.element_type != right.element_type || left.shape != right.shape) return false;
+    if (left.element_type != right.element_type || left.shape != right.shape) {
+        return false;
+    }
     for (std::size_t i = 0; i < left.shape.size(); ++i) {
-        if (left.shape[i] > 1 && left.byte_strides[i] != right.byte_strides[i]) return false;
+        if (left.shape.at(i) > 1 && left.byte_strides.at(i) != right.byte_strides.at(i)) {
+            return false;
+        }
     }
     return true;
 }
@@ -105,24 +134,24 @@ std::string identity_part(std::string_view value) {
 }
 
 class TargetCheckpoint final : public BoundCheckpoint {
-public:
-    TargetCheckpoint(std::unique_ptr<tensors::formats::TensorArchive> archive,
-                     std::unique_ptr<Model> model, std::vector<ParameterBinding> bindings,
-                     std::string_view configuration_artifact)
+  public:
+    TargetCheckpoint(std::unique_ptr<tensors::formats::TensorArchive> archive, std::unique_ptr<Model> model,
+                     const std::vector<ParameterBinding> &bindings, std::string_view configuration_artifact)
         : archive_(std::move(archive)), model_(std::move(model)) {
-        const auto& source = archive_->identity();
+        const auto &source = archive_->identity();
         identity_ = "qwen3-target-binding-v1/" + identity_part(source.repository) +
-            identity_part(source.revision) + identity_part(source.artifact_digest) +
-            identity_part(model_->identity()) + identity_part(configuration_artifact);
+                    identity_part(source.revision) + identity_part(source.artifact_digest) +
+                    identity_part(model_->identity()) + identity_part(configuration_artifact);
         parameters_.resize(bindings.size());
         std::set<std::string> distinct_sources;
-        for (const auto& binding : bindings) {
+        for (const auto &binding : bindings) {
             const auto view = archive_->tensor(binding.tensor_name);
             tensors::validate_view(view);
-            if (!same_layout(*view.layout, model_->parameters()[binding.parameter.value].layout)) {
+            if (!same_layout(*view.layout,
+                             dolittle::at(model_->parameters(), binding.parameter.value).layout)) {
                 throw std::invalid_argument("archive payload differs from named parameter layout");
             }
-            parameters_[binding.parameter.value] = view;
+            parameters_.at(binding.parameter.value) = view;
             if (distinct_sources.insert(binding.tensor_name).second) {
                 const auto count = tensors::required_bytes(*view.layout);
                 if (count > std::numeric_limits<std::size_t>::max() - parameter_bytes_) {
@@ -132,14 +161,17 @@ public:
             }
         }
     }
-    const Model& model() const noexcept override { return *model_; }
+    const Model &model() const noexcept override { return *model_; }
     std::string_view identity() const noexcept override { return identity_; }
     tensors::HostView parameter(ParameterId id) const override {
-        if (id.value >= parameters_.size()) throw std::invalid_argument("unknown parameter ID");
-        return parameters_[id.value];
+        if (id.value >= parameters_.size()) {
+            throw std::invalid_argument("unknown parameter ID");
+        }
+        return parameters_.at(id.value);
     }
     std::size_t parameter_bytes() const noexcept override { return parameter_bytes_; }
-private:
+
+  private:
     std::unique_ptr<tensors::formats::TensorArchive> archive_;
     std::unique_ptr<Model> model_;
     std::vector<tensors::HostView> parameters_;
@@ -147,7 +179,7 @@ private:
     std::size_t parameter_bytes_ = 0;
 };
 
-}  // namespace
+} // namespace
 
 Config parse_config(std::span<const std::byte> bytes, ElementType actual_weight_type,
                     std::size_t max_metadata_bytes) {
@@ -155,68 +187,83 @@ Config parse_config(std::span<const std::byte> bytes, ElementType actual_weight_
         throw std::invalid_argument("Qwen3 weights require BF16 or FP32 storage");
     }
     const auto document = tensors::formats::detail::parse_metadata(bytes, max_metadata_bytes);
-    const auto& root = document.value;
+    const auto &root = document.value;
     static const std::set<std::string_view> supported{
-        "model_type", "architectures", "num_hidden_layers", "hidden_size",
-        "num_attention_heads", "num_key_value_heads", "head_dim", "intermediate_size",
-        "vocab_size", "max_position_embeddings", "rms_norm_eps", "rope_theta",
-        "hidden_act", "attention_bias", "mlp_bias", "tie_word_embeddings", "rope_scaling",
-        "use_sliding_window", "sliding_window", "max_window_layers", "layer_types",
+        "model_type", "architectures", "num_hidden_layers", "hidden_size", "num_attention_heads",
+        "num_key_value_heads", "head_dim", "intermediate_size", "vocab_size", "max_position_embeddings",
+        "rms_norm_eps", "rope_theta", "hidden_act", "attention_bias", "mlp_bias", "tie_word_embeddings",
+        "rope_scaling", "use_sliding_window", "sliding_window", "max_window_layers", "layer_types",
         "partial_rotary_factor", "attention_dropout", "torch_dtype", "dtype",
         // These describe provenance, training initialization, generation defaults
         // or caching preference, and do not change this full inference pass.
-        "_name_or_path", "_commit_hash", "transformers_version", "initializer_range",
-        "bos_token_id", "eos_token_id", "pad_token_id", "use_cache"};
-    for (const auto& [key, value] : root.items()) {
+        "_name_or_path", "_commit_hash", "transformers_version", "initializer_range", "bos_token_id",
+        "eos_token_id", "pad_token_id", "use_cache"};
+    for (const auto &[key, value] : root.items()) {
         (void)value;
-        if (!supported.contains(key)) throw std::invalid_argument("unknown Qwen3 config setting: " + key);
+        if (!supported.contains(key)) {
+            throw std::invalid_argument("unknown Qwen3 config setting: " + key);
+        }
     }
     require_string(required(root, "model_type"), "qwen3");
     if (root.contains("architectures")) {
-        const auto& architectures = root["architectures"];
+        const auto &architectures = root.at("architectures");
         if (!architectures.is_array() || architectures.size() != 1) {
             throw std::invalid_argument("unsupported Qwen3 architecture list");
         }
-        require_string(architectures[0], "Qwen3ForCausalLM");
+        require_string(architectures.at(0), "Qwen3ForCausalLM");
     }
     require_string(required(root, "hidden_act"), "silu");
     for (const auto key : {"attention_bias", "mlp_bias", "tie_word_embeddings", "use_sliding_window"}) {
         optional_false(root, key);
     }
     for (const auto key : {"rope_scaling", "sliding_window"}) {
-        if (root.contains(key) && !root[key].is_null()) {
+        if (root.contains(key) && !root.at(key).is_null()) {
             throw std::invalid_argument("scaled RoPE and sliding windows are unsupported");
         }
     }
-    if (root.contains("partial_rotary_factor") && finite_number(root["partial_rotary_factor"]) != 1.0) {
+    if (root.contains("partial_rotary_factor") && finite_number(root.at("partial_rotary_factor")) != 1.0) {
         throw std::invalid_argument("partial rotary embeddings are unsupported");
     }
-    if (root.contains("attention_dropout") && finite_number(root["attention_dropout"]) != 0.0) {
+    if (root.contains("attention_dropout") && finite_number(root.at("attention_dropout")) != 0.0) {
         throw std::invalid_argument("nonzero attention dropout config is unsupported");
     }
     for (const auto key : {"dtype", "torch_dtype"}) {
-        if (root.contains(key)) require_string(root[key], actual_weight_type == ElementType::bfloat16 ? "bfloat16" : "float32");
+        if (root.contains(key)) {
+            require_string(root.at(key),
+                           actual_weight_type == ElementType::bfloat16 ? "bfloat16" : "float32");
+        }
     }
     const auto dimension = [&](std::string_view key) {
         return tensors::formats::detail::size_integer(required(root, key));
     };
     const auto epsilon = finite_number(required(root, "rms_norm_eps"));
-    if (epsilon <= 0 || epsilon > std::numeric_limits<float>::max() ||
-        static_cast<float>(epsilon) == 0) throw std::invalid_argument("unsupported RMS epsilon");
-    Config config{
-        dimension("num_hidden_layers"), dimension("hidden_size"), dimension("num_attention_heads"),
-        dimension("num_key_value_heads"), dimension("head_dim"), dimension("intermediate_size"),
-        dimension("vocab_size"), {dimension("max_position_embeddings")},
-        static_cast<float>(epsilon), finite_number(required(root, "rope_theta")), actual_weight_type};
-    if (root.contains("layer_types") && !root["layer_types"].is_null()) {
-        const auto& layers = root["layer_types"];
+    if (epsilon <= 0 || epsilon > std::numeric_limits<float>::max() || static_cast<float>(epsilon) == 0) {
+        throw std::invalid_argument("unsupported RMS epsilon");
+    }
+    Config config{dimension("num_hidden_layers"),
+                  dimension("hidden_size"),
+                  dimension("num_attention_heads"),
+                  dimension("num_key_value_heads"),
+                  dimension("head_dim"),
+                  dimension("intermediate_size"),
+                  dimension("vocab_size"),
+                  {dimension("max_position_embeddings")},
+                  static_cast<float>(epsilon),
+                  finite_number(required(root, "rope_theta")),
+                  actual_weight_type};
+    if (root.contains("layer_types") && !root.at("layer_types").is_null()) {
+        const auto &layers = root.at("layer_types");
         if (!layers.is_array() || layers.size() != config.block_count) {
             throw std::invalid_argument("layer type count disagrees with block count");
         }
-        for (const auto& layer : layers) require_string(layer, "full_attention");
+        for (const auto &layer : layers) {
+            require_string(layer, "full_attention");
+        }
     }
-    if (root.contains("max_window_layers")) (void)tensors::formats::detail::size_integer(root["max_window_layers"]);
-    if (root.contains("use_cache") && !root["use_cache"].is_boolean()) {
+    if (root.contains("max_window_layers")) {
+        (void)tensors::formats::detail::size_integer(root.at("max_window_layers"));
+    }
+    if (root.contains("use_cache") && !root.at("use_cache").is_boolean()) {
         throw std::invalid_argument("use_cache must be a boolean");
     }
     // Bound model schema expansion before make_model allocates per-block specs.
@@ -224,18 +271,18 @@ Config parse_config(std::span<const std::byte> bytes, ElementType actual_weight_
     if (config.block_count > (max_metadata_bytes - document.metadata_bytes) / estimated_block_metadata) {
         throw std::length_error("Qwen3 parameter schema exceeds metadata budget");
     }
-    (void)make_model(config);  // Same dimension/overflow contract as actual binding.
+    (void)make_model(config); // Same dimension/overflow contract as actual binding.
     return config;
 }
 
-std::vector<ParameterBinding> bind_parameters(
-    const Config& config, std::span<const tensors::formats::NamedTensor> catalog) {
+std::vector<ParameterBinding> bind_parameters(const Config &config,
+                                              std::span<const tensors::formats::NamedTensor> catalog) {
     const auto model = make_model(config);
     if (catalog.size() != model->parameters().size()) {
         throw std::invalid_argument("Qwen3 checkpoint parameter count mismatch");
     }
-    std::map<std::string_view, const tensors::Layout*, std::less<>> named;
-    for (const auto& tensor : catalog) {
+    std::map<std::string_view, const tensors::Layout *, std::less<>> named;
+    for (const auto &tensor : catalog) {
         (void)tensors::required_bytes(tensor.layout);
         if (!named.emplace(tensor.name, &tensor.layout).second) {
             throw std::invalid_argument("duplicate checkpoint tensor name");
@@ -244,7 +291,7 @@ std::vector<ParameterBinding> bind_parameters(
     std::vector<ParameterBinding> bindings;
     bindings.reserve(model->parameters().size());
     for (std::size_t i = 0; i < model->parameters().size(); ++i) {
-        const auto& spec = model->parameters()[i];
+        const auto &spec = dolittle::at(model->parameters(), i);
         auto name = serialized_name(spec.role);
         const auto found = named.find(name);
         if (found == named.end() || !same_layout(*found->second, spec.layout)) {
@@ -255,17 +302,18 @@ std::vector<ParameterBinding> bind_parameters(
     return bindings;
 }
 
-std::unique_ptr<BoundCheckpoint> bind_target(
-    std::unique_ptr<tensors::formats::TensorArchive> archive,
-    std::string_view configuration_artifact) {
-    if (!archive || archive->tensors().empty()) throw std::invalid_argument("empty checkpoint archive");
+std::unique_ptr<BoundCheckpoint> bind_target(std::unique_ptr<tensors::formats::TensorArchive> archive,
+                                             std::string_view configuration_artifact) {
+    if (!archive || archive->tensors().empty()) {
+        throw std::invalid_argument("empty checkpoint archive");
+    }
     const auto actual_type = archive->tensors().front().layout.element_type;
-    constexpr std::size_t config_metadata_limit = 16 * 1024 * 1024;
-    const auto config = parse_config(archive->artifact(configuration_artifact), actual_type,
-                                     config_metadata_limit);
+    constexpr std::size_t config_metadata_limit = 16 * std::size_t{1024} * std::size_t{1024};
+    const auto config =
+        parse_config(archive->artifact(configuration_artifact), actual_type, config_metadata_limit);
     auto bindings = bind_parameters(config, archive->tensors());
     auto model = make_model(config);
-    return std::make_unique<TargetCheckpoint>(std::move(archive), std::move(model),
-                                              std::move(bindings), configuration_artifact);
+    return std::make_unique<TargetCheckpoint>(std::move(archive), std::move(model), std::move(bindings),
+                                              configuration_artifact);
 }
-}  // namespace dolittle::models::qwen3
+} // namespace dolittle::models::qwen3

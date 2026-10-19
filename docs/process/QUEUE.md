@@ -26,7 +26,17 @@
   memcheck pass. Engine fixes cover projection partitions, RMSNorm reduction
   layouts and attention probability/value rounding. The earlier engine-aligned
   reference claim remains withdrawn; only independent evidence closes this gate.
+  Accepted and pushed to origin/main as `20d8740`.
 
+- Clang-tidy tooling and source cleanup follow Serenity's check families, with
+  a pinned optional analysis image, host/device CUDA parsing and a VS Code task.
+  Checked host bounds, explicit resource states and named argument roles replace
+  fixable findings; necessary native API exceptions are local and explained.
+  Strict host/CUDA builds, 16 host units, ASan/UBSan, archive/site checks and
+  native/PTX tiny/8B generation pass. The frozen oracle and limits remain fixed;
+  8B numerical comparisons retain zero error and tiny CUDA memcheck is clean.
+  Analysis is clean on macOS and Linux/CUDA. Andrew approved the cleanup commit.
+  Diagnostic inventories and detailed reports remain in ignored storage.
 
 - The project site is deployed at `dolittle.plainsight-systems.com`. The first
   build and deployment passed; HTTP content, Code link, and share metadata are
@@ -36,14 +46,10 @@
 
 ## Next
 
-1. Commit and push the accepted target-generation slice, as authorized by Andrew.
-   Keep the independent reference and original limits fixed.
-2. Make cleanup a separate commit before further implementation. Development
-   diagnostics and reports remain in ignored local storage.
-3. Configure host NVIDIA Container Toolkit access before claiming Docker GPU
+1. Configure host NVIDIA Container Toolkit access before claiming Docker GPU
    execution. The digest-pinned source build and native Linux execution work;
    this setup limitation does not invalidate the recorded native checks.
-4. Continue toward selected target/NLA phase scheduling and the synchronized
+2. Continue toward selected target/NLA phase scheduling and the synchronized
    browser interface, with complete slice boundaries and at most five integration
    scenarios across the repository. Long-context and additional GPU validation
    remain explicit future evidence rather than inferred compatibility.

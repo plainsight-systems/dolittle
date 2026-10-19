@@ -65,14 +65,15 @@
  */
 #pragma once
 
+#include <cstdint>
 #include "inference/executor.h"
 #include "inference/sampling/sampler.h"
 #include "text/protocol.h"
 #include <stop_token>
 
 namespace dolittle::inference {
-enum class StopReason { stop_token, token_limit, user_stop, execution_failure };
-enum class Action { consume_prompt, consume_pending, sample, finish };
+enum class StopReason : std::uint8_t { stop_token, token_limit, user_stop, execution_failure };
+enum class Action : std::uint8_t { consume_prompt, consume_pending, sample, finish };
 struct Progress {
     std::size_t prompt_tokens;
     std::size_t generated_tokens; // Emitted tokens, excluding the prompt.
@@ -82,7 +83,7 @@ struct Progress {
     bool stop_requested;
 };
 struct Decision {
-    Action action;
+    Action action{};
     std::optional<StopReason> reason; // Present only for finish.
 };
 [[nodiscard]] Decision next_action(Progress);
@@ -92,22 +93,22 @@ struct GenerationSettings {
     std::size_t max_new_tokens;
 };
 struct GenerationResult {
-    ExecutionId execution_id;
+    ExecutionId execution_id{};
     std::string checkpoint_identity;
     std::string tokenizer_identity;
     std::string protocol_identity;
-    tensors::ComputationMode numerical_mode;
-    text::ThinkingMode thinking;
-    GenerationSettings settings;
+    tensors::ComputationMode numerical_mode{};
+    text::ThinkingMode thinking{};
+    GenerationSettings settings{};
     std::vector<std::uint32_t> stop_ids;
     std::vector<std::uint32_t> tokens;
-    std::size_t prompt_tokens;
-    std::size_t consumed_tokens;
+    std::size_t prompt_tokens{};
+    std::size_t consumed_tokens{};
     std::vector<OwnedCapture> captures;
-    StopReason reason;
+    StopReason reason{};
     std::string failure_message;
 };
 [[nodiscard]] GenerationResult generate(CachedForwardPlan &, const text::PreparedPrompt &, GenerationSettings,
                                         const sampling::TokenSelector &, ExecutionId,
-                                        std::stop_token stop = {});
+                                        const std::stop_token &stop = {});
 } // namespace dolittle::inference

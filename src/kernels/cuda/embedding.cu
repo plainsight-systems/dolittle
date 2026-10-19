@@ -35,43 +35,67 @@
  * cpp-guidelines I.7 (#ri-post): state the output and rounding guarantees.
  * cpp-perf-guidelines GPU.2: contiguous features map to adjacent threads.
  * Source: guidelines/gpu/GPU.2-shape-data-for-coalesced-lane-access.md.
+ * Static-analysis design/implementation, 2026-10-19: kernel arguments use
+ * named fields to distinguish operand and dimension roles. Core I.30
+ * (#ri-encapsulate) confines native pointer/array access to the guarded kernel;
+ * GDSA.2 preserves the exact partial ownership and arithmetic order. Source:
+ * guidelines/gpu-dsa/GDSA.2-declare-each-reductions-determinism.md.
  */
 #include "kernels/cuda/common.cuh"
 
 namespace dolittle::kernels::cuda {
 namespace {
-template <class Bits>
-__global__ void embedding(const std::uint32_t* tokens, const Bits* weight,
-                          Bits* output, std::size_t rows, std::size_t width) {
+template <class Bits> struct EmbeddingArguments {
+    const std::uint32_t *tokens;
+    const Bits *weight;
+    Bits *output;
+    std::size_t rows;
+    std::size_t width;
+};
+
+// Device-only indexing: preparation proves allocation extents; the loops
+// below guard tails and index shared/register arrays within their declared sizes.
+// NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+template <class Bits> __global__ void embedding(EmbeddingArguments<Bits> args) {
+    const auto [tokens, weight, output, rows, width] = args;
     __shared__ std::uint32_t token;
     for (std::size_t row = blockIdx.x; row < rows;) {
-        if (threadIdx.x == 0) token = tokens[row];
+        if (threadIdx.x == 0) {
+            token = tokens[row];
+        }
         __syncthreads();
         const auto source = static_cast<std::size_t>(token) * width;
         for (std::size_t feature = threadIdx.x; feature < width; feature += blockDim.x) {
             output[row * width + feature] = weight[source + feature];
         }
         __syncthreads();
-        if (rows - row <= gridDim.x) break;
+        if (rows - row <= gridDim.x) {
+            break;
+        }
         row += gridDim.x;
     }
 }
 
-template <class Bits>
-void submit(const std::uint32_t* tokens, const void* weight, void* output,
-            std::size_t rows, std::size_t width, cudaStream_t stream) {
-    embedding<<<detail::grid_blocks(rows), detail::threads, 0, stream>>>(
-        tokens, static_cast<const Bits*>(weight), static_cast<Bits*>(output), rows, width);
-}
-}  // namespace
+// NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
 
-void launch_embedding(tensors::ElementType type, const std::uint32_t* tokens,
-                      const void* weight, void* output, std::size_t rows,
-                      std::size_t width, cudaStream_t stream) {
+template <class Bits>
+void submit(const std::uint32_t *tokens, const void *weight, void *output, std::size_t rows,
+            std::size_t width, cudaStream_t stream) {
+    embedding<<<detail::grid_blocks(rows), detail::threads, 0, stream>>>(
+        EmbeddingArguments<Bits>{.tokens = tokens,
+                                 .weight = static_cast<const Bits *>(weight),
+                                 .output = static_cast<Bits *>(output),
+                                 .rows = rows,
+                                 .width = width});
+}
+} // namespace
+
+void launch_embedding(tensors::ElementType type, const std::uint32_t *tokens, const void *weight,
+                      void *output, std::size_t rows, std::size_t width, cudaStream_t stream) {
     if (detail::is_bfloat16(type)) {
         submit<std::uint16_t>(tokens, weight, output, rows, width, stream);
     } else {
         submit<std::uint32_t>(tokens, weight, output, rows, width, stream);
     }
 }
-}  // namespace dolittle::kernels::cuda
+} // namespace dolittle::kernels::cuda

@@ -2,6 +2,8 @@
  * Axis D3: minimal assertions for isolated in-process unit tests.
  * Contract: check throws runtime_error on false; expect_throws succeeds only
  * when the callable throws the requested exception type (or a derived type).
+ * Executable entry points catch failures and report them with report_failure,
+ * which writes the diagnostic without allocation and returns a nonzero status.
  * Unexpected exceptions propagate; a missing exception throws runtime_error.
  * Callables and messages are borrowed for this call, never stored. No external
  * resources, subprocesses, application startup or test registration is involved.
@@ -20,25 +22,31 @@
  */
 #pragma once
 
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
 
 namespace dolittle::tests {
+inline int report_failure(const char *message) noexcept {
+    std::fputs(message, stderr);
+    std::fputc('\n', stderr);
+    return 1;
+}
+
 inline void check(bool condition, std::string_view message) {
     if (!condition) {
         throw std::runtime_error(std::string(message));
     }
 }
 
-template <typename Exception, typename Callable>
-void expect_throws(Callable&& callable) {
+template <typename Exception, typename Callable> void expect_throws(Callable &&callable) {
     try {
         std::forward<Callable>(callable)();
-    } catch (const Exception&) {
+    } catch (const Exception &) {
         return;
     }
     throw std::runtime_error("expected exception was not thrown");
 }
-}  // namespace dolittle::tests
+} // namespace dolittle::tests

@@ -56,19 +56,20 @@ struct NamedTensor {
 };
 
 class TensorArchive {
-public:
+  public:
+    TensorArchive(TensorArchive &&) = delete;
+    TensorArchive &operator=(TensorArchive &&) = delete;
     virtual ~TensorArchive();
-    [[nodiscard]] virtual const SourceIdentity& identity() const noexcept = 0;
+    [[nodiscard]] virtual const SourceIdentity &identity() const noexcept = 0;
     [[nodiscard]] virtual std::span<const NamedTensor> tensors() const noexcept = 0;
     [[nodiscard]] virtual HostView tensor(std::string_view name) const = 0;
-    [[nodiscard]] virtual std::span<const std::byte> artifact(
-        std::string_view relative_path) const = 0;
+    [[nodiscard]] virtual std::span<const std::byte> artifact(std::string_view relative_path) const = 0;
 
-    TensorArchive(const TensorArchive&) = delete;
-    TensorArchive& operator=(const TensorArchive&) = delete;
+    TensorArchive(const TensorArchive &) = delete;
+    TensorArchive &operator=(const TensorArchive &) = delete;
 
-protected:
+  protected:
     TensorArchive();
 };
 
-}  // namespace dolittle::tensors::formats
+} // namespace dolittle::tensors::formats

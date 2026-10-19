@@ -68,13 +68,13 @@ namespace dolittle::tests {
 
 struct ExpectedRows {
     std::vector<models::TokenPosition> positions;
-    std::size_t width;
-    tensors::ElementType original_storage_type;
+    std::size_t width{};
+    tensors::ElementType original_storage_type{};
     std::vector<float> values;
 };
 
 struct ExpectedObservation {
-    models::ObservationPoint point;
+    models::ObservationPoint point{};
     ExpectedRows rows;
 };
 
@@ -89,7 +89,7 @@ struct ForwardReferenceCase {
     std::string name;
     ReferenceProvenance reference;
     std::string checkpoint_identity;
-    inference::ExecutionId execution_id;
+    inference::ExecutionId execution_id{};
     std::vector<std::uint32_t> token_ids;
     inference::ForwardOptions options;
     ExpectedRows logits;
@@ -115,19 +115,20 @@ struct CompletedForwardView {
     std::span<const inference::CapturedRows> captures;
 };
 
-[[nodiscard]] std::vector<OutputComparison> compare_forward(
-    const ForwardReferenceCase& reference,
-    CompletedForwardView actual,
-    NumericalTolerance logit_tolerance,
-    NumericalTolerance observation_tolerance);
+[[nodiscard]] std::vector<OutputComparison> compare_forward(const ForwardReferenceCase &reference,
+                                                            CompletedForwardView actual,
+                                                            NumericalTolerance logit_tolerance,
+                                                            NumericalTolerance observation_tolerance);
 
-[[nodiscard]] inline std::vector<OutputComparison> compare_forward(
-    const ForwardReferenceCase& reference, const inference::ForwardResult& actual,
-    NumericalTolerance logit_tolerance, NumericalTolerance observation_tolerance) {
+[[nodiscard]] inline std::vector<OutputComparison> compare_forward(const ForwardReferenceCase &reference,
+                                                                   const inference::ForwardResult &actual,
+                                                                   NumericalTolerance logit_tolerance,
+                                                                   NumericalTolerance observation_tolerance) {
     return compare_forward(reference,
-        CompletedForwardView{actual.execution_id(), actual.checkpoint_identity(),
-            actual.token_ids(), actual.numerical_mode(), actual.logits(), actual.captures()},
-        logit_tolerance, observation_tolerance);
+                           CompletedForwardView{actual.execution_id(), actual.checkpoint_identity(),
+                                                actual.token_ids(), actual.numerical_mode(), actual.logits(),
+                                                actual.captures()},
+                           logit_tolerance, observation_tolerance);
 }
 
-}  // namespace dolittle::tests
+} // namespace dolittle::tests

@@ -68,7 +68,7 @@ if(BUILD_TESTING)
     set_target_properties(dolittle_numerical PROPERTIES CXX_EXTENSIONS OFF)
     dolittle_warnings(dolittle_numerical)
 
-    foreach(unit IN ITEMS sampling progression byte_bpe qwen3_chat tensor bf16 observations storage_plan numerical
+    foreach(unit IN ITEMS bounds sampling progression byte_bpe qwen3_chat tensor bf16 observations storage_plan numerical
                           operations model_recipe qwen3_model safetensors qwen3_checkpoint)
         add_executable(test_${unit} tests/core/test_${unit}.cpp)
         target_include_directories(test_${unit} PRIVATE "${PROJECT_SOURCE_DIR}")

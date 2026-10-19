@@ -138,8 +138,12 @@
 #include <string_view>
 #include <vector>
 
-namespace dolittle::models { class BoundCheckpoint; }
-namespace dolittle::gpu { class Device; }
+namespace dolittle::models {
+class BoundCheckpoint;
+}
+namespace dolittle::gpu {
+class Device;
+}
 
 namespace dolittle::inference {
 
@@ -148,11 +152,11 @@ struct ExecutionId {
 };
 
 struct ForwardOptions {
-    tensors::ComputationMode numerical_mode;
+    tensors::ComputationMode numerical_mode{};
     PositionSelection logit_positions;
     std::vector<ObservationRequest> observations;
-    ObservationLimits observation_limits;
-    std::size_t max_device_bytes;
+    ObservationLimits observation_limits{};
+    std::size_t max_device_bytes{};
 };
 
 struct LogitRows {
@@ -165,12 +169,12 @@ struct LogitRows {
 class FullForwardPlan;
 
 class ForwardResult {
-public:
+  public:
     ~ForwardResult();
-    ForwardResult(ForwardResult&&) noexcept;
-    ForwardResult& operator=(ForwardResult&&) noexcept;
-    ForwardResult(const ForwardResult&) = delete;
-    ForwardResult& operator=(const ForwardResult&) = delete;
+    ForwardResult(ForwardResult &&) noexcept;
+    ForwardResult &operator=(ForwardResult &&) noexcept;
+    ForwardResult(const ForwardResult &) = delete;
+    ForwardResult &operator=(const ForwardResult &) = delete;
 
     [[nodiscard]] ExecutionId execution_id() const noexcept;
     [[nodiscard]] std::string_view checkpoint_identity() const noexcept;
@@ -179,7 +183,7 @@ public:
     [[nodiscard]] LogitRows logits() const noexcept;
     [[nodiscard]] std::span<const CapturedRows> captures() const noexcept;
 
-private:
+  private:
     struct Impl;
     explicit ForwardResult(std::unique_ptr<Impl>);
     std::unique_ptr<Impl> impl_;
@@ -187,34 +191,31 @@ private:
 };
 
 class FullForwardPlan {
-public:
+  public:
     ~FullForwardPlan();
-    FullForwardPlan(FullForwardPlan&&) noexcept;
-    FullForwardPlan& operator=(FullForwardPlan&&) noexcept;
-    FullForwardPlan(const FullForwardPlan&) = delete;
-    FullForwardPlan& operator=(const FullForwardPlan&) = delete;
+    FullForwardPlan(FullForwardPlan &&) noexcept;
+    FullForwardPlan &operator=(FullForwardPlan &&) noexcept;
+    FullForwardPlan(const FullForwardPlan &) = delete;
+    FullForwardPlan &operator=(const FullForwardPlan &) = delete;
 
     [[nodiscard]] models::SequenceLength sequence_length() const noexcept;
     [[nodiscard]] std::size_t estimated_peak_device_bytes() const noexcept;
     [[nodiscard]] std::size_t host_output_bytes() const noexcept;
-    [[nodiscard]] ForwardResult execute(
-        std::span<const std::uint32_t> token_ids, ExecutionId execution_id);
+    [[nodiscard]] ForwardResult execute(std::span<const std::uint32_t> token_ids, ExecutionId execution_id);
 
-private:
+  private:
     struct Impl;
     explicit FullForwardPlan(std::unique_ptr<Impl>);
     std::unique_ptr<Impl> impl_;
 
-    friend FullForwardPlan prepare_full_forward(
-        gpu::Device&, const models::BoundCheckpoint&, models::SequenceLength,
-        const ForwardOptions&);
+    friend FullForwardPlan prepare_full_forward(gpu::Device &, const models::BoundCheckpoint &,
+                                                models::SequenceLength, const ForwardOptions &);
 };
 
-[[nodiscard]] FullForwardPlan prepare_full_forward(
-    gpu::Device& device,
-    const models::BoundCheckpoint& checkpoint,
-    models::SequenceLength sequence_length,
-    const ForwardOptions& options);
+[[nodiscard]] FullForwardPlan prepare_full_forward(gpu::Device &device,
+                                                   const models::BoundCheckpoint &checkpoint,
+                                                   models::SequenceLength sequence_length,
+                                                   const ForwardOptions &options);
 
 // Single-turn incremental execution with persistent K/V.
 struct CachedForwardOptions {
@@ -234,7 +235,7 @@ struct OwnedLogitRow {
     std::vector<std::byte> bytes;
 };
 struct ConsumedChunk {
-    models::TokenPosition first_position;
+    models::TokenPosition first_position{};
     std::vector<std::uint32_t> tokens;
     std::optional<OwnedLogitRow> next_logits;
     std::vector<OwnedCapture> captures;
@@ -268,4 +269,4 @@ class CachedForwardPlan {
 [[nodiscard]] CachedForwardPlan prepare_cached_forward(gpu::Device &, const models::BoundCheckpoint &,
                                                        const CachedForwardOptions &);
 
-}  // namespace dolittle::inference
+} // namespace dolittle::inference

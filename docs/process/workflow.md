@@ -111,6 +111,18 @@ from the design, clarify that design before implementation.
 
 ## Verification
 
+### Static analysis
+
+Use `python3 scripts/check.py tidy` with the relevant configured compilation
+database. Follow [the setup and CUDA scope](../../scripts/README.md#static-analysis).
+The policy follows Serenity's Google, Core Guidelines, bug-prone, performance
+and analyzer families; every finding fails the check. Tests permit literal
+expected values. Do not add blanket check exclusions or suppress existing
+findings to make a cleanup pass. Any necessary low-level exception must be
+narrow, justified beside the code, and preserve its contracts and numerical
+behavior. Static analysis does not replace strict builds or independent oracle
+acceptance. Keep diagnostic inventories and reports in ignored `.local/`.
+
 ### Test scope and stability
 
 Unit tests exercise one isolated unit of code directly, in process. They run

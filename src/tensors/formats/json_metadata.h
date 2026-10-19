@@ -33,7 +33,7 @@
 namespace dolittle::tensors::formats::detail {
 using Json = nlohmann::json;
 
-inline void charge(std::size_t& used, std::size_t amount, std::size_t limit) {
+inline void charge(std::size_t &used, std::size_t amount, std::size_t limit) {
     if (used > limit || amount > limit - used) {
         throw std::length_error("metadata budget exceeded");
     }
@@ -41,43 +41,69 @@ inline void charge(std::size_t& used, std::size_t amount, std::size_t limit) {
 }
 
 class JsonPreflight final : public nlohmann::json_sax<Json> {
-public:
+  public:
     explicit JsonPreflight(std::size_t limit) : limit_(limit) {}
     bool null() override { return node(); }
     bool boolean(bool) override { return node(); }
     bool number_integer(number_integer_t) override { return node(); }
     bool number_unsigned(number_unsigned_t) override { return node(); }
-    bool number_float(number_float_t value, const string_t&) override {
-        if (!std::isfinite(value)) throw std::invalid_argument("nonfinite JSON number");
+    bool number_float(number_float_t value, const string_t &) override {
+        if (!std::isfinite(value)) {
+            throw std::invalid_argument("nonfinite JSON number");
+        }
         return node();
     }
-    bool string(string_t& value) override {
-        node(); charge(used_, value.size(), limit_); return true;
+    bool string(string_t &value) override {
+        node();
+        charge(used_, value.size(), limit_);
+        return true;
     }
-    bool binary(binary_t&) override { throw std::invalid_argument("binary is not JSON metadata"); }
+    bool binary(binary_t &) override { throw std::invalid_argument("binary is not JSON metadata"); }
     bool start_object(std::size_t) override {
-        node(); push(true); return true;
+        node();
+        push(true);
+        return true;
     }
-    bool key(string_t& value) override {
-        charge(used_, sizeof(std::string) + sizeof(void*) * 4, limit_);
+    bool key(string_t &value) override {
+        charge(used_, sizeof(std::string) + sizeof(void *) * 4, limit_);
         charge(used_, value.size(), limit_);
         if (!stack_.back().keys.insert(value).second) {
             throw std::invalid_argument("duplicate JSON key");
         }
         return true;
     }
-    bool end_object() override { stack_.pop_back(); return true; }
-    bool start_array(std::size_t) override { node(); push(false); return true; }
-    bool end_array() override { stack_.pop_back(); return true; }
-    bool parse_error(std::size_t, const std::string&, const nlohmann::detail::exception&) override {
+    bool end_object() override {
+        stack_.pop_back();
+        return true;
+    }
+    bool start_array(std::size_t) override {
+        node();
+        push(false);
+        return true;
+    }
+    bool end_array() override {
+        stack_.pop_back();
+        return true;
+    }
+    bool parse_error(std::size_t, const std::string &, const nlohmann::detail::exception &) override {
         throw std::invalid_argument("malformed JSON metadata");
     }
     std::size_t used() const noexcept { return used_; }
-private:
-    struct Frame { bool object; std::unordered_set<std::string> keys; };
-    bool node() { charge(used_, sizeof(Json) + sizeof(void*) * 4, limit_); return true; }
+
+  private:
+    struct Frame {
+        bool object;
+        std::unordered_set<std::string> keys;
+    };
+    bool node() {
+        charge(used_, sizeof(Json) + sizeof(void *) * 4, limit_);
+        return true;
+    }
     void push(bool object) {
-        if (stack_.size() >= 64) throw std::length_error("JSON nesting limit exceeded");
+        constexpr std::size_t max_nesting = 64;
+        if (stack_.size() >= max_nesting) {
+            throw std::length_error("JSON nesting limit exceeded");
+        }
         stack_.push_back({object, {}});
     }
     std::size_t limit_;
@@ -85,34 +111,51 @@ private:
     std::vector<Frame> stack_;
 };
 
-struct JsonDocument { Json value; std::size_t metadata_bytes; };
+struct JsonDocument {
+    Json value;
+    std::size_t metadata_bytes;
+};
 
 inline JsonDocument parse_metadata(std::span<const std::byte> input, std::size_t limit) {
-    if (input.size() > limit) throw std::length_error("JSON input exceeds metadata budget");
-    if (input.empty()) throw std::invalid_argument("empty JSON metadata");
-    const auto* begin = reinterpret_cast<const char*>(input.data());
+    if (input.size() > limit) {
+        throw std::length_error("JSON input exceeds metadata budget");
+    }
+    if (input.empty()) {
+        throw std::invalid_argument("empty JSON metadata");
+    }
+    // Character views may inspect object bytes; no typed object is reinterpreted.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    const std::span<const char> text{reinterpret_cast<const char *>(input.data()), input.size()};
     JsonPreflight check(limit - input.size());
-    if (!Json::sax_parse(begin, begin + input.size(), &check)) {
+    if (!Json::sax_parse(text.begin(), text.end(), &check)) {
         throw std::invalid_argument("malformed JSON metadata");
     }
-    auto value = Json::parse(begin, begin + input.size());
-    if (!value.is_object()) throw std::invalid_argument("JSON metadata root must be an object");
+    auto value = Json::parse(text.begin(), text.end());
+    if (!value.is_object()) {
+        throw std::invalid_argument("JSON metadata root must be an object");
+    }
     return {std::move(value), input.size() + check.used()};
 }
 
-inline std::uint64_t unsigned_integer(const Json& value) {
-    if (!value.is_number_integer()) throw std::invalid_argument("expected unsigned JSON integer");
-    if (value.is_number_unsigned()) return value.get<std::uint64_t>();
+inline std::uint64_t unsigned_integer(const Json &value) {
+    if (!value.is_number_integer()) {
+        throw std::invalid_argument("expected unsigned JSON integer");
+    }
+    if (value.is_number_unsigned()) {
+        return value.get<std::uint64_t>();
+    }
     const auto signed_value = value.get<std::int64_t>();
-    if (signed_value < 0) throw std::invalid_argument("negative JSON dimension or offset");
+    if (signed_value < 0) {
+        throw std::invalid_argument("negative JSON dimension or offset");
+    }
     return static_cast<std::uint64_t>(signed_value);
 }
 
-inline std::size_t size_integer(const Json& value) {
+inline std::size_t size_integer(const Json &value) {
     const auto number = unsigned_integer(value);
     if (number > std::numeric_limits<std::size_t>::max()) {
         throw std::length_error("JSON size exceeds host address range");
     }
     return static_cast<std::size_t>(number);
 }
-}  // namespace dolittle::tensors::formats::detail
+} // namespace dolittle::tensors::formats::detail

@@ -1,0 +1,13 @@
+# LLVM 21.1.8 (macOS host), 22.1.8 (Linux/CUDA); run through `python3 scripts/check.py tidy`.
+# Match Serenity's check families and fail on every finding. Do not copy its
+# Metal-specific analyzer exception: Dolittle currently implements CUDA.
+Checks: >
+  -*,
+  google-*,
+  cppcoreguidelines-*,
+  bugprone-*,
+  performance-*,
+  clang-analyzer-*
+WarningsAsErrors: '*'
+HeaderFilterRegex: '.*/(src|tests)/.*'
+ExcludeHeaderFilterRegex: '.*/(build|_deps)/.*'

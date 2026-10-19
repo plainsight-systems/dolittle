@@ -84,10 +84,21 @@
 
 namespace dolittle::models {
 
-struct ParameterId { std::size_t value; };
-struct ParameterSpec { std::string role; tensors::Layout layout; };
-struct ParameterInput { ParameterId parameter; kernels::TensorId tensor; };
-struct ObservationValue { ObservationSite site; kernels::TensorId tensor; };
+struct ParameterId {
+    std::size_t value;
+};
+struct ParameterSpec {
+    std::string role;
+    tensors::Layout layout;
+};
+struct ParameterInput {
+    ParameterId parameter;
+    kernels::TensorId tensor;
+};
+struct ObservationValue {
+    ObservationSite site;
+    kernels::TensorId tensor;
+};
 struct ForwardRecipe {
     std::vector<tensors::Layout> tensors;
     kernels::TensorId token_input;
@@ -109,29 +120,31 @@ struct IncrementalRecipe {
 };
 
 class Model {
-public:
+  public:
+    Model(Model &&) = delete;
+    Model &operator=(Model &&) = delete;
     virtual ~Model();
     [[nodiscard]] virtual std::string_view identity() const noexcept = 0;
     [[nodiscard]] virtual std::size_t vocabulary_size() const noexcept = 0;
     [[nodiscard]] virtual SequenceLength context_limit() const noexcept = 0;
     [[nodiscard]] virtual std::span<const ParameterSpec> parameters() const noexcept = 0;
-    [[nodiscard]] virtual std::vector<ObservationSite> observation_sites(
-        tensors::ComputationMode mode) const = 0;
-    [[nodiscard]] virtual ForwardRecipe full_forward(
-        SequenceLength length, tensors::ComputationMode mode,
-        std::span<const TokenPosition> logit_positions) const = 0;
+    [[nodiscard]] virtual std::vector<ObservationSite>
+    observation_sites(tensors::ComputationMode mode) const = 0;
+    [[nodiscard]] virtual ForwardRecipe
+    full_forward(SequenceLength length, tensors::ComputationMode mode,
+                 std::span<const TokenPosition> logit_positions) const = 0;
     [[nodiscard]] virtual IncrementalRecipe incremental_forward(SequenceLength max_chunk,
                                                                 tensors::ComputationMode mode) const;
-    Model(const Model&) = delete;
-    Model& operator=(const Model&) = delete;
-protected:
+    Model(const Model &) = delete;
+    Model &operator=(const Model &) = delete;
+
+  protected:
     Model();
 };
 
-void validate_recipe(
-    const Model& model, const ForwardRecipe& recipe, SequenceLength length,
-    tensors::ComputationMode mode, std::span<const TokenPosition> logit_positions);
+void validate_recipe(const Model &model, const ForwardRecipe &recipe, SequenceLength length,
+                     tensors::ComputationMode mode, std::span<const TokenPosition> logit_positions);
 
 void validate_incremental_recipe(const Model &, const IncrementalRecipe &, SequenceLength max_chunk,
                                  tensors::ComputationMode);
-}  // namespace dolittle::models
+} // namespace dolittle::models

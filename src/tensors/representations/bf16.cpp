@@ -21,36 +21,44 @@
 #include <limits>
 
 namespace dolittle::tensors {
+inline constexpr int binary32_digits = 24;
+inline constexpr int binary32_max_exponent = 128;
+inline constexpr unsigned bf16_shift = 16;
+inline constexpr std::uint32_t magnitude_mask = 0x7fffffffU;
+inline constexpr std::uint32_t infinity_bits = 0x7f800000U;
+inline constexpr std::uint16_t quiet_nan_bits = 0x7fc0;
+inline constexpr std::uint32_t rounding_bias = 0x7fffU;
+inline constexpr unsigned byte_bits = 8;
+inline constexpr unsigned byte_mask = 0xffU;
 
-static_assert(sizeof(float) == sizeof(std::uint32_t) &&
-              std::numeric_limits<float>::is_iec559 &&
-              std::numeric_limits<float>::radix == 2 &&
-              std::numeric_limits<float>::digits == 24 &&
-              std::numeric_limits<float>::max_exponent == 128,
+static_assert(sizeof(float) == sizeof(std::uint32_t) && std::numeric_limits<float>::is_iec559 &&
+                  std::numeric_limits<float>::radix == 2 &&
+                  std::numeric_limits<float>::digits == binary32_digits &&
+                  std::numeric_limits<float>::max_exponent == binary32_max_exponent,
               "BF16 conversion requires IEEE binary32 float");
 
 float to_float(BFloat16 value) noexcept {
-    return std::bit_cast<float>(static_cast<std::uint32_t>(value.bits) << 16);
+    return std::bit_cast<float>(static_cast<std::uint32_t>(value.bits) << bf16_shift);
 }
 
 BFloat16 from_float(float value) noexcept {
     const auto bits = std::bit_cast<std::uint32_t>(value);
-    if ((bits & 0x7fffffffU) > 0x7f800000U) {
-        return BFloat16{0x7fc0};
+    if ((bits & magnitude_mask) > infinity_bits) {
+        return BFloat16{quiet_nan_bits};
     }
-    const auto rounded = bits + 0x7fffU + ((bits >> 16) & 1U);
-    return BFloat16{static_cast<std::uint16_t>(rounded >> 16)};
+    const auto rounded = bits + rounding_bias + ((bits >> bf16_shift) & 1U);
+    return BFloat16{static_cast<std::uint16_t>(rounded >> bf16_shift)};
 }
 
 BFloat16 read_le(std::span<const std::byte, 2> bytes) noexcept {
-    const auto low = std::to_integer<std::uint16_t>(bytes[0]);
-    const auto high = std::to_integer<std::uint16_t>(bytes[1]);
-    return BFloat16{static_cast<std::uint16_t>(low | (high << 8))};
+    const auto low = std::to_integer<std::uint16_t>(bytes.front());
+    const auto high = std::to_integer<std::uint16_t>(bytes.back());
+    return BFloat16{static_cast<std::uint16_t>(low | (high << byte_bits))};
 }
 
 void write_le(BFloat16 value, std::span<std::byte, 2> bytes) noexcept {
-    bytes[0] = static_cast<std::byte>(value.bits & 0xffU);
-    bytes[1] = static_cast<std::byte>(value.bits >> 8);
+    bytes.front() = static_cast<std::byte>(value.bits & byte_mask);
+    bytes.back() = static_cast<std::byte>(value.bits >> byte_bits);
 }
 
-}  // namespace dolittle::tensors
+} // namespace dolittle::tensors

@@ -1,0 +1,14 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Dolittle: clang-tidy",
+      "type": "process",
+      "command": "python3",
+      "args": ["scripts/check.py", "tidy", "--build-dir", "${command:cmake.buildDirectory}"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": "$gcc",
+      "group": "test"
+    }
+  ]
+}

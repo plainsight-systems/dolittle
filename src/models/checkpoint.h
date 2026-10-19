@@ -36,16 +36,19 @@
 namespace dolittle::models {
 
 class BoundCheckpoint {
-public:
+  public:
+    BoundCheckpoint(BoundCheckpoint &&) = delete;
+    BoundCheckpoint &operator=(BoundCheckpoint &&) = delete;
     virtual ~BoundCheckpoint();
-    [[nodiscard]] virtual const Model& model() const noexcept = 0;
+    [[nodiscard]] virtual const Model &model() const noexcept = 0;
     [[nodiscard]] virtual std::string_view identity() const noexcept = 0;
     [[nodiscard]] virtual tensors::HostView parameter(ParameterId id) const = 0;
     [[nodiscard]] virtual std::size_t parameter_bytes() const noexcept = 0;
-    BoundCheckpoint(const BoundCheckpoint&) = delete;
-    BoundCheckpoint& operator=(const BoundCheckpoint&) = delete;
-protected:
+    BoundCheckpoint(const BoundCheckpoint &) = delete;
+    BoundCheckpoint &operator=(const BoundCheckpoint &) = delete;
+
+  protected:
     BoundCheckpoint();
 };
 
-}  // namespace dolittle::models
+} // namespace dolittle::models

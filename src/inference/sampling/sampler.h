@@ -40,7 +40,7 @@
 #include <span>
 
 namespace dolittle::inference::sampling {
-enum class SelectionMode { greedy, categorical };
+enum class SelectionMode : std::uint8_t { greedy, categorical };
 struct Settings {
     SelectionMode mode;
     double temperature;

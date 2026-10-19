@@ -10,7 +10,7 @@ The full-forward and cached target-generation paths are implemented. Builds and
 unit checks alone do not establish transformer equivalence: use the independent
 GPU scenarios below. NLA computation and the browser/API remain later work.
 
-The suite contains **fifteen C++ unit executables, twelve Python unit tests and
+The suite contains **sixteen C++ unit executables, sixteen Python unit tests and
 five integration scenarios**. Fixtures and full weights stay in ignored caches
 with recorded revisions, hashes and reference environment details.
 
@@ -56,6 +56,13 @@ Project C++ targets use C++20 without GNU language extensions and
 compiler. `-Wpedantic` is CXX-only because NVCC's generated host stubs contain
 GNU line markers. These settings apply to tests as well as engine libraries.
 
+Clang-tidy is a separate static-analysis gate with the same check families as
+Serenity and findings promoted to errors. Use `python3 scripts/check.py tidy`
+after configuring the host preset, or the Linux analysis container for the
+CUDA build. See [static-analysis setup and scope](../scripts/README.md#static-analysis)
+for pinned versions, editor tasks, CUDA compatibility and reports. Its four
+command-adaptation unit tests use in-memory inputs, with no compiler or GPU.
+
 ## Host unit tests
 
 The root CMake build requires C++20, CMake 3.24+ and OpenSSL 3 development files.
@@ -89,6 +96,7 @@ workflows hidden behind a unit label.
 | Sequence progression | Emitted versus consumed counts, stop precedence and final-token consumption |
 | Byte BPE | Ranked merges, normalization, literal added tokens, raw-byte provenance and bounds |
 | Qwen3 chat | Exact prompt bytes, optional system messages, thinking modes and delimiter classification |
+| Checked host bounds | Empty/end/oversized rejection, borrowed reference identity and constness |
 | Tensor layouts | Scalar/empty/strided extents, byte containment, invalid metadata and arithmetic overflow |
 | BF16 | All 65,536 stored encodings, exact widening/serialization, nearest-even boundaries and canonical NaNs |
 | Observation preparation | Configurable sites/positions, owned metadata, moves and independent byte/row budgets |

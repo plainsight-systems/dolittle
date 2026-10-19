@@ -23,6 +23,7 @@
  * cpp-perf-guidelines GPU.2: validate dense logical addressing before selection.
  * Source: guidelines/gpu/GPU.2-shape-data-for-coalesced-lane-access.md.
  */
+#include "bounds.h"
 #include "kernels/operations.h"
 
 #include <cmath>
@@ -49,105 +50,99 @@ std::size_t checked_product(std::size_t a, std::size_t b) {
     return a * b;
 }
 
-std::size_t trailing_elements(const Layout& layout) {
+std::size_t trailing_elements(const Layout &layout) {
     std::size_t elements = 1;
     for (std::size_t i = 1; i < layout.shape.size(); ++i) {
-        elements = checked_product(elements, layout.shape[i]);
+        elements = checked_product(elements, layout.shape.at(i));
     }
     return elements;
 }
 
 class DescriptorValidator {
-public:
+  public:
     DescriptorValidator(std::span<const Layout> layouts, ElementType storage)
         : layouts_(layouts), storage_(storage) {
         uses_.reserve(4);
     }
 
-    void operator()(const Embedding& op) {
-        const auto& ids = operand(op.tokens, OperandAccess::read, ElementType::uint32);
-        const auto& weight = read(op.weight);
-        const auto& output = write(op.output);
-        require(ids.shape.size() == 1 && weight.shape.size() == 2 &&
-                output.shape.size() == 2);
-        require(output.shape[0] == ids.shape[0] &&
-                output.shape[1] == weight.shape[1]);
+    void operator()(const Embedding &op) {
+        const auto &ids = operand(op.tokens, OperandAccess::read, ElementType::uint32);
+        const auto &weight = read(op.weight);
+        const auto &output = write(op.output);
+        require(ids.shape.size() == 1 && weight.shape.size() == 2 && output.shape.size() == 2);
+        require(output.shape.at(0) == ids.shape.at(0) && output.shape.at(1) == weight.shape.at(1));
     }
 
-    void operator()(const Projection& op) {
-        const auto& input = read(op.input);
-        const auto& weight = read(op.weight);
-        const auto& output = write(op.output);
-        require(input.shape.size() >= 2 && output.shape.size() >= 2 &&
-                weight.shape.size() == 2);
-        require(input.shape[0] == output.shape[0] &&
-                trailing_elements(input) == weight.shape[1] &&
-                trailing_elements(output) == weight.shape[0]);
+    void operator()(const Projection &op) {
+        const auto &input = read(op.input);
+        const auto &weight = read(op.weight);
+        const auto &output = write(op.output);
+        require(input.shape.size() >= 2 && output.shape.size() >= 2 && weight.shape.size() == 2);
+        require(input.shape.at(0) == output.shape.at(0) && trailing_elements(input) == weight.shape.at(1) &&
+                trailing_elements(output) == weight.shape.at(0));
     }
 
-    void operator()(const RmsNorm& op) {
-        const auto& input = read(op.input);
-        const auto& weight = read(op.weight);
-        const auto& output = write(op.output);
+    void operator()(const RmsNorm &op) {
+        const auto &input = read(op.input);
+        const auto &weight = read(op.weight);
+        const auto &output = write(op.output);
         require(!input.shape.empty() && weight.shape.size() == 1);
-        require(input.shape == output.shape && input.shape.back() == weight.shape[0]);
+        require(input.shape == output.shape && input.shape.back() == weight.shape.at(0));
         require(std::isfinite(op.epsilon) && op.epsilon > 0);
     }
 
-    void operator()(const Rotary& op) {
-        const auto& input = read(op.input);
-        const auto& output = write(op.output);
+    void operator()(const Rotary &op) {
+        const auto &input = read(op.input);
+        const auto &output = write(op.output);
         require(input.shape.size() == 3 && input.shape == output.shape);
-        require(input.shape[2] % 2 == 0 && std::isfinite(op.theta) && op.theta > 0);
-        if (op.first_position > std::numeric_limits<std::size_t>::max() -
-                                    (input.shape[0] - 1)) {
+        require(input.shape.at(2) % 2 == 0 && std::isfinite(op.theta) && op.theta > 0);
+        if (op.first_position > std::numeric_limits<std::size_t>::max() - (input.shape.at(0) - 1)) {
             throw std::length_error("rotary position range overflows");
         }
     }
 
-    void operator()(const CausalAttention& op) {
-        const auto& query = read(op.query);
-        const auto& key = read(op.key);
-        const auto& value = read(op.value);
-        const auto& output = write(op.output);
+    void operator()(const CausalAttention &op) {
+        const auto &query = read(op.query);
+        const auto &key = read(op.key);
+        const auto &value = read(op.value);
+        const auto &output = write(op.output);
         require(query.shape.size() == 3 && key.shape.size() == 3);
         require(key.shape == value.shape && query.shape == output.shape);
-        require(query.shape[0] == key.shape[0] && query.shape[2] == key.shape[2] &&
-                query.shape[1] % key.shape[1] == 0);
+        require(query.shape.at(0) == key.shape.at(0) && query.shape.at(2) == key.shape.at(2) &&
+                query.shape.at(1) % key.shape.at(1) == 0);
     }
 
-    void operator()(const Add& op) { elementwise(op.left, op.right, op.output); }
-    void operator()(const SiluMultiply& op) { elementwise(op.gate, op.up, op.output); }
+    void operator()(const Add &op) { elementwise(op); }
+    void operator()(const SiluMultiply &op) { elementwise(Add{op.gate, op.up, op.output}); }
 
-    void operator()(const GatherRows& op) {
-        const auto& input = read(op.input);
-        const auto& output = write(op.output);
+    void operator()(const GatherRows &op) {
+        const auto &input = read(op.input);
+        const auto &output = write(op.output);
         require(!input.shape.empty() && output.shape.size() == input.shape.size());
-        require(!op.rows.empty() && output.shape[0] == op.rows.size());
+        require(!op.rows.empty() && output.shape.at(0) == op.rows.size());
         for (std::size_t i = 1; i < input.shape.size(); ++i) {
-            require(input.shape[i] == output.shape[i]);
+            require(input.shape.at(i) == output.shape.at(i));
         }
         for (std::size_t i = 0; i < op.rows.size(); ++i) {
-            require(op.rows[i] < input.shape[0]);
-            require(i == 0 || op.rows[i - 1] < op.rows[i]);
+            require(op.rows.at(i) < input.shape.at(0));
+            require(i == 0 || op.rows.at(i - 1) < op.rows.at(i));
         }
     }
 
     std::vector<OperandUse> take_uses() { return std::move(uses_); }
 
-private:
-    const Layout& operand(TensorId id, OperandAccess access, ElementType type) {
+  private:
+    const Layout &operand(TensorId id, OperandAccess access, ElementType type) {
         require(id.value < layouts_.size());
-        const auto& layout = layouts_[id.value];
+        const auto &layout = dolittle::at(layouts_, id.value);
         require(layout.element_type == type);
         require(tensors::required_bytes(layout) != 0);
         auto expected_stride = tensors::element_bytes(type);
         for (auto i = layout.shape.size(); i != 0; --i) {
-            require(layout.shape[i - 1] == 1 ||
-                    layout.byte_strides[i - 1] == expected_stride);
-            expected_stride = checked_product(expected_stride, layout.shape[i - 1]);
+            require(layout.shape.at(i - 1) == 1 || layout.byte_strides.at(i - 1) == expected_stride);
+            expected_stride = checked_product(expected_stride, layout.shape.at(i - 1));
         }
-        for (const auto& use : uses_) {
+        for (const auto &use : uses_) {
             if (use.tensor.value == id.value) {
                 require(use.access == OperandAccess::read && access == OperandAccess::read);
                 return layout;
@@ -157,13 +152,13 @@ private:
         return layout;
     }
 
-    const Layout& read(TensorId id) { return operand(id, OperandAccess::read, storage_); }
-    const Layout& write(TensorId id) { return operand(id, OperandAccess::write, storage_); }
+    const Layout &read(TensorId id) { return operand(id, OperandAccess::read, storage_); }
+    const Layout &write(TensorId id) { return operand(id, OperandAccess::write, storage_); }
 
-    void elementwise(TensorId a, TensorId b, TensorId output) {
-        const auto& left = read(a);
-        const auto& right = read(b);
-        const auto& result = write(output);
+    void elementwise(const Add &op) {
+        const auto &left = read(op.left);
+        const auto &right = read(op.right);
+        const auto &result = write(op.output);
         require(left.shape == right.shape && left.shape == result.shape);
     }
 
@@ -172,11 +167,10 @@ private:
     std::vector<OperandUse> uses_;
 };
 
-}  // namespace
+} // namespace
 
-std::vector<OperandUse> validate_operation(
-    const Operation& operation, std::span<const Layout> layouts,
-    tensors::ComputationMode mode) {
+std::vector<OperandUse> validate_operation(const Operation &operation, std::span<const Layout> layouts,
+                                           tensors::ComputationMode mode) {
     require((mode.activation_storage == ElementType::bfloat16 ||
              mode.activation_storage == ElementType::float32) &&
             mode.reduction_accumulation == ElementType::float32);
@@ -186,4 +180,4 @@ std::vector<OperandUse> validate_operation(
     return validator.take_uses();
 }
 
-}  // namespace dolittle::kernels
+} // namespace dolittle::kernels

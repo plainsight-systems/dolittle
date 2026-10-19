@@ -1,0 +1,4 @@
+# Expected values and boundary inputs are the test's contract, as in Serenity.
+InheritParentConfig: true
+Checks: >
+  -cppcoreguidelines-avoid-magic-numbers

@@ -168,7 +168,7 @@ configurable; shared execution does not hardcode block 24. NLA execution and
 the application remain future work.
 
 The first forward slice is accepted and pushed as `77f038c`. Target generation
-and subsequent kernel corrections are verified and accepted for commit/push.
+and subsequent kernel corrections are verified and pushed as `20d8740`.
 The restored independent
 BF16/FP32 oracle now passes: tiny FP32, tiny BF16 and pinned Qwen3-8B pass native
 and forced-PTX execution on the 3090 Ti. All 485 measured 8B numerical comparisons
@@ -219,6 +219,19 @@ C++ builds use C++20 without GNU extensions and warnings as errors. CUDA builds
 also promote NVCC diagnostics to errors. CMake owns editor include paths and
 compiler settings through the shared presets and VS Code configuration provider.
 Local machine overrides belong in ignored `CMakeUserPresets.json`.
+
+Andrew clarified that the requested tooling is clang-tidy static analysis like
+Serenity, rather than clangd. The policy, check entry point and VS Code task are
+implemented. Keep the same five check families, warnings as errors, and the
+test-literal exception. macOS host analysis uses LLVM 21.1.8; Linux uses 22.1.8
+because CUDA 13.2 headers do not parse with LLVM 21. The optional analysis image
+does not replace the production NVCC image. CUDA analysis checks both host and
+device ASTs with the narrowly documented SDK-version compatibility exception.
+The source cleanup uses checked host span/container access, explicit resource
+state checks and named operand/source fields. Native CUDA indexing and C API
+byte boundaries have narrow, documented exceptions; no check family or findings
+baseline is disabled. The independent oracle, fixtures and acceptance limits
+remain fixed. Diagnostics and detailed validation evidence stay ignored.
 
 See [QUEUE.md](QUEUE.md), [architecture](../architecture/README.md) and
 [build and verification commands](../../tests/README.md).

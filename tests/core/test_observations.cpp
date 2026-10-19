@@ -18,6 +18,7 @@
  * cpp-perf-guidelines CDSA.32: compare resolved rows to requested logical order.
  * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
  */
+#include "bounds.h"
 #include "inference/observations.h"
 #include "tests/support/check.h"
 
@@ -29,11 +30,14 @@
 
 namespace {
 
-using namespace dolittle;
-using tests::check;
-using tests::expect_throws;
+namespace tensors = dolittle::tensors;
+namespace models = dolittle::models;
+namespace inference = dolittle::inference;
+namespace tests = dolittle::tests;
 using models::ObservationBoundary;
 using tensors::ElementType;
+using tests::check;
+using tests::expect_throws;
 
 constexpr models::ObservationSite input_site{
     {ObservationBoundary::block_input, {3}}, 3, ElementType::bfloat16};
@@ -51,42 +55,46 @@ void selected_rows_and_lifetime() {
     auto plan = [] {
         auto local_catalog = catalog;
         std::array requests{
-            inference::ObservationRequest{output_site.point,
-                std::vector<models::TokenPosition>{{0}, {3}}},
+            inference::ObservationRequest{output_site.point, std::vector<models::TokenPosition>{{0}, {3}}},
             inference::ObservationRequest{input_site.point, inference::AllPositions{}}};
         auto result = inference::prepare_observations(local_catalog, {4}, requests, {40, 6});
-        local_catalog[1].vector_width = 100;
-        std::get<std::vector<models::TokenPosition>>(requests[0].positions)[0].value = 2;
+        local_catalog.at(1).vector_width = 100;
+        std::get<std::vector<models::TokenPosition>>(requests.at(0).positions).at(0).value = 2;
         return result;
     }();
     check(plan.sequence_length().value == 4, "sequence length retained");
     check(plan.payload_bytes() == 40, "mixed dtype payload extent");
     const auto entries = plan.entries();
     check(entries.size() == 2, "all requests retained");
-    check(entries[0].site.point.block.value == 17 &&
-          entries[0].site.point.boundary == ObservationBoundary::block_output &&
-          entries[0].site.vector_width == 2 &&
-          entries[0].site.storage_type == ElementType::float32,
+    check(dolittle::at(entries, 0).site.point.block.value == 17 &&
+              dolittle::at(entries, 0).site.point.boundary == ObservationBoundary::block_output &&
+              dolittle::at(entries, 0).site.vector_width == 2 &&
+              dolittle::at(entries, 0).site.storage_type == ElementType::float32,
           "site metadata retained independently of caller");
-    check(entries[0].positions.size() == 2 && entries[0].positions[0].value == 0 &&
-          entries[0].positions[1].value == 3, "explicit rows retained independently");
-    check(entries[1].positions.size() == 4, "all positions expands sequence");
-    for (std::size_t i = 0; i < entries[1].positions.size(); ++i) {
-        check(entries[1].positions[i].value == i, "all positions preserves consumed order");
+    check(dolittle::at(entries, 0).positions.size() == 2 &&
+              dolittle::at(dolittle::at(entries, 0).positions, 0).value == 0 &&
+              dolittle::at(dolittle::at(entries, 0).positions, 1).value == 3,
+          "explicit rows retained independently");
+    check(dolittle::at(entries, 1).positions.size() == 4, "all positions expands sequence");
+    for (std::size_t i = 0; i < dolittle::at(entries, 1).positions.size(); ++i) {
+        check(dolittle::at(dolittle::at(entries, 1).positions, i).value == i,
+              "all positions preserves consumed order");
     }
     std::size_t end = 0;
-    for (const auto& entry : entries) {
+    for (const auto &entry : entries) {
         check(entry.byte_offset == end, "payload is contiguous in request order");
         check(entry.byte_offset <= plan.payload_bytes() &&
-              entry.byte_count <= plan.payload_bytes() - entry.byte_offset,
+                  entry.byte_count <= plan.payload_bytes() - entry.byte_offset,
               "payload range contained");
         end += entry.byte_count;
     }
     check(end == plan.payload_bytes(), "payload ranges cover total");
     auto moved = std::move(plan);
-    check(moved.entries()[0].positions[1].value == 3, "move retains position ownership");
+    check(dolittle::at(dolittle::at(moved.entries(), 0).positions, 1).value == 3,
+          "move retains position ownership");
     plan = std::move(moved);
-    check(plan.entries()[1].positions[3].value == 3, "moved-from owner can be reassigned");
+    check(dolittle::at(dolittle::at(plan.entries(), 1).positions, 3).value == 3,
+          "moved-from owner can be reassigned");
     auto destination = inference::prepare_observations({}, {1}, {}, {0, 0});
     destination = std::move(plan);
     check(destination.payload_bytes() == 40, "move assignment transfers populated plan");
@@ -95,11 +103,11 @@ void selected_rows_and_lifetime() {
 void empty_selections() {
     const auto empty = inference::prepare_observations({}, {3}, {}, {0, 0});
     check(empty.entries().empty() && empty.payload_bytes() == 0, "empty requests have no payload");
-    const std::array requests{inference::ObservationRequest{
-        input_site.point, std::vector<models::TokenPosition>{}}};
+    const std::array requests{
+        inference::ObservationRequest{input_site.point, std::vector<models::TokenPosition>{}}};
     const auto plan = inference::prepare_observations(catalog, {3}, requests, {0, 0});
-    check(plan.entries().size() == 1 && plan.entries()[0].positions.empty() &&
-          plan.entries()[0].byte_count == 0 && plan.payload_bytes() == 0,
+    check(plan.entries().size() == 1 && dolittle::at(plan.entries(), 0).positions.empty() &&
+              dolittle::at(plan.entries(), 0).byte_count == 0 && plan.payload_bytes() == 0,
           "explicit empty request retained without payload");
     auto wide = input_site;
     wide.vector_width = std::numeric_limits<std::size_t>::max();
@@ -109,83 +117,73 @@ void empty_selections() {
 }
 
 void malformed_inputs() {
-    expect_throws<std::invalid_argument>([] {
-        (void)inference::prepare_observations(catalog, {0}, {}, generous_limits);
-    });
+    expect_throws<std::invalid_argument>(
+        [] { (void)inference::prepare_observations(catalog, {0}, {}, generous_limits); });
     const std::array duplicate_catalog{input_site, input_site};
-    expect_throws<std::invalid_argument>([&] {
-        (void)inference::prepare_observations(duplicate_catalog, {4}, {}, generous_limits);
-    });
+    expect_throws<std::invalid_argument>(
+        [&] { (void)inference::prepare_observations(duplicate_catalog, {4}, {}, generous_limits); });
     for (auto invalid : std::array{
-             models::ObservationSite{{static_cast<ObservationBoundary>(99), {3}}, 3,
-                                     ElementType::bfloat16},
+             models::ObservationSite{{static_cast<ObservationBoundary>(99), {3}}, 3, ElementType::bfloat16},
              models::ObservationSite{input_site.point, 0, ElementType::bfloat16},
              models::ObservationSite{input_site.point, 3, static_cast<ElementType>(99)},
              models::ObservationSite{input_site.point, 3, ElementType::uint32}}) {
         const std::array invalid_catalog{invalid};
-        expect_throws<std::invalid_argument>([&] {
-            (void)inference::prepare_observations(invalid_catalog, {4}, {}, generous_limits);
-        });
+        expect_throws<std::invalid_argument>(
+            [&] { (void)inference::prepare_observations(invalid_catalog, {4}, {}, generous_limits); });
     }
-    for (const auto point : std::array{
-             models::ObservationPoint{ObservationBoundary::block_output, {3}},
-             models::ObservationPoint{static_cast<ObservationBoundary>(99), {3}}}) {
+    for (const auto point : std::array{models::ObservationPoint{ObservationBoundary::block_output, {3}},
+                                       models::ObservationPoint{static_cast<ObservationBoundary>(99), {3}}}) {
         const std::array requests{inference::ObservationRequest{point, inference::AllPositions{}}};
-        expect_throws<std::invalid_argument>([&] {
-            (void)inference::prepare_observations(catalog, {4}, requests, generous_limits);
-        });
+        expect_throws<std::invalid_argument>(
+            [&] { (void)inference::prepare_observations(catalog, {4}, requests, generous_limits); });
     }
     const std::array duplicates{
         inference::ObservationRequest{input_site.point, inference::AllPositions{}},
         inference::ObservationRequest{input_site.point, std::vector<models::TokenPosition>{}}};
-    expect_throws<std::invalid_argument>([&] {
-        (void)inference::prepare_observations(catalog, {4}, duplicates, generous_limits);
-    });
-    for (const auto& positions : std::array{
-             std::vector<models::TokenPosition>{{1}, {1}},
-             std::vector<models::TokenPosition>{{2}, {1}},
-             std::vector<models::TokenPosition>{{4}}}) {
+    expect_throws<std::invalid_argument>(
+        [&] { (void)inference::prepare_observations(catalog, {4}, duplicates, generous_limits); });
+    for (const auto &positions :
+         std::array{std::vector<models::TokenPosition>{{1}, {1}},
+                    std::vector<models::TokenPosition>{{2}, {1}}, std::vector<models::TokenPosition>{{4}}}) {
         const std::array requests{inference::ObservationRequest{input_site.point, positions}};
-        expect_throws<std::invalid_argument>([&] {
-            (void)inference::prepare_observations(catalog, {4}, requests, generous_limits);
-        });
+        expect_throws<std::invalid_argument>(
+            [&] { (void)inference::prepare_observations(catalog, {4}, requests, generous_limits); });
     }
 }
 
 void checked_limits() {
-    const std::array requests{
-        inference::ObservationRequest{input_site.point, inference::AllPositions{}},
-        inference::ObservationRequest{output_site.point, inference::AllPositions{}}};
+    const std::array requests{inference::ObservationRequest{input_site.point, inference::AllPositions{}},
+                              inference::ObservationRequest{output_site.point, inference::AllPositions{}}};
     const auto exact = inference::prepare_observations(catalog, {4}, requests, {56, 8});
     check(exact.payload_bytes() == 56, "inclusive exact budget accepted");
-    for (const auto limits : std::array{
-             inference::ObservationLimits{55, 8}, inference::ObservationLimits{56, 7}}) {
-        expect_throws<std::length_error>([&] {
-            (void)inference::prepare_observations(catalog, {4}, requests, limits);
-        });
+    for (const auto limits :
+         std::array{inference::ObservationLimits{55, 8}, inference::ObservationLimits{56, 7}}) {
+        expect_throws<std::length_error>(
+            [&] { (void)inference::prepare_observations(catalog, {4}, requests, limits); });
     }
     constexpr auto maximum = std::numeric_limits<std::size_t>::max();
-    expect_throws<std::length_error>([&] {
-        (void)inference::prepare_observations(catalog, {maximum}, requests, {maximum, maximum});
-    });
+    expect_throws<std::length_error>(
+        [&] { (void)inference::prepare_observations(catalog, {maximum}, requests, {maximum, maximum}); });
     auto wide_catalog = catalog;
-    wide_catalog[0].vector_width = maximum / 4;
-    wide_catalog[0].storage_type = ElementType::float32;
-    wide_catalog[1].vector_width = maximum / 4;
-    expect_throws<std::length_error>([&] {
-        (void)inference::prepare_observations(wide_catalog, {1}, requests, {maximum, maximum});
-    });
+    wide_catalog.at(0).vector_width = maximum / 4;
+    wide_catalog.at(0).storage_type = ElementType::float32;
+    wide_catalog.at(1).vector_width = maximum / 4;
+    expect_throws<std::length_error>(
+        [&] { (void)inference::prepare_observations(wide_catalog, {1}, requests, {maximum, maximum}); });
     // Row metadata has its own bound, independent of the generous byte budget.
-    expect_throws<std::length_error>([&] {
-        (void)inference::prepare_observations(catalog, {maximum / 16}, requests, {maximum, 1});
-    });
+    expect_throws<std::length_error>(
+        [&] { (void)inference::prepare_observations(catalog, {maximum / 16}, requests, {maximum, 1}); });
 }
 
-}  // namespace
+} // namespace
 
-int main() {
+int main() try {
     selected_rows_and_lifetime();
     empty_selections();
     malformed_inputs();
     checked_limits();
+} catch (const std::exception &error) {
+    return dolittle::tests::report_failure(error.what());
+} catch (...) {
+    return dolittle::tests::report_failure("unexpected non-standard exception");
 }

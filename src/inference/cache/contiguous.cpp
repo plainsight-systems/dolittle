@@ -61,13 +61,15 @@
 namespace dolittle::inference::cache {
 namespace {
 std::size_t product(std::size_t a, std::size_t b) {
-    if (b && a > std::numeric_limits<std::size_t>::max() / b)
+    if (b && a > std::numeric_limits<std::size_t>::max() / b) {
         throw std::length_error("cache size overflow");
+    }
     return a * b;
 }
 std::size_t sum(std::size_t a, std::size_t b) {
-    if (b > std::numeric_limits<std::size_t>::max() - a)
+    if (b > std::numeric_limits<std::size_t>::max() - a) {
         throw std::length_error("cache size overflow");
+    }
     return a + b;
 }
 } // namespace
@@ -75,12 +77,14 @@ Footprint estimate_contiguous(const Specification &s) {
     if (s.checkpoint_identity.empty() || !s.capacity || s.layers.empty() ||
         (s.mode.activation_storage != tensors::ElementType::bfloat16 &&
          s.mode.activation_storage != tensors::ElementType::float32) ||
-        s.mode.reduction_accumulation != tensors::ElementType::float32)
+        s.mode.reduction_accumulation != tensors::ElementType::float32) {
         throw std::invalid_argument("invalid contiguous cache specification");
+    }
     std::size_t total = 0;
     for (auto layer : s.layers) {
-        if (!layer.kv_heads || !layer.head_width)
+        if (!layer.kv_heads || !layer.head_width) {
             throw std::invalid_argument("empty cache layer");
+        }
         total = sum(total, product(product(product(product(2, s.capacity), layer.kv_heads), layer.head_width),
                                    tensors::element_bytes(s.mode.activation_storage)));
     }
@@ -102,9 +106,15 @@ struct Contiguous::Impl {
             offset = sum(offset, product(2, size));
         }
     }
+    Impl(const Impl &) = delete;
+    Impl &operator=(const Impl &) = delete;
+    Impl(Impl &&) = delete;
+    Impl &operator=(Impl &&) = delete;
     ~Impl() {
         try {
             queue->drain();
+            // Destruction cannot throw; the buffer owner performs a final no-throw drain.
+            // NOLINTNEXTLINE(bugprone-empty-catch)
         } catch (...) {
         }
     }
@@ -113,36 +123,38 @@ Contiguous::Contiguous(std::unique_ptr<Impl> p) : impl_(std::move(p)) {}
 Contiguous::~Contiguous() = default;
 Contiguous::Contiguous(Contiguous &&) noexcept = default;
 Contiguous &Contiguous::operator=(Contiguous &&) noexcept = default;
-const Specification &Contiguous::specification() const noexcept {
-    return impl_->spec;
-}
+const Specification &Contiguous::specification() const noexcept { return impl_->spec; }
 ContiguousLayerView Contiguous::layer(std::size_t block) const {
-    if (block >= impl_->bytes.size())
+    if (block >= impl_->bytes.size()) {
         throw std::invalid_argument("cache layer out of range");
-    const auto n = impl_->bytes[block], offset = impl_->offsets[block];
+    }
+    const auto n = impl_->bytes.at(block), offset = impl_->offsets.at(block);
     return {{&impl_->storage, offset, n},
             {&impl_->storage, offset + n, n},
             impl_->spec.capacity,
-            impl_->spec.layers[block]};
+            impl_->spec.layers.at(block)};
 }
 void Contiguous::append(gpu::Queue &queue, std::size_t block, std::size_t first, std::size_t count,
                         gpu::ConstDeviceRegion k, gpu::ConstDeviceRegion v) {
     if (&queue != impl_->queue || !count || first > impl_->spec.capacity ||
-        count > impl_->spec.capacity - first)
+        count > impl_->spec.capacity - first) {
         throw std::invalid_argument("cache append queue or range mismatch");
+    }
     const auto view = layer(block);
-    const auto row = impl_->bytes[block] / impl_->spec.capacity;
+    const auto row = impl_->bytes.at(block) / impl_->spec.capacity;
     const auto size = product(count, row), offset = product(first, row);
-    if (k.bytes != size || v.bytes != size)
+    if (k.bytes != size || v.bytes != size) {
         throw std::invalid_argument("cache append source extent mismatch");
+    }
     queue.copy({&impl_->storage, view.keys.offset + offset, size}, k);
     queue.copy({&impl_->storage, view.values.offset + offset, size}, v);
 }
 std::unique_ptr<Contiguous> allocate_contiguous(gpu::Device &device, gpu::Queue &queue,
                                                 const Specification &spec, std::size_t budget) {
     auto footprint = estimate_contiguous(spec);
-    if (footprint.allocation_bytes > budget)
+    if (footprint.allocation_bytes > budget) {
         throw std::length_error("cache exceeds device budget");
+    }
     return std::unique_ptr<Contiguous>(new Contiguous(std::make_unique<Contiguous::Impl>(
         spec, queue,
         device.allocate(

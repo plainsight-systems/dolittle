@@ -23,8 +23,23 @@
 #include <limits>
 #include <stdexcept>
 
-using namespace dolittle::kernels;
-using namespace dolittle::tensors;
+using dolittle::kernels::Add;
+using dolittle::kernels::CausalAttention;
+using dolittle::kernels::Embedding;
+using dolittle::kernels::GatherRows;
+using dolittle::kernels::OperandAccess;
+using dolittle::kernels::OperandUse;
+using dolittle::kernels::Operation;
+using dolittle::kernels::Projection;
+using dolittle::kernels::RmsNorm;
+using dolittle::kernels::Rotary;
+using dolittle::kernels::SiluMultiply;
+using dolittle::kernels::validate_operation;
+using dolittle::tensors::ComputationMode;
+using dolittle::tensors::contiguous_layout;
+using dolittle::tensors::element_bytes;
+using dolittle::tensors::ElementType;
+using dolittle::tensors::Layout;
 using dolittle::tests::check;
 using dolittle::tests::expect_throws;
 
@@ -34,122 +49,105 @@ Layout dense(ElementType type, std::initializer_list<std::size_t> shape) {
     return contiguous_layout(type, std::span<const std::size_t>(shape.begin(), shape.size()));
 }
 
-void accepted(const Operation& op, const std::vector<Layout>& layouts,
-              ComputationMode mode, std::initializer_list<std::size_t> reads,
-              std::size_t output) {
+void accepted(const Operation &op, const std::vector<Layout> &layouts, ComputationMode mode,
+              std::initializer_list<std::size_t> reads, std::size_t output) {
     const auto uses = validate_operation(op, layouts, mode);
     check(uses.size() == reads.size() + 1, "one role per distinct tensor");
     for (const auto id : reads) {
-        check(std::ranges::count_if(uses, [id](const OperandUse& use) {
-            return use.tensor.value == id && use.access == OperandAccess::read;
-        }) == 1, "every input has exactly one read role");
+        check(std::ranges::count_if(uses,
+                                    [id](const OperandUse &use) {
+                                        return use.tensor.value == id && use.access == OperandAccess::read;
+                                    }) == 1,
+              "every input has exactly one read role");
     }
-    check(std::ranges::count_if(uses, [output](const OperandUse& use) {
-        return use.tensor.value == output && use.access == OperandAccess::write;
-    }) == 1, "output has exactly one write role");
+    check(std::ranges::count_if(uses,
+                                [output](const OperandUse &use) {
+                                    return use.tensor.value == output && use.access == OperandAccess::write;
+                                }) == 1,
+          "output has exactly one write role");
 }
 
-}  // namespace
+} // namespace
 
-int main() {
+int main() try {
     for (const auto type : {ElementType::bfloat16, ElementType::float32}) {
         const ComputationMode mode{type, ElementType::float32};
         accepted(Embedding{{0}, {1}, {2}},
-                 {dense(ElementType::uint32, {3}), dense(type, {11, 8}), dense(type, {3, 8})},
-                 mode, {0, 1}, 2);
+                 {dense(ElementType::uint32, {3}), dense(type, {11, 8}), dense(type, {3, 8})}, mode, {0, 1},
+                 2);
         accepted(Projection{{0}, {1}, {2}},
-                 {dense(type, {3, 8}), dense(type, {12, 8}), dense(type, {3, 3, 4})},
-                 mode, {0, 1}, 2);
+                 {dense(type, {3, 8}), dense(type, {12, 8}), dense(type, {3, 3, 4})}, mode, {0, 1}, 2);
         accepted(Projection{{0}, {1}, {2}},
-                 {dense(type, {3, 3, 4}), dense(type, {8, 12}), dense(type, {3, 8})},
-                 mode, {0, 1}, 2);
+                 {dense(type, {3, 3, 4}), dense(type, {8, 12}), dense(type, {3, 8})}, mode, {0, 1}, 2);
         accepted(RmsNorm{{0}, {1}, {2}, 1e-6F},
-                 {dense(type, {3, 2, 4}), dense(type, {4}), dense(type, {3, 2, 4})},
+                 {dense(type, {3, 2, 4}), dense(type, {4}), dense(type, {3, 2, 4})}, mode, {0, 1}, 2);
+        accepted(Rotary{{0}, {1}, 19, 1'000'000.0}, {dense(type, {3, 2, 4}), dense(type, {3, 2, 4})}, mode,
+                 {0}, 1);
+        accepted(
+            CausalAttention{{0}, {1}, {2}, {3}},
+            {dense(type, {3, 4, 8}), dense(type, {3, 2, 8}), dense(type, {3, 2, 8}), dense(type, {3, 4, 8})},
+            mode, {0, 1, 2}, 3);
+        accepted(Add{{0}, {0}, {1}}, {dense(type, {3, 8}), dense(type, {3, 8})}, mode, {0}, 1);
+        accepted(SiluMultiply{{0}, {1}, {2}}, {dense(type, {3, 8}), dense(type, {3, 8}), dense(type, {3, 8})},
                  mode, {0, 1}, 2);
-        accepted(Rotary{{0}, {1}, 19, 1'000'000.0},
-                 {dense(type, {3, 2, 4}), dense(type, {3, 2, 4})}, mode, {0}, 1);
-        accepted(CausalAttention{{0}, {1}, {2}, {3}},
-                 {dense(type, {3, 4, 8}), dense(type, {3, 2, 8}),
-                  dense(type, {3, 2, 8}), dense(type, {3, 4, 8})}, mode, {0, 1, 2}, 3);
-        accepted(Add{{0}, {0}, {1}}, {dense(type, {3, 8}), dense(type, {3, 8})},
-                 mode, {0}, 1);
-        accepted(SiluMultiply{{0}, {1}, {2}},
-                 {dense(type, {3, 8}), dense(type, {3, 8}), dense(type, {3, 8})},
-                 mode, {0, 1}, 2);
-        accepted(GatherRows{{0}, {1}, {0, 2}},
-                 {dense(type, {3, 2, 4}), dense(type, {2, 2, 4})}, mode, {0}, 1);
+        accepted(GatherRows{{0}, {1}, {0, 2}}, {dense(type, {3, 2, 4}), dense(type, {2, 2, 4})}, mode, {0},
+                 1);
         accepted(Add{{0}, {0}, {1}}, {dense(type, {}), dense(type, {})}, mode, {0}, 1);
 
         auto singleton = dense(type, {2, 1, 4});
-        singleton.byte_strides[1] = 0;
+        singleton.byte_strides.at(1) = 0;
         accepted(Add{{0}, {0}, {1}}, {singleton, dense(type, {2, 1, 4})}, mode, {0}, 1);
         auto wide_singleton = dense(type, {1, 4});
-        wide_singleton.byte_strides[0] = 100 * element_bytes(type);
+        wide_singleton.byte_strides.at(0) = 100 * element_bytes(type);
         accepted(Add{{0}, {0}, {1}}, {wide_singleton, dense(type, {1, 4})}, mode, {0}, 1);
     }
 
     constexpr auto f32 = ElementType::float32;
     constexpr ComputationMode mode{f32, f32};
-    const auto reject = [&](const Operation& op, const std::vector<Layout>& layouts) {
-        expect_throws<std::invalid_argument>([&] {
-            (void)validate_operation(op, layouts, mode);
-        });
+    const auto reject = [&](const Operation &op, const std::vector<Layout> &layouts) {
+        expect_throws<std::invalid_argument>([&] { (void)validate_operation(op, layouts, mode); });
     };
     const std::vector<Layout> pairs{dense(f32, {2, 4}), dense(f32, {2, 4})};
     reject(Add{{0}, {0}, {7}}, pairs);
     reject(Add{{0}, {1}, {0}}, pairs);
     reject(Add{{0}, {0}, {1}}, {dense(f32, {2, 4}), dense(f32, {4, 2})});
-    reject(SiluMultiply{{0}, {1}, {2}},
-           {dense(f32, {2, 4}), dense(f32, {1, 4}), dense(f32, {2, 4})});
-    reject(Add{{0}, {0}, {1}},
-           {dense(ElementType::bfloat16, {2, 4}), dense(f32, {2, 4})});
+    reject(SiluMultiply{{0}, {1}, {2}}, {dense(f32, {2, 4}), dense(f32, {1, 4}), dense(f32, {2, 4})});
+    reject(Add{{0}, {0}, {1}}, {dense(ElementType::bfloat16, {2, 4}), dense(f32, {2, 4})});
     reject(Add{{0}, {0}, {1}}, {dense(f32, {0, 4}), dense(f32, {0, 4})});
     auto padded = dense(f32, {2, 4});
-    padded.byte_strides[0] += 4;
+    padded.byte_strides.at(0) += 4;
     reject(Add{{0}, {0}, {1}}, {padded, dense(f32, {2, 4})});
     auto broadcast = dense(f32, {2, 4});
-    broadcast.byte_strides[0] = 0;
+    broadcast.byte_strides.at(0) = 0;
     reject(Add{{0}, {0}, {1}}, {broadcast, dense(f32, {2, 4})});
-    for (const ComputationMode invalid : {ComputationMode{f32, ElementType::bfloat16},
-                                          ComputationMode{ElementType::uint32, f32}}) {
-        expect_throws<std::invalid_argument>([&] {
-            (void)validate_operation(Add{{0}, {0}, {1}}, pairs, invalid);
-        });
+    for (const ComputationMode invalid :
+         {ComputationMode{f32, ElementType::bfloat16}, ComputationMode{ElementType::uint32, f32}}) {
+        expect_throws<std::invalid_argument>(
+            [&] { (void)validate_operation(Add{{0}, {0}, {1}}, pairs, invalid); });
     }
 
-    reject(Embedding{{0}, {1}, {2}},
-           {dense(f32, {2}), dense(f32, {11, 4}), dense(f32, {2, 4})});
+    reject(Embedding{{0}, {1}, {2}}, {dense(f32, {2}), dense(f32, {11, 4}), dense(f32, {2, 4})});
     reject(Embedding{{0}, {1}, {2}},
            {dense(ElementType::uint32, {2}), dense(f32, {11, 4}), dense(f32, {3, 4})});
-    reject(Projection{{0}, {1}, {2}},
-           {dense(f32, {2, 3, 4}), dense(f32, {4, 8}), dense(f32, {2, 4})});
-    reject(Projection{{0}, {1}, {2}},
-           {dense(f32, {2, 8}), dense(f32, {4, 8}), dense(f32, {1, 8})});
-    reject(Projection{{0}, {1}, {2}},
-           {dense(f32, {8}), dense(f32, {4, 8}), dense(f32, {4})});
-    reject(RmsNorm{{0}, {1}, {2}, 1e-6F},
-           {dense(f32, {2, 4}), dense(f32, {8}), dense(f32, {2, 4})});
-    for (float epsilon : {0.0F, -1.0F, std::numeric_limits<float>::infinity(),
-                          std::numeric_limits<float>::quiet_NaN()}) {
-        reject(RmsNorm{{0}, {1}, {2}, epsilon},
-               {dense(f32, {2, 4}), dense(f32, {4}), dense(f32, {2, 4})});
+    reject(Projection{{0}, {1}, {2}}, {dense(f32, {2, 3, 4}), dense(f32, {4, 8}), dense(f32, {2, 4})});
+    reject(Projection{{0}, {1}, {2}}, {dense(f32, {2, 8}), dense(f32, {4, 8}), dense(f32, {1, 8})});
+    reject(Projection{{0}, {1}, {2}}, {dense(f32, {8}), dense(f32, {4, 8}), dense(f32, {4})});
+    reject(RmsNorm{{0}, {1}, {2}, 1e-6F}, {dense(f32, {2, 4}), dense(f32, {8}), dense(f32, {2, 4})});
+    for (float epsilon :
+         {0.0F, -1.0F, std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()}) {
+        reject(RmsNorm{{0}, {1}, {2}, epsilon}, {dense(f32, {2, 4}), dense(f32, {4}), dense(f32, {2, 4})});
     }
-    reject(Rotary{{0}, {1}, 0, 1000.0},
-           {dense(f32, {2, 3, 5}), dense(f32, {2, 3, 5})});
-    for (double theta : {0.0, -1.0, std::numeric_limits<double>::infinity(),
-                         std::numeric_limits<double>::quiet_NaN()}) {
-        reject(Rotary{{0}, {1}, 0, theta},
-               {dense(f32, {2, 3, 4}), dense(f32, {2, 3, 4})});
+    reject(Rotary{{0}, {1}, 0, 1000.0}, {dense(f32, {2, 3, 5}), dense(f32, {2, 3, 5})});
+    for (double theta :
+         {0.0, -1.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+        reject(Rotary{{0}, {1}, 0, theta}, {dense(f32, {2, 3, 4}), dense(f32, {2, 3, 4})});
     }
     reject(CausalAttention{{0}, {1}, {2}, {3}},
-           {dense(f32, {3, 3, 8}), dense(f32, {3, 2, 8}),
-            dense(f32, {3, 2, 8}), dense(f32, {3, 3, 8})});
+           {dense(f32, {3, 3, 8}), dense(f32, {3, 2, 8}), dense(f32, {3, 2, 8}), dense(f32, {3, 3, 8})});
     reject(CausalAttention{{0}, {1}, {2}, {3}},
-           {dense(f32, {3, 4, 8}), dense(f32, {3, 2, 8}),
-            dense(f32, {3, 2, 4}), dense(f32, {3, 4, 8})});
-    for (const auto& rows : {std::vector<std::size_t>{1, 1},
-                            std::vector<std::size_t>{2, 1},
-                            std::vector<std::size_t>{0, 3}}) {
+           {dense(f32, {3, 4, 8}), dense(f32, {3, 2, 8}), dense(f32, {3, 2, 4}), dense(f32, {3, 4, 8})});
+    for (const auto &rows :
+         {std::vector<std::size_t>{1, 1}, std::vector<std::size_t>{2, 1}, std::vector<std::size_t>{0, 3}}) {
         reject(GatherRows{{0}, {1}, rows}, {dense(f32, {3, 4}), dense(f32, {2, 4})});
     }
     reject(GatherRows{{0}, {1}, {}}, {dense(f32, {3, 4}), dense(f32, {0, 4})});
@@ -161,11 +159,14 @@ int main() {
         (void)validate_operation(Rotary{{0}, {1}, maximum, 1.0}, layouts, mode);
     });
     // The final position may equal size_t's maximum; only overflow is forbidden.
-    accepted(Rotary{{0}, {1}, maximum - 1, 1.0},
-             {dense(f32, {2, 1, 4}), dense(f32, {2, 1, 4})}, mode, {0}, 1);
+    accepted(Rotary{{0}, {1}, maximum - 1, 1.0}, {dense(f32, {2, 1, 4}), dense(f32, {2, 1, 4})}, mode, {0},
+             1);
     expect_throws<std::length_error>([&] {
-        const std::vector<Layout> layouts{
-            Layout{f32, {2, maximum}, {4, 4}}, dense(f32, {2, 4})};
+        const std::vector<Layout> layouts{Layout{f32, {2, maximum}, {4, 4}}, dense(f32, {2, 4})};
         (void)validate_operation(Add{{0}, {0}, {1}}, layouts, mode);
     });
+} catch (const std::exception &error) {
+    return dolittle::tests::report_failure(error.what());
+} catch (...) {
+    return dolittle::tests::report_failure("unexpected non-standard exception");
 }

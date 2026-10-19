@@ -33,68 +33,94 @@
  * Source: guidelines/gpu-dsa/GDSA.2-declare-each-reductions-determinism.md.
  * cpp-perf-guidelines GDSA.16: bound on-chip state and account for rereads.
  * Source: guidelines/gpu-dsa/GDSA.16-tile-through-on-chip-memory.md.
+ * Static-analysis design/implementation, 2026-10-19: kernel arguments use
+ * named fields to distinguish operand and dimension roles. Core I.30
+ * (#ri-encapsulate) confines native pointer/array access to the guarded kernel;
+ * GDSA.2 preserves the exact partial ownership and arithmetic order. Source:
+ * guidelines/gpu-dsa/GDSA.2-declare-each-reductions-determinism.md.
  */
 #include "kernels/cuda/common.cuh"
 
 namespace dolittle::kernels::cuda {
 namespace {
-template <class T, unsigned Partials>
-__global__ void projection(const T* input, const T* weight, T* output,
-                           std::size_t rows, std::size_t input_width,
-                           std::size_t output_width, std::size_t output_tiles,
-                           std::size_t tasks) {
-    __shared__ float x_tile[16][16];
-    __shared__ float w_tile[16][17];
+inline constexpr unsigned tile_width = 16;
+inline constexpr unsigned padded_tile_width = 17;
+inline constexpr unsigned wide_partials = 32;
+inline constexpr unsigned half_tile = 8;
+inline constexpr std::size_t small_input_limit = 4096;
+inline constexpr std::size_t narrow_output_limit = 1024;
+
+template <class T> struct ProjectionArguments {
+    const T *input;
+    const T *weight;
+    T *output;
+    std::size_t rows;
+    std::size_t input_width;
+    std::size_t output_width;
+    std::size_t output_tiles;
+    std::size_t tasks;
+};
+
+// Device-only indexing: preparation proves allocation extents; the loops
+// below guard tails and index shared/register arrays within their declared sizes.
+// NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic, cppcoreguidelines-avoid-c-arrays, cppcoreguidelines-pro-bounds-constant-array-index)
+template <class T, unsigned Partials> __global__ void projection(ProjectionArguments<T> args) {
+    const auto [input, weight, output, rows, input_width, output_width, output_tiles, tasks] = args;
+    __shared__ float x_tile[tile_width][tile_width];
+    __shared__ float w_tile[tile_width][padded_tile_width];
     const auto x = threadIdx.x;
     const auto y = threadIdx.y;
     for (std::size_t task = blockIdx.x; task < tasks;) {
-        const auto row = (task / output_tiles) * 16 + y;
-        const auto column = (task % output_tiles) * 16 + x;
-        const auto weight_row = (task % output_tiles) * 16 + y;
+        const auto row = (task / output_tiles) * tile_width + y;
+        const auto column = (task % output_tiles) * tile_width + x;
+        const auto weight_row = (task % output_tiles) * tile_width + y;
         float partials[Partials]{};
-        const auto reduction_tiles = input_width / 16 + (input_width % 16 != 0);
+        const auto reduction_tiles = input_width / tile_width + (input_width % tile_width != 0);
         for (std::size_t tile = 0; tile < reduction_tiles; ++tile) {
-            const auto reduction = tile * 16 + x;
+            const auto reduction = tile * tile_width + x;
             x_tile[y][x] = row < rows && reduction < input_width
-                ? detail::widen(input[row * input_width + reduction]) : 0.0F;
+                               ? detail::widen(input[row * input_width + reduction])
+                               : 0.0F;
             w_tile[x][y] = weight_row < output_width && reduction < input_width
-                ? detail::widen(weight[weight_row * input_width + reduction]) : 0.0F;
+                               ? detail::widen(weight[weight_row * input_width + reduction])
+                               : 0.0F;
             __syncthreads();
-            if constexpr (Partials == 32) {
+            if constexpr (Partials == wide_partials) {
                 if (tile % 2 != 0) {
-                    #pragma unroll
-                    for (unsigned k = 0; k < 16; ++k) {
-                        partials[k + 16] = __fmaf_rn(x_tile[y][k], w_tile[k][x], partials[k + 16]);
+#pragma unroll
+                    for (unsigned k = 0; k < tile_width; ++k) {
+                        partials[k + tile_width] =
+                            __fmaf_rn(x_tile[y][k], w_tile[k][x], partials[k + tile_width]);
                     }
                 } else {
-                    #pragma unroll
-                    for (unsigned k = 0; k < 16; ++k) {
+#pragma unroll
+                    for (unsigned k = 0; k < tile_width; ++k) {
                         partials[k] = __fmaf_rn(x_tile[y][k], w_tile[k][x], partials[k]);
                     }
                 }
             } else {
-                #pragma unroll
-                for (unsigned k = 0; k < 16; ++k) {
+#pragma unroll
+                for (unsigned k = 0; k < tile_width; ++k) {
                     partials[k] = __fmaf_rn(x_tile[y][k], w_tile[k][x], partials[k]);
                 }
             }
             __syncthreads();
         }
-        if constexpr (Partials == 32) {
-            #pragma unroll
-            for (unsigned k = 0; k < 16; ++k) {
-                partials[k] = __fadd_rn(partials[k], partials[k + 16]);
+        if constexpr (Partials == wide_partials) {
+#pragma unroll
+            for (unsigned k = 0; k < tile_width; ++k) {
+                partials[k] = __fadd_rn(partials[k], partials[k + tile_width]);
             }
         }
-        #pragma unroll
-        for (unsigned k = 0; k < 8; ++k) {
-            partials[k] = __fadd_rn(partials[k], partials[k + 8]);
+#pragma unroll
+        for (unsigned k = 0; k < half_tile; ++k) {
+            partials[k] = __fadd_rn(partials[k], partials[k + half_tile]);
         }
-        #pragma unroll
+#pragma unroll
         for (unsigned k = 0; k < 4; ++k) {
             partials[k] = __fadd_rn(partials[k], partials[k + 4]);
         }
-        #pragma unroll
+#pragma unroll
         for (unsigned k = 0; k < 2; ++k) {
             partials[k] = __fadd_rn(partials[k], partials[k + 2]);
         }
@@ -102,36 +128,51 @@ __global__ void projection(const T* input, const T* weight, T* output,
         if (row < rows && column < output_width) {
             output[row * output_width + column] = detail::narrow<T>(partials[0]);
         }
-        if (tasks - task <= gridDim.x) break;
+        if (tasks - task <= gridDim.x) {
+            break;
+        }
         task += gridDim.x;
     }
 }
 
+// NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic, cppcoreguidelines-avoid-c-arrays, cppcoreguidelines-pro-bounds-constant-array-index)
+
 template <class T>
-void submit(const void* input, const void* weight, void* output,
-            std::size_t rows, std::size_t input_width, std::size_t output_width,
-            cudaStream_t stream) {
-    const auto output_tiles = detail::ceil_div(output_width, 16);
-    const auto tasks = detail::ceil_div(rows, 16) * output_tiles;
-    if (input_width <= 4096 && output_width > 1024) {
-        projection<T, 16><<<detail::grid_blocks(tasks), dim3(16, 16), 0, stream>>>(
-            static_cast<const T*>(input), static_cast<const T*>(weight),
-            static_cast<T*>(output), rows, input_width, output_width, output_tiles, tasks);
+void submit(const void *input, const void *weight, void *output, std::size_t rows, std::size_t input_width,
+            std::size_t output_width, cudaStream_t stream) {
+    const auto output_tiles = detail::ceil_div(output_width, tile_width);
+    const auto tasks = detail::ceil_div(rows, tile_width) * output_tiles;
+    if (input_width <= small_input_limit && output_width > narrow_output_limit) {
+        projection<T, tile_width><<<detail::grid_blocks(tasks), dim3(tile_width, tile_width), 0, stream>>>(
+            ProjectionArguments<T>{.input = static_cast<const T *>(input),
+                                   .weight = static_cast<const T *>(weight),
+                                   .output = static_cast<T *>(output),
+                                   .rows = rows,
+                                   .input_width = input_width,
+                                   .output_width = output_width,
+                                   .output_tiles = output_tiles,
+                                   .tasks = tasks});
     } else {
-        projection<T, 32><<<detail::grid_blocks(tasks), dim3(16, 16), 0, stream>>>(
-            static_cast<const T*>(input), static_cast<const T*>(weight),
-            static_cast<T*>(output), rows, input_width, output_width, output_tiles, tasks);
+        projection<T, wide_partials><<<detail::grid_blocks(tasks), dim3(tile_width, tile_width), 0, stream>>>(
+            ProjectionArguments<T>{.input = static_cast<const T *>(input),
+                                   .weight = static_cast<const T *>(weight),
+                                   .output = static_cast<T *>(output),
+                                   .rows = rows,
+                                   .input_width = input_width,
+                                   .output_width = output_width,
+                                   .output_tiles = output_tiles,
+                                   .tasks = tasks});
     }
 }
-}  // namespace
+} // namespace
 
-void launch_projection(tensors::ElementType type, const void* input, const void* weight,
-                       void* output, std::size_t rows, std::size_t input_width,
-                       std::size_t output_width, cudaStream_t stream) {
+void launch_projection(tensors::ElementType type, const void *input, const void *weight, void *output,
+                       std::size_t rows, std::size_t input_width, std::size_t output_width,
+                       cudaStream_t stream) {
     if (detail::is_bfloat16(type)) {
         submit<__nv_bfloat16>(input, weight, output, rows, input_width, output_width, stream);
     } else {
         submit<float>(input, weight, output, rows, input_width, output_width, stream);
     }
 }
-}  // namespace dolittle::kernels::cuda
+} // namespace dolittle::kernels::cuda

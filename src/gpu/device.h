@@ -50,20 +50,29 @@
 #include <string>
 
 namespace dolittle::gpu {
-namespace detail { struct BackendAccess; }
+namespace detail {
+struct BackendAccess;
+}
 
-struct AllocationRequest { std::size_t bytes; std::size_t alignment; };
-struct CompletionPoint { std::uint64_t queue_identity; std::uint64_t sequence; };
+struct AllocationRequest {
+    std::size_t bytes;
+    std::size_t alignment;
+};
+struct CompletionPoint {
+    std::uint64_t queue_identity;
+    std::uint64_t sequence;
+};
 
 class DeviceBuffer {
-public:
+  public:
     ~DeviceBuffer();
-    DeviceBuffer(DeviceBuffer&&) noexcept;
-    DeviceBuffer& operator=(DeviceBuffer&&) noexcept;
-    DeviceBuffer(const DeviceBuffer&) = delete;
-    DeviceBuffer& operator=(const DeviceBuffer&) = delete;
+    DeviceBuffer(DeviceBuffer &&) noexcept;
+    DeviceBuffer &operator=(DeviceBuffer &&) noexcept;
+    DeviceBuffer(const DeviceBuffer &) = delete;
+    DeviceBuffer &operator=(const DeviceBuffer &) = delete;
     [[nodiscard]] std::size_t size_bytes() const noexcept;
-private:
+
+  private:
     struct Impl;
     explicit DeviceBuffer(std::unique_ptr<Impl>);
     std::unique_ptr<Impl> impl_;
@@ -72,15 +81,16 @@ private:
 };
 
 class HostBuffer {
-public:
+  public:
     ~HostBuffer();
-    HostBuffer(HostBuffer&&) noexcept;
-    HostBuffer& operator=(HostBuffer&&) noexcept;
-    HostBuffer(const HostBuffer&) = delete;
-    HostBuffer& operator=(const HostBuffer&) = delete;
+    HostBuffer(HostBuffer &&) noexcept;
+    HostBuffer &operator=(HostBuffer &&) noexcept;
+    HostBuffer(const HostBuffer &) = delete;
+    HostBuffer &operator=(const HostBuffer &) = delete;
     [[nodiscard]] std::span<std::byte> bytes() noexcept;
     [[nodiscard]] std::span<const std::byte> bytes() const noexcept;
-private:
+
+  private:
     struct Impl;
     explicit HostBuffer(std::unique_ptr<Impl>);
     std::unique_ptr<Impl> impl_;
@@ -88,18 +98,34 @@ private:
     friend class Queue;
 };
 
-struct DeviceRegion { DeviceBuffer* owner; std::size_t offset; std::size_t bytes; };
-struct ConstDeviceRegion { const DeviceBuffer* owner; std::size_t offset; std::size_t bytes; };
-struct HostRegion { HostBuffer* owner; std::size_t offset; std::size_t bytes; };
-struct ConstHostRegion { const HostBuffer* owner; std::size_t offset; std::size_t bytes; };
+struct DeviceRegion {
+    DeviceBuffer *owner;
+    std::size_t offset;
+    std::size_t bytes;
+};
+struct ConstDeviceRegion {
+    const DeviceBuffer *owner;
+    std::size_t offset;
+    std::size_t bytes;
+};
+struct HostRegion {
+    HostBuffer *owner;
+    std::size_t offset;
+    std::size_t bytes;
+};
+struct ConstHostRegion {
+    const HostBuffer *owner;
+    std::size_t offset;
+    std::size_t bytes;
+};
 
 class Queue {
-public:
+  public:
     ~Queue();
-    Queue(Queue&&) noexcept;
-    Queue& operator=(Queue&&) noexcept;
-    Queue(const Queue&) = delete;
-    Queue& operator=(const Queue&) = delete;
+    Queue(Queue &&) noexcept;
+    Queue &operator=(Queue &&) noexcept;
+    Queue(const Queue &) = delete;
+    Queue &operator=(const Queue &) = delete;
 
     void upload(DeviceRegion destination, ConstHostRegion source);
     void download(HostRegion destination, ConstDeviceRegion source);
@@ -107,7 +133,8 @@ public:
     [[nodiscard]] CompletionPoint mark();
     void wait(CompletionPoint point);
     void drain();
-private:
+
+  private:
     struct Impl;
     explicit Queue(std::unique_ptr<Impl>);
     std::unique_ptr<Impl> impl_;
@@ -119,20 +146,23 @@ struct DeviceInfo {
     std::string name;
     std::string architecture;
     std::string driver_version;
-    std::size_t total_memory_bytes;
+    std::size_t total_memory_bytes{};
 };
 
 class Device {
-public:
+  public:
+    Device(Device &&) = delete;
+    Device &operator=(Device &&) = delete;
     virtual ~Device();
-    [[nodiscard]] virtual const DeviceInfo& info() const noexcept = 0;
+    [[nodiscard]] virtual const DeviceInfo &info() const noexcept = 0;
     [[nodiscard]] virtual DeviceBuffer allocate(AllocationRequest request) = 0;
     [[nodiscard]] virtual HostBuffer allocate_staging(AllocationRequest request) = 0;
     [[nodiscard]] virtual Queue create_queue() = 0;
-    Device(const Device&) = delete;
-    Device& operator=(const Device&) = delete;
-protected:
+    Device(const Device &) = delete;
+    Device &operator=(const Device &) = delete;
+
+  protected:
     Device();
 };
 
-}  // namespace dolittle::gpu
+} // namespace dolittle::gpu

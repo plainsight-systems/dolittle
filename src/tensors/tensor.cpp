@@ -20,6 +20,7 @@
  * cpp-perf-guidelines CDSA.32: validate explicit consumer layouts during setup.
  * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
  */
+#include "bounds.h"
 #include "tensors/tensor.h"
 
 #include <algorithm>
@@ -43,18 +44,20 @@ std::size_t checked_sum(std::size_t a, std::size_t b) {
     return a + b;
 }
 
-}  // namespace
+} // namespace
 
 std::size_t element_bytes(ElementType type) {
     switch (type) {
-    case ElementType::bfloat16: return 2;
+    case ElementType::bfloat16:
+        return 2;
     case ElementType::float32:
-    case ElementType::uint32: return 4;
+    case ElementType::uint32:
+        return 4;
     }
     throw std::invalid_argument("unsupported tensor element type");
 }
 
-std::size_t required_bytes(const Layout& layout) {
+std::size_t required_bytes(const Layout &layout) {
     const auto width = element_bytes(layout.element_type);
     if (layout.shape.size() != layout.byte_strides.size()) {
         throw std::invalid_argument("tensor shape and stride ranks differ");
@@ -69,23 +72,21 @@ std::size_t required_bytes(const Layout& layout) {
     }
     auto extent = width;
     for (std::size_t i = 0; i < layout.shape.size(); ++i) {
-        extent = checked_sum(extent,
-            checked_product(layout.shape[i] - 1, layout.byte_strides[i]));
+        extent = checked_sum(extent, checked_product(layout.shape.at(i) - 1, layout.byte_strides.at(i)));
     }
     return extent;
 }
 
 Layout contiguous_layout(ElementType type, std::span<const std::size_t> shape) {
     const auto width = element_bytes(type);
-    Layout result{type, {shape.begin(), shape.end()},
-                  std::vector<std::size_t>(shape.size(), 0)};
+    Layout result{type, {shape.begin(), shape.end()}, std::vector<std::size_t>(shape.size(), 0)};
     if (std::ranges::find(shape, 0) != shape.end()) {
         return result;
     }
     auto stride = width;
     for (auto i = shape.size(); i != 0; --i) {
-        result.byte_strides[i - 1] = stride;
-        stride = checked_product(stride, shape[i - 1]);
+        result.byte_strides.at(i - 1) = stride;
+        stride = checked_product(stride, dolittle::at(shape, i - 1));
     }
     return result;
 }
@@ -99,4 +100,4 @@ void validate_view(HostView view) {
     }
 }
 
-}  // namespace dolittle::tensors
+} // namespace dolittle::tensors

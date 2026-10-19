@@ -57,6 +57,11 @@ struct DecodedBytes {
 };
 class Tokenizer {
   public:
+    Tokenizer() = default;
+    Tokenizer(const Tokenizer &) = delete;
+    Tokenizer &operator=(const Tokenizer &) = delete;
+    Tokenizer(Tokenizer &&) = delete;
+    Tokenizer &operator=(Tokenizer &&) = delete;
     virtual ~Tokenizer() = default;
     [[nodiscard]] virtual std::string_view identity() const noexcept = 0;
     [[nodiscard]] virtual std::vector<TokenId> encode(std::string_view utf8) const = 0;

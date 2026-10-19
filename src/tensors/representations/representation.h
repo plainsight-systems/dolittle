@@ -24,13 +24,15 @@
  */
 #pragma once
 
+#include <cstdint>
+
 namespace dolittle::tensors {
 
-enum class ElementType { bfloat16, float32, uint32 };
+enum class ElementType : std::uint8_t { bfloat16, float32, uint32 };
 
 struct ComputationMode {
     ElementType activation_storage;
     ElementType reduction_accumulation;
 };
 
-}  // namespace dolittle::tensors
+} // namespace dolittle::tensors

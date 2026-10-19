@@ -27,18 +27,24 @@ Decision next_action(Progress p) {
         p.consumed_tokens > p.prompt_tokens + p.generated_tokens ||
         (!p.generated_tokens && p.last_emitted_is_stop) ||
         (p.generated_tokens && (p.consumed_tokens < p.prompt_tokens ||
-                                p.prompt_tokens + p.generated_tokens - p.consumed_tokens > 1)))
+                                p.prompt_tokens + p.generated_tokens - p.consumed_tokens > 1))) {
         throw std::invalid_argument("invalid sequence progression");
-    if (p.consumed_tokens < p.prompt_tokens)
+    }
+    if (p.consumed_tokens < p.prompt_tokens) {
         return {Action::consume_prompt, std::nullopt};
-    if (p.consumed_tokens < p.prompt_tokens + p.generated_tokens)
+    }
+    if (p.consumed_tokens < p.prompt_tokens + p.generated_tokens) {
         return {Action::consume_pending, std::nullopt};
-    if (p.last_emitted_is_stop)
+    }
+    if (p.last_emitted_is_stop) {
         return {Action::finish, StopReason::stop_token};
-    if (p.generated_tokens == p.max_new_tokens)
+    }
+    if (p.generated_tokens == p.max_new_tokens) {
         return {Action::finish, StopReason::token_limit};
-    if (p.stop_requested)
+    }
+    if (p.stop_requested) {
         return {Action::finish, StopReason::user_stop};
+    }
     return {Action::sample, std::nullopt};
 }
 } // namespace dolittle::inference

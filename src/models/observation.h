@@ -31,6 +31,7 @@
  */
 #pragma once
 
+#include <cstdint>
 #include "tensors/representations/representation.h"
 
 #include <cstddef>
@@ -49,7 +50,7 @@ struct SequenceLength {
     std::size_t value;
 };
 
-enum class ObservationBoundary { block_input, block_output };
+enum class ObservationBoundary : std::uint8_t { block_input, block_output };
 
 struct ObservationPoint {
     ObservationBoundary boundary;
@@ -62,4 +63,4 @@ struct ObservationSite {
     tensors::ElementType storage_type;
 };
 
-}  // namespace dolittle::models
+} // namespace dolittle::models

@@ -117,6 +117,7 @@
  */
 #pragma once
 
+#include <cstdint>
 #include "tensors/tensor.h"
 #include <cstddef>
 #include <memory>
@@ -134,33 +135,57 @@ class Device;
 class Queue;
 class DeviceBuffer;
 struct DeviceRegion;
-}
+} // namespace dolittle::gpu
 
 namespace dolittle::kernels {
 
-struct TensorId { std::size_t value; };
-struct Embedding { TensorId tokens, weight, output; };
-struct Projection { TensorId input, weight, output; };
-struct RmsNorm { TensorId input, weight, output; float epsilon; };
+struct TensorId {
+    std::size_t value;
+};
+struct Embedding {
+    TensorId tokens, weight, output;
+};
+struct Projection {
+    TensorId input, weight, output;
+};
+struct RmsNorm {
+    TensorId input, weight, output;
+    float epsilon;
+};
 struct Rotary {
     TensorId input, output;
     std::size_t first_position;
     double theta;
 };
-struct CausalAttention { TensorId query, key, value, output; };
-struct Add { TensorId left, right, output; };
-struct SiluMultiply { TensorId gate, up, output; };
-struct GatherRows { TensorId input, output; std::vector<std::size_t> rows; };
+struct CausalAttention {
+    TensorId query, key, value, output;
+};
+struct Add {
+    TensorId left, right, output;
+};
+struct SiluMultiply {
+    TensorId gate, up, output;
+};
+struct GatherRows {
+    TensorId input, output;
+    std::vector<std::size_t> rows;
+};
 
-using Operation = std::variant<Embedding, Projection, RmsNorm, Rotary,
-    CausalAttention, Add, SiluMultiply, GatherRows>;
+using Operation =
+    std::variant<Embedding, Projection, RmsNorm, Rotary, CausalAttention, Add, SiluMultiply, GatherRows>;
 
-struct WorkspaceRequirement { std::size_t bytes; std::size_t alignment; };
-enum class OperandAccess { read, write };
-struct OperandUse { TensorId tensor; OperandAccess access; };
-[[nodiscard]] std::vector<OperandUse> validate_operation(
-    const Operation& operation, std::span<const tensors::Layout> tensors,
-    tensors::ComputationMode mode);
+struct WorkspaceRequirement {
+    std::size_t bytes;
+    std::size_t alignment;
+};
+enum class OperandAccess : std::uint8_t { read, write };
+struct OperandUse {
+    TensorId tensor;
+    OperandAccess access;
+};
+[[nodiscard]] std::vector<OperandUse> validate_operation(const Operation &operation,
+                                                         std::span<const tensors::Layout> tensors,
+                                                         tensors::ComputationMode mode);
 struct OperandRequirement {
     TensorId tensor;
     OperandAccess access;
@@ -168,7 +193,7 @@ struct OperandRequirement {
 };
 struct BufferBinding {
     TensorId tensor;
-    std::variant<const gpu::DeviceBuffer*, gpu::DeviceBuffer*> storage;
+    std::variant<const gpu::DeviceBuffer *, gpu::DeviceBuffer *> storage;
     std::size_t offset;
     std::size_t bytes;
 };
@@ -183,12 +208,12 @@ struct ExecutionExtent {
     std::size_t active_rows;
 };
 class PreparedOperation {
-public:
+  public:
     ~PreparedOperation();
-    PreparedOperation(PreparedOperation&&) noexcept;
-    PreparedOperation& operator=(PreparedOperation&&) noexcept;
-    PreparedOperation(const PreparedOperation&) = delete;
-    PreparedOperation& operator=(const PreparedOperation&) = delete;
+    PreparedOperation(PreparedOperation &&) noexcept;
+    PreparedOperation &operator=(PreparedOperation &&) noexcept;
+    PreparedOperation(const PreparedOperation &) = delete;
+    PreparedOperation &operator=(const PreparedOperation &) = delete;
     [[nodiscard]] WorkspaceRequirement workspace() const noexcept;
     [[nodiscard]] std::span<const OperandRequirement> operands() const noexcept;
     [[nodiscard]] std::string_view implementation_name() const noexcept;
@@ -208,4 +233,4 @@ public:
                                         std::span<const tensors::Layout> tensors,
                                         tensors::ComputationMode mode, RowPolicy rows = {});
 
-}  // namespace dolittle::kernels
+} // namespace dolittle::kernels
