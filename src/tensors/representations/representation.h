@@ -20,7 +20,8 @@
  * cpp-guidelines I.4 (#ri-typed): distinguish storage type from accumulation.
  * cpp-guidelines I.7 (#ri-post): a capture reports its original representation.
  * cpp-perf-guidelines GPU.1: budget bytes using real storage type; do not hide
- * conversions/readbacks. MCP source: guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * conversions/readbacks. MCP source:
+ * guidelines/gpu/GPU.1-keep-data-on-device.md.
  */
 #pragma once
 
@@ -31,8 +32,8 @@ namespace dolittle::tensors {
 enum class ElementType : std::uint8_t { bfloat16, float32, uint32 };
 
 struct ComputationMode {
-    ElementType activation_storage;
-    ElementType reduction_accumulation;
+  ElementType activation_storage;
+  ElementType reduction_accumulation;
 };
 
-} // namespace dolittle::tensors
+}  // namespace dolittle::tensors

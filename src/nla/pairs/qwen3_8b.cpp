@@ -1,206 +1,240 @@
 /*
  * Pinned Qwen3-8B target/AV pairing implementation.
- * Axis M7, qwen3_8b kind: strict trained convention, not a generic YAML interpreter.
- * Contract: sources describe archives verified with models-8b.json; metadata
- * bytes are borrowed only for construction. Require Qwen/Qwen3-8B revision
- * b968826d9c46dd6066d109eabc6255188de91218 and marco-bazzani/Qwen3-8B-nla revision
- * 12c6ed1b1e684bdb8a788c989e2f3d15f9790db3, with matching manifest artifact digests:
- * all target files and all AV repository files outside ar/ respectively. AR
- * files are not an input to interpretation; scope is part of source identity.
- * Metadata SHA-256 must be
+ * Axis M7, qwen3_8b kind: strict trained convention, not a generic YAML
+ * interpreter. Contract: sources describe archives verified with
+ * models-8b.json; metadata bytes are borrowed only for construction. Require
+ * Qwen/Qwen3-8B revision b968826d9c46dd6066d109eabc6255188de91218 and
+ * marco-bazzani/Qwen3-8B-nla revision 12c6ed1b1e684bdb8a788c989e2f3d15f9790db3,
+ * with matching manifest artifact digests: all target files and all AV
+ * repository files outside ar/ respectively. AR files are not an input to
+ * interpretation; scope is part of source identity. Metadata SHA-256 must be
  * 19ff4f49ce97c739e411ae6a1b51078764f55372c04eed98c70a1814e0f98095.
  * Verify exact metadata bytes before using the compiled, versioned actor prompt
  * and constants; no new YAML/Jinja runtime dependency or downloaded code.
  * The two verified configs and tokenizer configurations have identical hashes.
  * Reuse the existing byte-BPE and Qwen3 single-user protocol implementations,
  * while retaining the AV's own source/tokenizer identity. Later pairs can use
- * other implementations through Pair; shared inference contains no 8B constants.
- * Invalid provenance, template/IDs, model capabilities or budgets fail closed.
- * Successful construction owns all prompt/identity data and retains no inputs.
+ * other implementations through Pair; shared inference contains no 8B
+ * constants. Invalid provenance, template/IDs, model capabilities or budgets
+ * fail closed. Successful construction owns all prompt/identity data and
+ * retains no inputs.
  *
  * Algorithm: docs/architecture/logical-overview.md, "4 Interpret selected
  * positions"; transformer-execution.md, "NLA entry and exit paths":
- * 1. Validate the pinned sources and metadata. Select zero-based block 24 output
- *    after both residual additions, width D=4096, BF16 storage; this is X_25[p].
- *    Both models must expose the full 36-block Qwen3 causal language-model path,
- *    vocabulary 151936 and compatible BF16/FP32 computation. AR is not accepted.
- * 2. Expand the exact YAML actor scalar's {injection_char} with U+320E. Preserve
- *    its folded text and blank lines. Format one user message and the assistant
- *    generation prefix through the verified Qwen3 protocol. Use thinking enabled
- *    (the template's default): do not insert an empty <think> section. This is
- *    the AV's own trained prompt; it contains none of the target's visible text.
+ * 1. Validate the pinned sources and metadata. Select zero-based block 24
+ * output after both residual additions, width D=4096, BF16 storage; this is
+ * X_25[p]. Both models must expose the full 36-block Qwen3 causal
+ * language-model path, vocabulary 151936 and compatible BF16/FP32 computation.
+ * AR is not accepted.
+ * 2. Expand the exact YAML actor scalar's {injection_char} with U+320E.
+ * Preserve its folded text and blank lines. Format one user message and the
+ * assistant generation prefix through the verified Qwen3 protocol. Use thinking
+ * enabled (the template's default): do not insert an empty <think> section.
+ * This is the AV's own trained prompt; it contains none of the target's visible
+ * text.
  * 3. Encode the complete prompt once. Require exactly one ID 149705, with left
- *    neighbor 29 and right neighbor 522; reject missing neighbors or extra markers.
- *    Preserve those original IDs. Stop IDs are 151645 and 151643 from the pinned
- *    generation config; output tags do not terminate generation by themselves.
+ *    neighbor 29 and right neighbor 522; reject missing neighbors or extra
+ * markers. Preserve those original IDs. Stop IDs are 151645 and 151643 from the
+ * pinned generation config; output tags do not terminate generation by
+ * themselves.
  * 4. Widen captured BF16 h[4096] exactly to FP32. Compute n=sqrt(sum_i h_i*h_i)
  *    in FP32. Reject nonfinite h, nonfinite n and n=0. Compute each u_i=h_i/n,
  *    then v_i=u_i*150 in FP32 (divide then multiply, no reciprocal rewrite).
  *    Cast v_i once to BF16, round-to-nearest ties-to-even, and reject nonfinite
  *    output. Return n, scale and the D-element row at the verified AV position.
- *    Sum squares in eight interleaved FP32 lanes, then reduce lanes left-to-right.
- *    Products and sums round separately; the frozen reference remains unchanged.
+ *    Sum squares in eight interleaved FP32 lanes, then reduce lanes
+ * left-to-right. Products and sums round separately; the frozen reference
+ * remains unchanged.
  * 5. In decoded generated bytes, accept exactly one ordered, nonnested
  *    <explanation>...</explanation> pair. Trim ASCII whitespace inside it and
  *    return its original byte range. Missing tags yield missing; duplicates,
  *    unmatched or reversed tags yield malformed. Raw bytes/IDs always survive.
- *    Do not strip reasoning text or special tokens from the authoritative record.
+ *    Do not strip reasoning text or special tokens from the authoritative
+ * record.
  *
  * Cost: O(prompt bytes + tokens) once; O(D) work and up to 4D FP32 + 2D BF16
- * temporary bytes per request (24 KiB at D=4096), plus caller-owned raw capture.
- * Optimization: cache exact prompt IDs and marker position, normalize only the
- * selected row, and transfer 8 KiB rather than a full prompt embedding matrix.
- * No CUDA-specific reduction is required for this already-host-owned vector;
- * this is a transfer-cost derivation, not a measured performance claim.
+ * temporary bytes per request (24 KiB at D=4096), plus caller-owned raw
+ * capture. Optimization: cache exact prompt IDs and marker position, normalize
+ * only the selected row, and transfer 8 KiB rather than a full prompt embedding
+ * matrix. No CUDA-specific reduction is required for this already-host-owned
+ * vector; this is a transfer-cost derivation, not a measured performance claim.
  * Corpus consultation, implementation, 2026-10-19 (full rules read):
  * cpp-guidelines I.7 (#ri-post): exact marker, rounding and extraction results.
- * cpp-guidelines R.1 (#rr-raii): immutable pair owns parsed identity/prompt data.
- * cpp-perf-guidelines GPU.1: one bounded row upload, no embedding round trip.
- * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
- * Normalization implementation: accumulate squared FP32 values into eight
- * interleaved lanes (i modulo 8), reduce lanes left-to-right, then take FP32
- * sqrt. This matches the frozen CPU norm on the tested vectors. Multiplication
- * and addition are separately rounded (-ffp-contract=off); no FP64 intermediate.
- * One D-element FP32 buffer, eight lane sums and one D-element output are owned.
+ * cpp-guidelines R.1 (#rr-raii): immutable pair owns parsed identity/prompt
+ * data. cpp-perf-guidelines GPU.1: one bounded row upload, no embedding round
+ * trip. Source: guidelines/gpu/GPU.1-keep-data-on-device.md. Normalization
+ * implementation: accumulate squared FP32 values into eight interleaved lanes
+ * (i modulo 8), reduce lanes left-to-right, then take FP32 sqrt. This matches
+ * the frozen CPU norm on the tested vectors. Multiplication and addition are
+ * separately rounded (-ffp-contract=off); no FP64 intermediate. One D-element
+ * FP32 buffer, eight lane sums and one D-element output are owned.
  */
 #include "nla/pairs/qwen3_8b.h"
-#include "models/qwen3/model.h"
+
 #include <openssl/sha.h>
+
 #include <algorithm>
 #include <array>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
 
+#include "models/qwen3/model.h"
+
 namespace dolittle::nla::pairs {
 namespace {
-constexpr std::size_t width = 4096, blocks = 36, vocabulary = 151936, capture_block = 24;
-constexpr std::uint32_t marker = 149705, left_neighbor = 29, right_neighbor = 522;
+constexpr std::size_t width = 4096, blocks = 36, vocabulary = 151936,
+                      capture_block = 24;
+constexpr std::uint32_t marker = 149705, left_neighbor = 29,
+                        right_neighbor = 522;
 constexpr std::uint32_t end_message = 151645, end_text = 151643;
 constexpr float injection_scale = 150.0F;
-constexpr std::string_view meta_hash = "19ff4f49ce97c739e411ae6a1b51078764f55372c04eed98c70a1814e0f98095";
+constexpr std::string_view meta_hash =
+    "19ff4f49ce97c739e411ae6a1b51078764f55372c04eed98c70a1814e0f98095";
 constexpr std::string_view actor =
-    "You are a meticulous AI researcher conducting an important investigation into activation vectors from a "
+    "You are a meticulous AI researcher conducting an important investigation "
+    "into activation vectors from a "
     "language model. "
-    "Your overall task is to describe the semantic content of that activation vector.\n\n"
-    "We will pass the vector enclosed in <concept> tags into your context. You must then produce an "
-    "explanation for the vector, "
-    "enclosed within <explanation> tags. The explanation consists of 2-3 text snippets describing that "
+    "Your overall task is to describe the semantic content of that activation "
     "vector.\n\n"
-    "Here is the vector:\n\n<concept>㈎</concept>\n\nPlease provide an explanation.";
-bool same_source(const tensors::formats::SourceIdentity &a, const tensors::formats::SourceIdentity &b) {
-    return a.repository == b.repository && a.revision == b.revision && a.artifact_digest == b.artifact_digest;
+    "We will pass the vector enclosed in <concept> tags into your context. You "
+    "must then produce an "
+    "explanation for the vector, "
+    "enclosed within <explanation> tags. The explanation consists of 2-3 text "
+    "snippets describing that "
+    "vector.\n\n"
+    "Here is the vector:\n\n<concept>㈎</concept>\n\nPlease provide an "
+    "explanation.";
+bool same_source(const tensors::formats::SourceIdentity& a,
+                 const tensors::formats::SourceIdentity& b) {
+  return a.repository == b.repository && a.revision == b.revision &&
+         a.artifact_digest == b.artifact_digest;
 }
 std::string hash(std::span<const std::byte> bytes) {
-    std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
-    // OpenSSL consumes untyped bytes; this boundary does not alias a typed object.
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    SHA256(reinterpret_cast<const unsigned char *>(bytes.data()), bytes.size(), digest.data());
-    std::ostringstream result;
-    result << std::hex << std::setfill('0');
-    for (auto b : digest) {
-        result << std::setw(2) << static_cast<unsigned>(b);
-    }
-    return result.str();
+  std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
+  // OpenSSL consumes untyped bytes; this boundary does not alias a typed
+  // object. NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+  SHA256(reinterpret_cast<const unsigned char*>(bytes.data()), bytes.size(),
+         digest.data());
+  std::ostringstream result;
+  result << std::hex << std::setfill('0');
+  for (auto b : digest) {
+    result << std::setw(2) << static_cast<unsigned>(b);
+  }
+  return result.str();
 }
 struct QwenPair final : Pair {
-    PairIdentity provenance;
-    text::PreparedPrompt prompt;
-    models::TokenPosition position{};
-    const PairIdentity &identity() const noexcept override {
-        return provenance;
+  PairIdentity provenance;
+  text::PreparedPrompt prompt;
+  models::TokenPosition position{};
+  const PairIdentity& identity() const noexcept override { return provenance; }
+  models::ObservationSite target_site() const noexcept override {
+    return {{models::ObservationBoundary::block_output, {capture_block}},
+            width,
+            tensors::ElementType::bfloat16};
+  }
+  const text::PreparedPrompt& verbalizer_prompt() const noexcept override {
+    return prompt;
+  }
+  void validate_model(ModelRole role,
+                      const tensors::formats::SourceIdentity& source,
+                      const models::BoundCheckpoint& checkpoint,
+                      tensors::ComputationMode mode) const override {
+    if (role != ModelRole::target && role != ModelRole::verbalizer) {
+      throw std::invalid_argument("unknown pair role");
     }
-    models::ObservationSite target_site() const noexcept override {
-        return {{models::ObservationBoundary::block_output, {capture_block}},
-                width,
-                tensors::ElementType::bfloat16};
+    const auto& expected =
+        role == ModelRole::target ? provenance.target : provenance.verbalizer;
+    if (!same_source(expected, source) ||
+        !same_source(source, checkpoint.source_identity()) ||
+        mode.activation_storage != tensors::ElementType::bfloat16 ||
+        mode.reduction_accumulation != tensors::ElementType::float32) {
+      throw std::invalid_argument("pair checkpoint/precision mismatch");
     }
-    const text::PreparedPrompt &verbalizer_prompt() const noexcept override {
-        return prompt;
+    const models::qwen3::Config config{blocks,
+                                       width,
+                                       32,
+                                       8,
+                                       128,
+                                       12288,
+                                       vocabulary,
+                                       {40960},
+                                       1e-6F,
+                                       1000000.0,
+                                       tensors::ElementType::bfloat16};
+    if (checkpoint.model().identity() !=
+        models::qwen3::make_model(config)->identity()) {
+      throw std::invalid_argument(
+          "pair requires full pinned Qwen3 mathematical configuration");
     }
-    void validate_model(ModelRole role, const tensors::formats::SourceIdentity &source,
-                        const models::BoundCheckpoint &checkpoint,
-                        tensors::ComputationMode mode) const override {
-        if (role != ModelRole::target && role != ModelRole::verbalizer) {
-            throw std::invalid_argument("unknown pair role");
-        }
-        const auto &expected = role == ModelRole::target ? provenance.target : provenance.verbalizer;
-        if (!same_source(expected, source) || !same_source(source, checkpoint.source_identity()) ||
-            mode.activation_storage != tensors::ElementType::bfloat16 ||
-            mode.reduction_accumulation != tensors::ElementType::float32) {
-            throw std::invalid_argument("pair checkpoint/precision mismatch");
-        }
-        const models::qwen3::Config config{blocks,
-                                           width,
-                                           32,
-                                           8,
-                                           128,
-                                           12288,
-                                           vocabulary,
-                                           {40960},
-                                           1e-6F,
-                                           1000000.0,
-                                           tensors::ElementType::bfloat16};
-        if (checkpoint.model().identity() != models::qwen3::make_model(config)->identity()) {
-            throw std::invalid_argument("pair requires full pinned Qwen3 mathematical configuration");
-        }
+  }
+  Injection prepare_injection(CaptureRow row) const override {
+    const auto site = target_site();
+    if (row.site.point.boundary != site.point.boundary ||
+        row.site.point.block.value != site.point.block.value ||
+        row.site.vector_width != site.vector_width ||
+        row.site.storage_type != site.storage_type) {
+      throw std::invalid_argument("capture does not match trained site");
     }
-    Injection prepare_injection(CaptureRow row) const override {
-        const auto site = target_site();
-        if (row.site.point.boundary != site.point.boundary ||
-            row.site.point.block.value != site.point.block.value ||
-            row.site.vector_width != site.vector_width || row.site.storage_type != site.storage_type) {
-            throw std::invalid_argument("capture does not match trained site");
-        }
-        return normalize_activation(row, position, injection_scale, tensors::ElementType::bfloat16);
-    }
-    ExplanationRange explanation(std::string_view bytes) const override {
-        return explanation_tags(bytes);
-    }
+    return normalize_activation(row, position, injection_scale,
+                                tensors::ElementType::bfloat16);
+  }
+  ExplanationRange explanation(std::string_view bytes) const override {
+    return explanation_tags(bytes);
+  }
 };
-} // namespace
-std::unique_ptr<Pair> make_qwen3_8b(Qwen3_8bSources sources, Qwen3_8bLimits limits) {
-    const tensors::formats::SourceIdentity target{
-        "Qwen/Qwen3-8B", "b968826d9c46dd6066d109eabc6255188de91218",
-        "ee2ec0f6130679a4cbe2c1d2110531e5b16ea585295d748aa7df1c519480ccba"};
-    const tensors::formats::SourceIdentity av{
-        "marco-bazzani/Qwen3-8B-nla", "12c6ed1b1e684bdb8a788c989e2f3d15f9790db3",
-        "fb04bf6abcab06fce3248e9d35f879d7c00a9c5a51c4e9076a41cf8a62bf61d2"};
-    if (sources.verbalizer_metadata.size() > limits.max_metadata_bytes) {
-        throw std::length_error("pair metadata budget");
-    }
-    if (!same_source(sources.target, target) || !same_source(sources.verbalizer, av) ||
-        hash(sources.verbalizer_metadata) != meta_hash) {
-        throw std::invalid_argument("unverified or unsupported NLA pair sources");
-    }
-    auto pair = std::make_unique<QwenPair>();
-    pair->provenance = {"qwen3-8b-l2-150-actor-v1", target, av, std::string(meta_hash)};
-    pair->prompt = sources.verbalizer_protocol.get().prepare(
-        {std::nullopt, std::string(actor), text::ThinkingMode::enabled}, sources.verbalizer_tokenizer);
-    const auto source_prefix = av.repository + "/" + av.revision + "/" + av.artifact_digest + "/";
-    const auto expected_text =
-        "<|im_start|>user\n" + std::string(actor) + "<|im_end|>\n<|im_start|>assistant\n";
-    if (!sources.verbalizer_tokenizer.get().identity().starts_with(source_prefix) ||
-        pair->prompt.tokenizer_identity != sources.verbalizer_tokenizer.get().identity() ||
-        pair->prompt.formatted_utf8 != expected_text ||
-        pair->prompt.stop_ids != std::vector<std::uint32_t>{end_message, end_text} ||
-        pair->prompt.thinking != text::ThinkingMode::enabled) {
-        throw std::invalid_argument("AV tokenizer or trained template mismatch");
-    }
-    const auto &ids = pair->prompt.ids;
-    if (pair->prompt.formatted_utf8.size() > limits.max_prompt_bytes ||
-        ids.size() > limits.max_prompt_tokens) {
-        throw std::length_error("AV prompt budget");
-    }
-    if (std::count(ids.begin(), ids.end(), marker) != 1) {
-        throw std::invalid_argument("AV requires one marker");
-    }
-    pair->position.value = static_cast<std::size_t>(std::find(ids.begin(), ids.end(), marker) - ids.begin());
-    const auto pos = pair->position.value;
-    if (!pos || pos + 1 >= ids.size() || ids.at(pos - 1) != left_neighbor ||
-        ids.at(pos + 1) != right_neighbor) {
-        throw std::invalid_argument("AV injection neighbors mismatch");
-    }
-    return pair;
+}  // namespace
+std::unique_ptr<Pair> make_qwen3_8b(Qwen3_8bSources sources,
+                                    Qwen3_8bLimits limits) {
+  const tensors::formats::SourceIdentity target{
+      "Qwen/Qwen3-8B", "b968826d9c46dd6066d109eabc6255188de91218",
+      "ee2ec0f6130679a4cbe2c1d2110531e5b16ea585295d748aa7df1c519480ccba"};
+  const tensors::formats::SourceIdentity av{
+      "marco-bazzani/Qwen3-8B-nla", "12c6ed1b1e684bdb8a788c989e2f3d15f9790db3",
+      "fb04bf6abcab06fce3248e9d35f879d7c00a9c5a51c4e9076a41cf8a62bf61d2"};
+  if (sources.verbalizer_metadata.size() > limits.max_metadata_bytes) {
+    throw std::length_error("pair metadata budget");
+  }
+  if (!same_source(sources.target, target) ||
+      !same_source(sources.verbalizer, av) ||
+      hash(sources.verbalizer_metadata) != meta_hash) {
+    throw std::invalid_argument("unverified or unsupported NLA pair sources");
+  }
+  auto pair = std::make_unique<QwenPair>();
+  pair->provenance = {"qwen3-8b-l2-150-actor-v1", target, av,
+                      std::string(meta_hash)};
+  pair->prompt = sources.verbalizer_protocol.get().prepare(
+      {std::nullopt, std::string(actor), text::ThinkingMode::enabled},
+      sources.verbalizer_tokenizer);
+  const auto source_prefix =
+      av.repository + "/" + av.revision + "/" + av.artifact_digest + "/";
+  const auto expected_text = "<|im_start|>user\n" + std::string(actor) +
+                             "<|im_end|>\n<|im_start|>assistant\n";
+  if (!sources.verbalizer_tokenizer.get().identity().starts_with(
+          source_prefix) ||
+      pair->prompt.tokenizer_identity !=
+          sources.verbalizer_tokenizer.get().identity() ||
+      pair->prompt.formatted_utf8 != expected_text ||
+      pair->prompt.stop_ids !=
+          std::vector<std::uint32_t>{end_message, end_text} ||
+      pair->prompt.thinking != text::ThinkingMode::enabled) {
+    throw std::invalid_argument("AV tokenizer or trained template mismatch");
+  }
+  const auto& ids = pair->prompt.ids;
+  if (pair->prompt.formatted_utf8.size() > limits.max_prompt_bytes ||
+      ids.size() > limits.max_prompt_tokens) {
+    throw std::length_error("AV prompt budget");
+  }
+  if (std::count(ids.begin(), ids.end(), marker) != 1) {
+    throw std::invalid_argument("AV requires one marker");
+  }
+  pair->position.value = static_cast<std::size_t>(
+      std::find(ids.begin(), ids.end(), marker) - ids.begin());
+  const auto pos = pair->position.value;
+  if (!pos || pos + 1 >= ids.size() || ids.at(pos - 1) != left_neighbor ||
+      ids.at(pos + 1) != right_neighbor) {
+    throw std::invalid_argument("AV injection neighbors mismatch");
+  }
+  return pair;
 }
-} // namespace dolittle::nla::pairs
+}  // namespace dolittle::nla::pairs

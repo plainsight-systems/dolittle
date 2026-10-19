@@ -5,10 +5,45 @@
       "label": "Dolittle: clang-tidy",
       "type": "process",
       "command": "python3",
-      "args": ["scripts/check.py", "tidy", "--build-dir", "${command:cmake.buildDirectory}"],
-      "options": { "cwd": "${workspaceFolder}" },
+      "args": [
+        "scripts/check.py",
+        "tidy",
+        "--build-dir",
+        "${command:cmake.buildDirectory}"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
       "problemMatcher": "$gcc",
       "group": "test"
+    },
+    {
+      "label": "Dolittle: check formatting",
+      "type": "process",
+      "command": "python3",
+      "args": [
+        "scripts/check.py",
+        "format"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$gcc",
+      "group": "test"
+    },
+    {
+      "label": "Dolittle: format sources",
+      "type": "process",
+      "command": "python3",
+      "args": [
+        "scripts/check.py",
+        "format",
+        "--fix"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
     }
   ]
 }

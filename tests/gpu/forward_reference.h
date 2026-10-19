@@ -7,12 +7,12 @@
  * reference values. Fixtures must come from an independently pinned reference
  * implementation, not from the implementation under test. Expected row counts,
  * positions and site identities must match the request.
- * Reference provenance records generator revision, dependency/device environment,
- * attention backend and numerical policy; these fields must be nonempty.
- * Reference and actual values must be finite. Tolerances are explicit, finite
- * and nonnegative;
- * numerical bounds must be justified from reference evidence, never selected
- * after a failing result merely to make it pass.
+ * Reference provenance records generator revision, dependency/device
+ * environment, attention backend and numerical policy; these fields must be
+ * nonempty. Reference and actual values must be finite. Tolerances are
+ * explicit, finite and nonnegative; numerical bounds must be justified from
+ * reference evidence, never selected after a failing result merely to make it
+ * pass.
  *
  * compare_forward requires exact execution/checkpoint identity, token IDs,
  * numerical mode, sites, row positions, widths and original dtypes before
@@ -47,16 +47,13 @@
  * to the identical comparison exercised by in-memory unit tests.
  *
  * Corpus guidance queried/read for implementation, 2026-10-18:
- * cpp-guidelines I.4 (#ri-typed): semantic point and token positions distinguish
- * outputs even when their widths match.
- * cpp-guidelines I.7 (#ri-post): comparison states exactly what passing means.
- * cpp-perf-guidelines GPU.1: isolate diagnostic readback/conversion from compute
- * timing. Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * cpp-guidelines I.4 (#ri-typed): semantic point and token positions
+ * distinguish outputs even when their widths match. cpp-guidelines I.7
+ * (#ri-post): comparison states exactly what passing means. cpp-perf-guidelines
+ * GPU.1: isolate diagnostic readback/conversion from compute timing. Source:
+ * guidelines/gpu/GPU.1-keep-data-on-device.md.
  */
 #pragma once
-
-#include "inference/executor.h"
-#include "tests/support/numerical.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -64,71 +61,75 @@
 #include <string>
 #include <vector>
 
+#include "inference/executor.h"
+#include "tests/support/numerical.h"
+
 namespace dolittle::tests {
 
 struct ExpectedRows {
-    std::vector<models::TokenPosition> positions;
-    std::size_t width{};
-    tensors::ElementType original_storage_type{};
-    std::vector<float> values;
+  std::vector<models::TokenPosition> positions;
+  std::size_t width{};
+  tensors::ElementType original_storage_type{};
+  std::vector<float> values;
 };
 
 struct ExpectedObservation {
-    models::ObservationPoint point{};
-    ExpectedRows rows;
+  models::ObservationPoint point{};
+  ExpectedRows rows;
 };
 
 struct ReferenceProvenance {
-    std::string implementation_revision;
-    std::string environment_identity;
-    std::string attention_backend;
-    std::string numerical_policy;
+  std::string implementation_revision;
+  std::string environment_identity;
+  std::string attention_backend;
+  std::string numerical_policy;
 };
 
 struct ForwardReferenceCase {
-    std::string name;
-    ReferenceProvenance reference;
-    std::string checkpoint_identity;
-    inference::ExecutionId execution_id{};
-    std::vector<std::uint32_t> token_ids;
-    inference::ForwardOptions options;
-    ExpectedRows logits;
-    std::vector<ExpectedObservation> captures;
+  std::string name;
+  ReferenceProvenance reference;
+  std::string checkpoint_identity;
+  inference::ExecutionId execution_id{};
+  std::vector<std::uint32_t> token_ids;
+  inference::ForwardOptions options;
+  ExpectedRows logits;
+  std::vector<ExpectedObservation> captures;
 };
 
 struct OutputComparison {
-    std::string output_name;
-    bool identity_and_shape_match;
-    bool all_values_finite;
-    double maximum_absolute_error;
-    std::optional<double> relative_l2;
-    bool passed;
-    std::string failure;
+  std::string output_name;
+  bool identity_and_shape_match;
+  bool all_values_finite;
+  double maximum_absolute_error;
+  std::optional<double> relative_l2;
+  bool passed;
+  std::string failure;
 };
 
 struct CompletedForwardView {
-    inference::ExecutionId execution_id;
-    std::string_view checkpoint_identity;
-    std::span<const std::uint32_t> token_ids;
-    tensors::ComputationMode numerical_mode;
-    inference::LogitRows logits;
-    std::span<const inference::CapturedRows> captures;
+  inference::ExecutionId execution_id;
+  std::string_view checkpoint_identity;
+  std::span<const std::uint32_t> token_ids;
+  tensors::ComputationMode numerical_mode;
+  inference::LogitRows logits;
+  std::span<const inference::CapturedRows> captures;
 };
 
-[[nodiscard]] std::vector<OutputComparison> compare_forward(const ForwardReferenceCase &reference,
-                                                            CompletedForwardView actual,
-                                                            NumericalTolerance logit_tolerance,
-                                                            NumericalTolerance observation_tolerance);
+[[nodiscard]] std::vector<OutputComparison> compare_forward(
+    const ForwardReferenceCase& reference, CompletedForwardView actual,
+    NumericalTolerance logit_tolerance,
+    NumericalTolerance observation_tolerance);
 
-[[nodiscard]] inline std::vector<OutputComparison> compare_forward(const ForwardReferenceCase &reference,
-                                                                   const inference::ForwardResult &actual,
-                                                                   NumericalTolerance logit_tolerance,
-                                                                   NumericalTolerance observation_tolerance) {
-    return compare_forward(reference,
-                           CompletedForwardView{actual.execution_id(), actual.checkpoint_identity(),
-                                                actual.token_ids(), actual.numerical_mode(), actual.logits(),
-                                                actual.captures()},
-                           logit_tolerance, observation_tolerance);
+[[nodiscard]] inline std::vector<OutputComparison> compare_forward(
+    const ForwardReferenceCase& reference,
+    const inference::ForwardResult& actual, NumericalTolerance logit_tolerance,
+    NumericalTolerance observation_tolerance) {
+  return compare_forward(
+      reference,
+      CompletedForwardView{actual.execution_id(), actual.checkpoint_identity(),
+                           actual.token_ids(), actual.numerical_mode(),
+                           actual.logits(), actual.captures()},
+      logit_tolerance, observation_tolerance);
 }
 
-} // namespace dolittle::tests
+}  // namespace dolittle::tests

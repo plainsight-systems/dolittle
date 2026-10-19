@@ -53,88 +53,98 @@ inline constexpr unsigned warp_lanes = 32;
 inline constexpr unsigned feature_group = 128;
 inline constexpr unsigned full_warp_mask = 0xffffffffU;
 
-template <class T> struct RmsArguments {
-    const T *input;
-    const T *weight;
-    T *output;
-    std::size_t rows;
-    std::size_t width;
-    float epsilon;
+template <class T>
+struct RmsArguments {
+  const T* input;
+  const T* weight;
+  T* output;
+  std::size_t rows;
+  std::size_t width;
+  float epsilon;
 };
 
 // Device-only indexing: preparation proves allocation extents; the loops
-// below guard tails and index shared/register arrays within their declared sizes.
-// NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic, cppcoreguidelines-avoid-c-arrays, cppcoreguidelines-pro-bounds-constant-array-index)
-template <class T> __global__ void rms_norm(RmsArguments<T> args) {
-    const auto [input, weight, output, rows, width, epsilon] = args;
-    for (std::size_t row = blockIdx.x; row < rows;) {
-        float partials[4]{};
-        if (width <= feature_group) {
+// below guard tails and index shared/register arrays within their declared
+// sizes. NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic,
+// cppcoreguidelines-avoid-c-arrays,
+// cppcoreguidelines-pro-bounds-constant-array-index)
+template <class T>
+__global__ void rms_norm(RmsArguments<T> args) {
+  const auto [input, weight, output, rows, width, epsilon] = args;
+  for (std::size_t row = blockIdx.x; row < rows;) {
+    float partials[4]{};
+    if (width <= feature_group) {
 #pragma unroll
-            for (unsigned c = 0; c < 4; ++c) {
-                const auto column = threadIdx.x + warp_lanes * c;
-                if (column < width) {
-                    const auto value = detail::widen(input[row * width + column]);
-                    partials[c] = __fmul_rn(value, value);
-                }
-            }
-        } else {
-            for (std::size_t base = 4 * std::size_t{threadIdx.x}; base < width; base += feature_group) {
+      for (unsigned c = 0; c < 4; ++c) {
+        const auto column = threadIdx.x + warp_lanes * c;
+        if (column < width) {
+          const auto value = detail::widen(input[row * width + column]);
+          partials[c] = __fmul_rn(value, value);
+        }
+      }
+    } else {
+      for (std::size_t base = 4 * std::size_t{threadIdx.x}; base < width;
+           base += feature_group) {
 #pragma unroll
-                for (unsigned c = 0; c < 4; ++c) {
-                    if (base + c < width) {
-                        const auto value = detail::widen(input[row * width + base + c]);
-                        partials[c] = __fadd_rn(partials[c], __fmul_rn(value, value));
-                    }
-                }
-            }
+        for (unsigned c = 0; c < 4; ++c) {
+          if (base + c < width) {
+            const auto value = detail::widen(input[row * width + base + c]);
+            partials[c] = __fadd_rn(partials[c], __fmul_rn(value, value));
+          }
         }
-        float sum = partials[0];
-#pragma unroll
-        for (unsigned c = 1; c < 4; ++c) {
-            sum = __fadd_rn(sum, partials[c]);
-        }
-#pragma unroll
-        for (unsigned offset = 1; offset < warp_lanes; offset *= 2) {
-            sum = __fadd_rn(sum, __shfl_down_sync(full_warp_mask, sum, offset));
-        }
-        const auto total = __shfl_sync(full_warp_mask, sum, 0);
-        const auto mean = __fmul_rn(total, 1.0F / static_cast<float>(width));
-        const auto inverse = rsqrtf(__fadd_rn(mean, epsilon));
-        for (std::size_t column = threadIdx.x; column < width; column += blockDim.x) {
-            const auto normalized =
-                detail::storage_round<T>(__fmul_rn(detail::widen(input[row * width + column]), inverse));
-            output[row * width + column] =
-                detail::narrow<T>(__fmul_rn(normalized, detail::widen(weight[column])));
-        }
-        if (rows - row <= gridDim.x) {
-            break;
-        }
-        row += gridDim.x;
+      }
     }
+    float sum = partials[0];
+#pragma unroll
+    for (unsigned c = 1; c < 4; ++c) {
+      sum = __fadd_rn(sum, partials[c]);
+    }
+#pragma unroll
+    for (unsigned offset = 1; offset < warp_lanes; offset *= 2) {
+      sum = __fadd_rn(sum, __shfl_down_sync(full_warp_mask, sum, offset));
+    }
+    const auto total = __shfl_sync(full_warp_mask, sum, 0);
+    const auto mean = __fmul_rn(total, 1.0F / static_cast<float>(width));
+    const auto inverse = rsqrtf(__fadd_rn(mean, epsilon));
+    for (std::size_t column = threadIdx.x; column < width;
+         column += blockDim.x) {
+      const auto normalized = detail::storage_round<T>(
+          __fmul_rn(detail::widen(input[row * width + column]), inverse));
+      output[row * width + column] = detail::narrow<T>(
+          __fmul_rn(normalized, detail::widen(weight[column])));
+    }
+    if (rows - row <= gridDim.x) {
+      break;
+    }
+    row += gridDim.x;
+  }
 }
 
-// NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic, cppcoreguidelines-avoid-c-arrays, cppcoreguidelines-pro-bounds-constant-array-index)
+// NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic,
+// cppcoreguidelines-avoid-c-arrays,
+// cppcoreguidelines-pro-bounds-constant-array-index)
 
 template <class T>
-void submit(const void *input, const void *weight, void *output, std::size_t rows, std::size_t width,
-            float epsilon, cudaStream_t stream) {
-    rms_norm<<<detail::grid_blocks(rows), warp_lanes, 0, stream>>>(
-        RmsArguments<T>{.input = static_cast<const T *>(input),
-                        .weight = static_cast<const T *>(weight),
-                        .output = static_cast<T *>(output),
-                        .rows = rows,
-                        .width = width,
-                        .epsilon = epsilon});
+void submit(const void* input, const void* weight, void* output,
+            std::size_t rows, std::size_t width, float epsilon,
+            cudaStream_t stream) {
+  rms_norm<<<detail::grid_blocks(rows), warp_lanes, 0, stream>>>(
+      RmsArguments<T>{.input = static_cast<const T*>(input),
+                      .weight = static_cast<const T*>(weight),
+                      .output = static_cast<T*>(output),
+                      .rows = rows,
+                      .width = width,
+                      .epsilon = epsilon});
 }
-} // namespace
+}  // namespace
 
-void launch_rms_norm(tensors::ElementType type, const void *input, const void *weight, void *output,
-                     std::size_t rows, std::size_t width, float epsilon, cudaStream_t stream) {
-    if (detail::is_bfloat16(type)) {
-        submit<__nv_bfloat16>(input, weight, output, rows, width, epsilon, stream);
-    } else {
-        submit<float>(input, weight, output, rows, width, epsilon, stream);
-    }
+void launch_rms_norm(tensors::ElementType type, const void* input,
+                     const void* weight, void* output, std::size_t rows,
+                     std::size_t width, float epsilon, cudaStream_t stream) {
+  if (detail::is_bfloat16(type)) {
+    submit<__nv_bfloat16>(input, weight, output, rows, width, epsilon, stream);
+  } else {
+    submit<float>(input, weight, output, rows, width, epsilon, stream);
+  }
 }
-} // namespace dolittle::kernels::cuda
+}  // namespace dolittle::kernels::cuda

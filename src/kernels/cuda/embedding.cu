@@ -24,11 +24,11 @@
  * Overlay: docs/architecture/transformer-execution.md, "Full model flow".
  * Token indices must be below V; the executor validates them before upload.
  *
- * Contract: preparation validates shapes, byte/launch extents and device limits.
- * Inputs and the separate output buffer are borrowed until queue completion;
- * output must not overlap an input. Launches allocate no buffers and perform
- * no host readback or host wait. The caller checks immediate launch status;
- * asynchronous device errors surface at the explicit queue wait. See
+ * Contract: preparation validates shapes, byte/launch extents and device
+ * limits. Inputs and the separate output buffer are borrowed until queue
+ * completion; output must not overlap an input. Launches allocate no buffers
+ * and perform no host readback or host wait. The caller checks immediate launch
+ * status; asynchronous device errors surface at the explicit queue wait. See
  * kernels/operations.h for the public operation and failure contracts.
  *
  * Corpus consultation, comment design, 2026-10-18:
@@ -45,57 +45,61 @@
 
 namespace dolittle::kernels::cuda {
 namespace {
-template <class Bits> struct EmbeddingArguments {
-    const std::uint32_t *tokens;
-    const Bits *weight;
-    Bits *output;
-    std::size_t rows;
-    std::size_t width;
+template <class Bits>
+struct EmbeddingArguments {
+  const std::uint32_t* tokens;
+  const Bits* weight;
+  Bits* output;
+  std::size_t rows;
+  std::size_t width;
 };
 
 // Device-only indexing: preparation proves allocation extents; the loops
-// below guard tails and index shared/register arrays within their declared sizes.
-// NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-template <class Bits> __global__ void embedding(EmbeddingArguments<Bits> args) {
-    const auto [tokens, weight, output, rows, width] = args;
-    __shared__ std::uint32_t token;
-    for (std::size_t row = blockIdx.x; row < rows;) {
-        if (threadIdx.x == 0) {
-            token = tokens[row];
-        }
-        __syncthreads();
-        const auto source = static_cast<std::size_t>(token) * width;
-        for (std::size_t feature = threadIdx.x; feature < width; feature += blockDim.x) {
-            output[row * width + feature] = weight[source + feature];
-        }
-        __syncthreads();
-        if (rows - row <= gridDim.x) {
-            break;
-        }
-        row += gridDim.x;
+// below guard tails and index shared/register arrays within their declared
+// sizes. NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+template <class Bits>
+__global__ void embedding(EmbeddingArguments<Bits> args) {
+  const auto [tokens, weight, output, rows, width] = args;
+  __shared__ std::uint32_t token;
+  for (std::size_t row = blockIdx.x; row < rows;) {
+    if (threadIdx.x == 0) {
+      token = tokens[row];
     }
+    __syncthreads();
+    const auto source = static_cast<std::size_t>(token) * width;
+    for (std::size_t feature = threadIdx.x; feature < width;
+         feature += blockDim.x) {
+      output[row * width + feature] = weight[source + feature];
+    }
+    __syncthreads();
+    if (rows - row <= gridDim.x) {
+      break;
+    }
+    row += gridDim.x;
+  }
 }
 
 // NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
 
 template <class Bits>
-void submit(const std::uint32_t *tokens, const void *weight, void *output, std::size_t rows,
-            std::size_t width, cudaStream_t stream) {
-    embedding<<<detail::grid_blocks(rows), detail::threads, 0, stream>>>(
-        EmbeddingArguments<Bits>{.tokens = tokens,
-                                 .weight = static_cast<const Bits *>(weight),
-                                 .output = static_cast<Bits *>(output),
-                                 .rows = rows,
-                                 .width = width});
+void submit(const std::uint32_t* tokens, const void* weight, void* output,
+            std::size_t rows, std::size_t width, cudaStream_t stream) {
+  embedding<<<detail::grid_blocks(rows), detail::threads, 0, stream>>>(
+      EmbeddingArguments<Bits>{.tokens = tokens,
+                               .weight = static_cast<const Bits*>(weight),
+                               .output = static_cast<Bits*>(output),
+                               .rows = rows,
+                               .width = width});
 }
-} // namespace
+}  // namespace
 
-void launch_embedding(tensors::ElementType type, const std::uint32_t *tokens, const void *weight,
-                      void *output, std::size_t rows, std::size_t width, cudaStream_t stream) {
-    if (detail::is_bfloat16(type)) {
-        submit<std::uint16_t>(tokens, weight, output, rows, width, stream);
-    } else {
-        submit<std::uint32_t>(tokens, weight, output, rows, width, stream);
-    }
+void launch_embedding(tensors::ElementType type, const std::uint32_t* tokens,
+                      const void* weight, void* output, std::size_t rows,
+                      std::size_t width, cudaStream_t stream) {
+  if (detail::is_bfloat16(type)) {
+    submit<std::uint16_t>(tokens, weight, output, rows, width, stream);
+  } else {
+    submit<std::uint32_t>(tokens, weight, output, rows, width, stream);
+  }
 }
-} // namespace dolittle::kernels::cuda
+}  // namespace dolittle::kernels::cuda

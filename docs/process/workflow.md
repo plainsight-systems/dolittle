@@ -111,6 +111,21 @@ from the design, clarify that design before implementation.
 
 ## Verification
 
+### Formatting
+
+Use the repository's Google `.clang-format` with the pinned formatter described
+in [tooling setup](../../scripts/README.md#formatting). VS Code formats C/C++/CUDA
+on save; run `python3 scripts/check.py format` before committing. Use `--fix` to
+apply formatting. CI runs the same read-only check. Formatting does not replace
+clang-tidy, strict compilation or numerical verification.
+
+Formatting-only changes preserve the existing algorithm contracts and corpus
+citations. Both corpora were consulted for this setup: cpp-guidelines NL.17
+(`#rl-knr`) recommends IDE enforcement while deferring its default layout to
+project constraints; Andrew explicitly selected Google. The performance-corpus
+query for automated source formatting and numerical preservation returned no
+applicable style rule. No runtime optimization or algorithm change is implied.
+
 ### Static analysis
 
 Use `python3 scripts/check.py tidy` with the relevant configured compilation

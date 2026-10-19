@@ -52,136 +52,161 @@
  * GDSA.2 preserves the exact partial ownership and arithmetic order. Source:
  * guidelines/gpu-dsa/GDSA.2-declare-each-reductions-determinism.md.
  */
-#include "kernels/cuda/common.cuh"
-
 #include <cmath>
+
+#include "kernels/cuda/common.cuh"
 
 namespace dolittle::kernels::cuda {
 namespace {
 inline constexpr unsigned dot_partials = 8;
 inline constexpr unsigned softmax_partials = 32;
 
-template <class T> struct AttentionArguments {
-    const T *query;
-    const T *key;
-    const T *value;
-    T *output;
-    std::size_t tasks;
-    std::size_t query_heads;
-    std::size_t kv_heads;
-    std::size_t width;
-    std::size_t first_position;
-    float scale;
+template <class T>
+struct AttentionArguments {
+  const T* query;
+  const T* key;
+  const T* value;
+  T* output;
+  std::size_t tasks;
+  std::size_t query_heads;
+  std::size_t kv_heads;
+  std::size_t width;
+  std::size_t first_position;
+  float scale;
 };
 
 // Device-only indexing: preparation proves allocation extents; the loops
-// below guard tails and index shared/register arrays within their declared sizes.
-// NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic, cppcoreguidelines-avoid-c-arrays, cppcoreguidelines-pro-bounds-constant-array-index, cppcoreguidelines-pro-bounds-array-to-pointer-decay)
-template <class T> __global__ void attention(AttentionArguments<T> args) {
-    const auto [query, key, value, output, tasks, query_heads, kv_heads, width, first_position, scale] = args;
-    // CUDA dynamic shared memory is allocated per block, not process-global state.
-    // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-    extern __shared__ float shared[];
-    auto *q = shared;
-    auto *numerator = q + width;
-    auto *second_sum = numerator + width;
-    auto *reduction = second_sum + width;
-    auto *update = reduction + detail::threads;
-    for (std::size_t task = blockIdx.x; task < tasks;) {
-        const auto position = first_position + task / query_heads;
-        const auto head = task % query_heads;
-        const auto kv_head = head / (query_heads / kv_heads);
-        for (std::size_t feature = threadIdx.x; feature < width; feature += blockDim.x) {
-            q[feature] = detail::widen(query[task * width + feature]);
-            numerator[feature] = 0.0F;
-            second_sum[feature] = 0.0F;
-        }
-        __syncthreads();
-        float maximum = 0.0F;
-        float denominator_partial = 0.0F;
-        for (unsigned pass = 0; pass < 3; ++pass) {
-            for (std::size_t key_position = 0; key_position <= position; ++key_position) {
-                const auto kv_offset = (key_position * kv_heads + kv_head) * width;
-                float partial = 0.0F;
-                if (threadIdx.x < dot_partials) {
-                    const auto span = width / dot_partials + (width % dot_partials != 0);
-                    const auto begin = threadIdx.x * span;
-                    const auto end = begin < width ? begin + min(span, width - begin) : width;
-                    for (std::size_t feature = begin; feature < end; ++feature) {
-                        partial = __fmaf_rn(q[feature], detail::widen(key[kv_offset + feature]), partial);
-                    }
-                }
-                const auto score = __fmul_rn(detail::block_sum(partial, reduction), scale);
-                if (pass == 0) {
-                    maximum = key_position == 0 ? score : fmaxf(maximum, score);
-                } else if (pass == 1) {
-                    if (threadIdx.x == key_position % softmax_partials) {
-                        denominator_partial = __fadd_rn(denominator_partial, expf(score - maximum));
-                    }
-                } else {
-                    if (threadIdx.x == 0) {
-                        update[0] = expf(score - maximum) / update[2];
-                    }
-                    __syncthreads();
-                    for (std::size_t feature = threadIdx.x; feature < width; feature += blockDim.x) {
-                        auto *sum = key_position < (position / 2 + 1) ? numerator : second_sum;
-                        sum[feature] =
-                            __fmaf_rn(update[0], detail::widen(value[kv_offset + feature]), sum[feature]);
-                    }
-                }
-                __syncthreads();
-            }
-            if (pass == 1) {
-                const auto denominator = detail::block_sum(denominator_partial, reduction);
-                if (threadIdx.x == 0) {
-                    update[2] = denominator;
-                }
-                __syncthreads();
-            }
-        }
-        for (std::size_t feature = threadIdx.x; feature < width; feature += blockDim.x) {
-            output[task * width + feature] =
-                detail::narrow<T>(__fadd_rn(numerator[feature], second_sum[feature]));
-        }
-        __syncthreads();
-        if (tasks - task <= gridDim.x) {
-            break;
-        }
-        task += gridDim.x;
+// below guard tails and index shared/register arrays within their declared
+// sizes. NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic,
+// cppcoreguidelines-avoid-c-arrays,
+// cppcoreguidelines-pro-bounds-constant-array-index,
+// cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+template <class T>
+__global__ void attention(AttentionArguments<T> args) {
+  const auto [query, key, value, output, tasks, query_heads, kv_heads, width,
+              first_position, scale] = args;
+  // CUDA dynamic shared memory is allocated per block, not process-global
+  // state. NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+  extern __shared__ float shared[];
+  auto* q = shared;
+  auto* numerator = q + width;
+  auto* second_sum = numerator + width;
+  auto* reduction = second_sum + width;
+  auto* update = reduction + detail::threads;
+  for (std::size_t task = blockIdx.x; task < tasks;) {
+    const auto position = first_position + task / query_heads;
+    const auto head = task % query_heads;
+    const auto kv_head = head / (query_heads / kv_heads);
+    for (std::size_t feature = threadIdx.x; feature < width;
+         feature += blockDim.x) {
+      q[feature] = detail::widen(query[task * width + feature]);
+      numerator[feature] = 0.0F;
+      second_sum[feature] = 0.0F;
     }
+    __syncthreads();
+    float maximum = 0.0F;
+    float denominator_partial = 0.0F;
+    for (unsigned pass = 0; pass < 3; ++pass) {
+      for (std::size_t key_position = 0; key_position <= position;
+           ++key_position) {
+        const auto kv_offset = (key_position * kv_heads + kv_head) * width;
+        float partial = 0.0F;
+        if (threadIdx.x < dot_partials) {
+          const auto span = width / dot_partials + (width % dot_partials != 0);
+          const auto begin = threadIdx.x * span;
+          const auto end =
+              begin < width ? begin + min(span, width - begin) : width;
+          for (std::size_t feature = begin; feature < end; ++feature) {
+            partial = __fmaf_rn(
+                q[feature], detail::widen(key[kv_offset + feature]), partial);
+          }
+        }
+        const auto score =
+            __fmul_rn(detail::block_sum(partial, reduction), scale);
+        if (pass == 0) {
+          maximum = key_position == 0 ? score : fmaxf(maximum, score);
+        } else if (pass == 1) {
+          if (threadIdx.x == key_position % softmax_partials) {
+            denominator_partial =
+                __fadd_rn(denominator_partial, expf(score - maximum));
+          }
+        } else {
+          if (threadIdx.x == 0) {
+            update[0] = expf(score - maximum) / update[2];
+          }
+          __syncthreads();
+          for (std::size_t feature = threadIdx.x; feature < width;
+               feature += blockDim.x) {
+            auto* sum =
+                key_position < (position / 2 + 1) ? numerator : second_sum;
+            sum[feature] =
+                __fmaf_rn(update[0], detail::widen(value[kv_offset + feature]),
+                          sum[feature]);
+          }
+        }
+        __syncthreads();
+      }
+      if (pass == 1) {
+        const auto denominator =
+            detail::block_sum(denominator_partial, reduction);
+        if (threadIdx.x == 0) {
+          update[2] = denominator;
+        }
+        __syncthreads();
+      }
+    }
+    for (std::size_t feature = threadIdx.x; feature < width;
+         feature += blockDim.x) {
+      output[task * width + feature] =
+          detail::narrow<T>(__fadd_rn(numerator[feature], second_sum[feature]));
+    }
+    __syncthreads();
+    if (tasks - task <= gridDim.x) {
+      break;
+    }
+    task += gridDim.x;
+  }
 }
 
-// NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic, cppcoreguidelines-avoid-c-arrays, cppcoreguidelines-pro-bounds-constant-array-index, cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+// NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic,
+// cppcoreguidelines-avoid-c-arrays,
+// cppcoreguidelines-pro-bounds-constant-array-index,
+// cppcoreguidelines-pro-bounds-array-to-pointer-decay)
 
 template <class T>
-void submit(const void *query, const void *key, const void *value, void *output, std::size_t positions,
-            std::size_t query_heads, std::size_t kv_heads, std::size_t width, cudaStream_t stream,
+void submit(const void* query, const void* key, const void* value, void* output,
+            std::size_t positions, std::size_t query_heads,
+            std::size_t kv_heads, std::size_t width, cudaStream_t stream,
             std::size_t first_position) {
-    const auto tasks = positions * query_heads;
-    const auto shared_bytes = (3 * width + detail::threads + 3) * sizeof(float);
-    attention<<<detail::grid_blocks(tasks), detail::threads, shared_bytes, stream>>>(
-        AttentionArguments<T>{.query = static_cast<const T *>(query),
-                              .key = static_cast<const T *>(key),
-                              .value = static_cast<const T *>(value),
-                              .output = static_cast<T *>(output),
-                              .tasks = tasks,
-                              .query_heads = query_heads,
-                              .kv_heads = kv_heads,
-                              .width = width,
-                              .first_position = first_position,
-                              .scale = static_cast<float>(1.0 / std::sqrt(static_cast<double>(width)))});
+  const auto tasks = positions * query_heads;
+  const auto shared_bytes = (3 * width + detail::threads + 3) * sizeof(float);
+  attention<<<detail::grid_blocks(tasks), detail::threads, shared_bytes,
+              stream>>>(AttentionArguments<T>{
+      .query = static_cast<const T*>(query),
+      .key = static_cast<const T*>(key),
+      .value = static_cast<const T*>(value),
+      .output = static_cast<T*>(output),
+      .tasks = tasks,
+      .query_heads = query_heads,
+      .kv_heads = kv_heads,
+      .width = width,
+      .first_position = first_position,
+      .scale =
+          static_cast<float>(1.0 / std::sqrt(static_cast<double>(width)))});
 }
-} // namespace
+}  // namespace
 
-void launch_attention(tensors::ElementType type, const void *query, const void *key, const void *value,
-                      void *output, std::size_t positions, std::size_t query_heads, std::size_t kv_heads,
-                      std::size_t width, cudaStream_t stream, std::size_t first_position) {
-    if (detail::is_bfloat16(type)) {
-        submit<__nv_bfloat16>(query, key, value, output, positions, query_heads, kv_heads, width, stream,
-                              first_position);
-    } else {
-        submit<float>(query, key, value, output, positions, query_heads, kv_heads, width, stream,
-                      first_position);
-    }
+void launch_attention(tensors::ElementType type, const void* query,
+                      const void* key, const void* value, void* output,
+                      std::size_t positions, std::size_t query_heads,
+                      std::size_t kv_heads, std::size_t width,
+                      cudaStream_t stream, std::size_t first_position) {
+  if (detail::is_bfloat16(type)) {
+    submit<__nv_bfloat16>(query, key, value, output, positions, query_heads,
+                          kv_heads, width, stream, first_position);
+  } else {
+    submit<float>(query, key, value, output, positions, query_heads, kv_heads,
+                  width, stream, first_position);
+  }
 }
-} // namespace dolittle::kernels::cuda
+}  // namespace dolittle::kernels::cuda

@@ -19,145 +19,158 @@
  * 5. After successful queue completion, the executor advances the shared
  *    prefix. On any incomplete append, invalidate and drain before destruction.
  * The view exposes capacity and shape, not authority to publish a valid prefix.
- * The executor owns the prefix state and exact token history. Unwritten capacity
- * is never included as an attention key. No reset-and-reuse for a new identity.
+ * The executor owns the prefix state and exact token history. Unwritten
+ * capacity is never included as an attention key. No reset-and-reuse for a new
+ * identity.
  *
  * CUDA implementation design: queue-ordered device copies after K RoPE and V
  * projection; attention streams the persistent rows directly. A future Metal
- * backend uses the same logical layout through its own resource/copy operations.
- * Cost: two copies of B*Hkv*d elements per block, plus one reserved cache arena.
- * For the selected BF16 36-block model, capacity costs 144 KiB per position
- * (576 MiB at C=4096); captures and scratch are additional allocations.
- * Optimization: no cache allocation or full-prefix copy during decoding.
- * Baseline tradeoff: this is deliberately simple, not an optimized cache
- * lifecycle across turns. Allocate once for one prompt/response turn, reuse
- * throughout prefill/decode, then release after final capture completion and
- * pending GPU work. A later turn gets a fresh allocation and logical prefix.
- * Reserving the maximum admitted length can leave unused capacity, and every
- * turn pays allocation/release cost. There is no allocation pooling or prefix
- * reuse across turns. Measure allocation/release time, peak and unused capacity,
- * prefill/decode latency and target-to-NLA memory pressure on representative
- * runs before adding reuse, pooling or another storage strategy. No optimality
- * claim or measured benefit for those alternatives is implied by this design.
- * Errors and ownership follow cache.h and gpu/device.h. Regions are read-only
- * views for attention; only append destinations receive mutable access.
- * Overlay: docs/architecture/transformer-execution.md, "Prefill and decoding"
- * and "Storage lifetimes".
- * Corpus consultation, implementation, 2026-10-18:
- * cpp-guidelines I.7 (#ri-post), R.1 (#rr-raii): views borrow owned admitted
- * storage; logical validity is separate from physical capacity.
+ * backend uses the same logical layout through its own resource/copy
+ * operations. Cost: two copies of B*Hkv*d elements per block, plus one reserved
+ * cache arena. For the selected BF16 36-block model, capacity costs 144 KiB per
+ * position (576 MiB at C=4096); captures and scratch are additional
+ * allocations. Optimization: no cache allocation or full-prefix copy during
+ * decoding. Baseline tradeoff: this is deliberately simple, not an optimized
+ * cache lifecycle across turns. Allocate once for one prompt/response turn,
+ * reuse throughout prefill/decode, then release after final capture completion
+ * and pending GPU work. A later turn gets a fresh allocation and logical
+ * prefix. Reserving the maximum admitted length can leave unused capacity, and
+ * every turn pays allocation/release cost. There is no allocation pooling or
+ * prefix reuse across turns. Measure allocation/release time, peak and unused
+ * capacity, prefill/decode latency and target-to-NLA memory pressure on
+ * representative runs before adding reuse, pooling or another storage strategy.
+ * No optimality claim or measured benefit for those alternatives is implied by
+ * this design. Errors and ownership follow cache.h and gpu/device.h. Regions
+ * are read-only views for attention; only append destinations receive mutable
+ * access. Overlay: docs/architecture/transformer-execution.md, "Prefill and
+ * decoding" and "Storage lifetimes". Corpus consultation, implementation,
+ * 2026-10-18: cpp-guidelines I.7 (#ri-post), R.1 (#rr-raii): views borrow owned
+ * admitted storage; logical validity is separate from physical capacity.
  * cpp-guidelines Per.6 (#rper-measure): assess lifecycle/capacity tradeoffs
  * with representative runs before claiming an alternative performs better.
- * cpp-perf-guidelines GPU.9: allocate once and separate persistent/transient data.
- * Source: guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
+ * cpp-perf-guidelines GPU.9: allocate once and separate persistent/transient
+ * data. Source:
+ * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
  * cpp-perf-guidelines GPU.1: append and attend without host K/V transfers.
  * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
  */
 #include "inference/cache/contiguous.h"
-#include "tensors/tensor.h"
+
 #include <limits>
 #include <stdexcept>
 #include <utility>
+
+#include "tensors/tensor.h"
 namespace dolittle::inference::cache {
 namespace {
 std::size_t product(std::size_t a, std::size_t b) {
-    if (b && a > std::numeric_limits<std::size_t>::max() / b) {
-        throw std::length_error("cache size overflow");
-    }
-    return a * b;
+  if (b && a > std::numeric_limits<std::size_t>::max() / b) {
+    throw std::length_error("cache size overflow");
+  }
+  return a * b;
 }
 std::size_t sum(std::size_t a, std::size_t b) {
-    if (b > std::numeric_limits<std::size_t>::max() - a) {
-        throw std::length_error("cache size overflow");
-    }
-    return a + b;
+  if (b > std::numeric_limits<std::size_t>::max() - a) {
+    throw std::length_error("cache size overflow");
+  }
+  return a + b;
 }
-} // namespace
-Footprint estimate_contiguous(const Specification &s) {
-    if (s.checkpoint_identity.empty() || !s.capacity || s.layers.empty() ||
-        (s.mode.activation_storage != tensors::ElementType::bfloat16 &&
-         s.mode.activation_storage != tensors::ElementType::float32) ||
-        s.mode.reduction_accumulation != tensors::ElementType::float32) {
-        throw std::invalid_argument("invalid contiguous cache specification");
+}  // namespace
+Footprint estimate_contiguous(const Specification& s) {
+  if (s.checkpoint_identity.empty() || !s.capacity || s.layers.empty() ||
+      (s.mode.activation_storage != tensors::ElementType::bfloat16 &&
+       s.mode.activation_storage != tensors::ElementType::float32) ||
+      s.mode.reduction_accumulation != tensors::ElementType::float32) {
+    throw std::invalid_argument("invalid contiguous cache specification");
+  }
+  std::size_t total = 0;
+  for (auto layer : s.layers) {
+    if (!layer.kv_heads || !layer.head_width) {
+      throw std::invalid_argument("empty cache layer");
     }
-    std::size_t total = 0;
-    for (auto layer : s.layers) {
-        if (!layer.kv_heads || !layer.head_width) {
-            throw std::invalid_argument("empty cache layer");
-        }
-        total = sum(total, product(product(product(product(2, s.capacity), layer.kv_heads), layer.head_width),
-                                   tensors::element_bytes(s.mode.activation_storage)));
-    }
-    return {total, total};
+    total = sum(total,
+                product(product(product(product(2, s.capacity), layer.kv_heads),
+                                layer.head_width),
+                        tensors::element_bytes(s.mode.activation_storage)));
+  }
+  return {total, total};
 }
 struct Contiguous::Impl {
-    Specification spec;
-    gpu::Queue *queue;
-    gpu::DeviceBuffer storage;
-    std::vector<std::size_t> offsets, bytes;
-    Impl(Specification s, gpu::Queue &q, gpu::DeviceBuffer buffer)
-        : spec(std::move(s)), queue(&q), storage(std::move(buffer)) {
-        std::size_t offset = 0;
-        for (auto layer : spec.layers) {
-            auto size = product(product(product(spec.capacity, layer.kv_heads), layer.head_width),
-                                tensors::element_bytes(spec.mode.activation_storage));
-            offsets.push_back(offset);
-            bytes.push_back(size);
-            offset = sum(offset, product(2, size));
-        }
+  Specification spec;
+  gpu::Queue* queue;
+  gpu::DeviceBuffer storage;
+  std::vector<std::size_t> offsets, bytes;
+  Impl(Specification s, gpu::Queue& q, gpu::DeviceBuffer buffer)
+      : spec(std::move(s)), queue(&q), storage(std::move(buffer)) {
+    std::size_t offset = 0;
+    for (auto layer : spec.layers) {
+      auto size = product(
+          product(product(spec.capacity, layer.kv_heads), layer.head_width),
+          tensors::element_bytes(spec.mode.activation_storage));
+      offsets.push_back(offset);
+      bytes.push_back(size);
+      offset = sum(offset, product(2, size));
     }
-    Impl(const Impl &) = delete;
-    Impl &operator=(const Impl &) = delete;
-    Impl(Impl &&) = delete;
-    Impl &operator=(Impl &&) = delete;
-    ~Impl() {
-        try {
-            queue->drain();
-            // Destruction cannot throw; the buffer owner performs a final no-throw drain.
-            // NOLINTNEXTLINE(bugprone-empty-catch)
-        } catch (...) {
-        }
+  }
+  Impl(const Impl&) = delete;
+  Impl& operator=(const Impl&) = delete;
+  Impl(Impl&&) = delete;
+  Impl& operator=(Impl&&) = delete;
+  ~Impl() {
+    try {
+      queue->drain();
+      // Destruction cannot throw; the buffer owner performs a final no-throw
+      // drain. NOLINTNEXTLINE(bugprone-empty-catch)
+    } catch (...) {
     }
+  }
 };
 Contiguous::Contiguous(std::unique_ptr<Impl> p) : impl_(std::move(p)) {}
 Contiguous::~Contiguous() = default;
-Contiguous::Contiguous(Contiguous &&) noexcept = default;
-Contiguous &Contiguous::operator=(Contiguous &&) noexcept = default;
-const Specification &Contiguous::specification() const noexcept { return impl_->spec; }
+Contiguous::Contiguous(Contiguous&&) noexcept = default;
+Contiguous& Contiguous::operator=(Contiguous&&) noexcept = default;
+const Specification& Contiguous::specification() const noexcept {
+  return impl_->spec;
+}
 ContiguousLayerView Contiguous::layer(std::size_t block) const {
-    if (block >= impl_->bytes.size()) {
-        throw std::invalid_argument("cache layer out of range");
-    }
-    const auto n = impl_->bytes.at(block), offset = impl_->offsets.at(block);
-    return {{&impl_->storage, offset, n},
-            {&impl_->storage, offset + n, n},
-            impl_->spec.capacity,
-            impl_->spec.layers.at(block)};
+  if (block >= impl_->bytes.size()) {
+    throw std::invalid_argument("cache layer out of range");
+  }
+  const auto n = impl_->bytes.at(block), offset = impl_->offsets.at(block);
+  return {{&impl_->storage, offset, n},
+          {&impl_->storage, offset + n, n},
+          impl_->spec.capacity,
+          impl_->spec.layers.at(block)};
 }
-void Contiguous::append(gpu::Queue &queue, std::size_t block, std::size_t first, std::size_t count,
-                        gpu::ConstDeviceRegion k, gpu::ConstDeviceRegion v) {
-    if (&queue != impl_->queue || !count || first > impl_->spec.capacity ||
-        count > impl_->spec.capacity - first) {
-        throw std::invalid_argument("cache append queue or range mismatch");
-    }
-    const auto view = layer(block);
-    const auto row = impl_->bytes.at(block) / impl_->spec.capacity;
-    const auto size = product(count, row), offset = product(first, row);
-    if (k.bytes != size || v.bytes != size) {
-        throw std::invalid_argument("cache append source extent mismatch");
-    }
-    queue.copy({&impl_->storage, view.keys.offset + offset, size}, k);
-    queue.copy({&impl_->storage, view.values.offset + offset, size}, v);
+void Contiguous::append(gpu::Queue& queue, std::size_t block, std::size_t first,
+                        std::size_t count, gpu::ConstDeviceRegion k,
+                        gpu::ConstDeviceRegion v) {
+  if (&queue != impl_->queue || !count || first > impl_->spec.capacity ||
+      count > impl_->spec.capacity - first) {
+    throw std::invalid_argument("cache append queue or range mismatch");
+  }
+  const auto view = layer(block);
+  const auto row = impl_->bytes.at(block) / impl_->spec.capacity;
+  const auto size = product(count, row), offset = product(first, row);
+  if (k.bytes != size || v.bytes != size) {
+    throw std::invalid_argument("cache append source extent mismatch");
+  }
+  queue.copy({&impl_->storage, view.keys.offset + offset, size}, k);
+  queue.copy({&impl_->storage, view.values.offset + offset, size}, v);
 }
-std::unique_ptr<Contiguous> allocate_contiguous(gpu::Device &device, gpu::Queue &queue,
-                                                const Specification &spec, std::size_t budget) {
-    auto footprint = estimate_contiguous(spec);
-    if (footprint.allocation_bytes > budget) {
-        throw std::length_error("cache exceeds device budget");
-    }
-    return std::unique_ptr<Contiguous>(new Contiguous(std::make_unique<Contiguous::Impl>(
-        spec, queue,
-        device.allocate(
-            {footprint.allocation_bytes, tensors::element_bytes(spec.mode.activation_storage)}))));
+std::unique_ptr<Contiguous> allocate_contiguous(gpu::Device& device,
+                                                gpu::Queue& queue,
+                                                const Specification& spec,
+                                                std::size_t budget) {
+  auto footprint = estimate_contiguous(spec);
+  if (footprint.allocation_bytes > budget) {
+    throw std::length_error("cache exceeds device budget");
+  }
+  return std::unique_ptr<Contiguous>(
+      new Contiguous(std::make_unique<Contiguous::Impl>(
+          spec, queue,
+          device.allocate(
+              {footprint.allocation_bytes,
+               tensors::element_bytes(spec.mode.activation_storage)}))));
 }
-} // namespace dolittle::inference::cache
+}  // namespace dolittle::inference::cache

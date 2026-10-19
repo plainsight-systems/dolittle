@@ -31,36 +31,36 @@
  */
 #pragma once
 
-#include <cstdint>
-#include "tensors/representations/representation.h"
-
 #include <cstddef>
+#include <cstdint>
+
+#include "tensors/representations/representation.h"
 
 namespace dolittle::models {
 
 struct BlockIndex {
-    std::size_t value;
+  std::size_t value;
 };
 
 struct TokenPosition {
-    std::size_t value;
+  std::size_t value;
 };
 
 struct SequenceLength {
-    std::size_t value;
+  std::size_t value;
 };
 
 enum class ObservationBoundary : std::uint8_t { block_input, block_output };
 
 struct ObservationPoint {
-    ObservationBoundary boundary;
-    BlockIndex block;
+  ObservationBoundary boundary;
+  BlockIndex block;
 };
 
 struct ObservationSite {
-    ObservationPoint point;
-    std::size_t vector_width;
-    tensors::ElementType storage_type;
+  ObservationPoint point;
+  std::size_t vector_width;
+  tensors::ElementType storage_type;
 };
 
-} // namespace dolittle::models
+}  // namespace dolittle::models

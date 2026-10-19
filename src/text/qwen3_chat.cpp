@@ -4,8 +4,9 @@
  * Inputs: verified tokenizer_config.json and generation_config.json bytes,
  * source identity and a byte budget. Output: an owned immutable Protocol.
  * Validate the supported template branch, added-token IDs and stop settings
- * against the pinned tokenizer. Never execute arbitrary Jinja from a checkpoint.
- * Reject unsupported template/config changes instead of guessing equivalence.
+ * against the pinned tokenizer. Never execute arbitrary Jinja from a
+ * checkpoint. Reject unsupported template/config changes instead of guessing
+ * equivalence.
  *
  * Algorithm for prompt formatting:
  * 1. If system text is present, append exactly
@@ -40,25 +41,29 @@
  * cpp-guidelines I.1 (#ri-explicit), I.7 (#ri-post): exact template bytes and
  * control-token transitions, independent of model arithmetic.
  * cpp-perf-guidelines CDSA.32: resolve fixed template/control data once.
- * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
-
+ * Source:
+ * guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
+ *
  * Static-analysis design/implementation, 2026-10-19:
  * Named borrowed source fields distinguish the two JSON documents and identity.
  * Parsed metadata is owned; token-span access is checked without copying it.
  * cpp-guidelines SL.con.3 (#rsl-bounds), I.30 (#ri-encapsulate): make checked
  * host access explicit and confine necessary native API operations.
- * cpp-perf-guidelines COPY.7: borrow spans/references without hidden payload copies.
- * Source: guidelines/copy-move/COPY.7-eliminate-hidden-copies.md.
+ * cpp-perf-guidelines COPY.7: borrow spans/references without hidden payload
+ * copies. Source: guidelines/copy-move/COPY.7-eliminate-hidden-copies.md.
  */
-#include "bounds.h"
 #include "text/qwen3_chat.h"
-#include "tensors/formats/json_metadata.h"
+
 #include <openssl/sha.h>
+
 #include <array>
 #include <iomanip>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+
+#include "bounds.h"
+#include "tensors/formats/json_metadata.h"
 
 namespace dolittle::text {
 namespace {
@@ -70,125 +75,138 @@ inline constexpr std::uint32_t think_end = 151668;
 
 using Json = nlohmann::json;
 Json parse(std::string_view text) {
-    return tensors::formats::detail::parse_metadata(std::as_bytes(std::span(text.data(), text.size())),
-                                                    kibibyte * kibibyte)
-        .value;
+  return tensors::formats::detail::parse_metadata(
+             std::as_bytes(std::span(text.data(), text.size())),
+             kibibyte * kibibyte)
+      .value;
 }
 std::string sha256(std::string_view text) {
-    std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
-    // Native API byte/address boundary; no unrelated typed object is dereferenced.
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    SHA256(reinterpret_cast<const unsigned char *>(text.data()), text.size(), digest.data());
-    std::ostringstream out;
-    out << std::hex << std::setfill('0');
-    for (auto b : digest) {
-        out << std::setw(2) << static_cast<unsigned>(b);
-    }
-    return out.str();
+  std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
+  // Native API byte/address boundary; no unrelated typed object is
+  // dereferenced. NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+  SHA256(reinterpret_cast<const unsigned char*>(text.data()), text.size(),
+         digest.data());
+  std::ostringstream out;
+  out << std::hex << std::setfill('0');
+  for (auto b : digest) {
+    out << std::setw(2) << static_cast<unsigned>(b);
+  }
+  return out.str();
 }
 struct Qwen3Chat final : Protocol {
-    std::string source;
-    std::size_t budget{};
-    PreparedPrompt prepare(const Prompt &prompt, const tokenizers::Tokenizer &tokenizer) const override {
-        if (prompt.thinking != ThinkingMode::enabled && prompt.thinking != ThinkingMode::disabled) {
-            throw std::invalid_argument("unknown thinking mode");
-        }
-        if (!tokenizer.identity().starts_with(source + "/")) {
-            throw std::invalid_argument("tokenizer/protocol identity mismatch");
-        }
-        for (const auto &[text, id] :
-             std::array<std::pair<std::string_view, std::uint32_t>, 5>{{{"<|endoftext|>", end_text},
-                                                                        {"<|im_start|>", 151644},
-                                                                        {"<|im_end|>", end_message},
-                                                                        {"<think>", think_begin},
-                                                                        {"</think>", think_end}}}) {
-            const auto ids = tokenizer.encode(text);
-            if (ids.size() != 1 || ids.at(0) != id) {
-                throw std::invalid_argument("Qwen3 control token mismatch");
-            }
-        }
-        PreparedPrompt result;
-        result.protocol_identity = source + "/qwen3-single-turn-v1";
-        result.tokenizer_identity = tokenizer.identity();
-        result.thinking = prompt.thinking;
-        const auto append = [&](std::string_view s) {
-            if (s.size() > budget - result.formatted_utf8.size()) {
-                throw std::length_error("formatted prompt byte budget");
-            }
-            result.formatted_utf8 += s;
-        };
-        if (prompt.system) {
-            append("<|im_start|>system\n");
-            append(*prompt.system);
-            append("<|im_end|>\n");
-        }
-        append("<|im_start|>user\n");
-        append(prompt.user);
-        append("<|im_end|>\n<|im_start|>assistant\n");
-        if (prompt.thinking == ThinkingMode::disabled) {
-            append("<think>\n\n</think>\n\n");
-        }
-        result.ids = tokenizer.encode(result.formatted_utf8);
-        result.stop_ids = {end_message, end_text};
-        return result;
+  std::string source;
+  std::size_t budget{};
+  PreparedPrompt prepare(
+      const Prompt& prompt,
+      const tokenizers::Tokenizer& tokenizer) const override {
+    if (prompt.thinking != ThinkingMode::enabled &&
+        prompt.thinking != ThinkingMode::disabled) {
+      throw std::invalid_argument("unknown thinking mode");
     }
-    std::vector<TokenSegment> segment(std::span<const tokenizers::TokenId> ids, std::size_t start,
-                                      ThinkingMode mode) const override {
-        if (mode != ThinkingMode::enabled && mode != ThinkingMode::disabled) {
-            throw std::invalid_argument("unknown thinking mode");
-        }
-        if (ids.size() > std::numeric_limits<std::size_t>::max() - start) {
-            throw std::length_error("segment position overflow");
-        }
-        std::vector<TokenSegment> result;
-        result.reserve(ids.size());
-        auto state = mode == ThinkingMode::enabled ? SegmentKind::unclassified : SegmentKind::answer;
-        for (std::size_t i = 0; i < ids.size(); ++i) {
-            auto kind = state;
-            if (dolittle::at(ids, i) == think_begin) {
-                state =
-                    state == SegmentKind::unclassified ? SegmentKind::reasoning : SegmentKind::unclassified;
-                kind = SegmentKind::control;
-            } else if (dolittle::at(ids, i) == think_end) {
-                state = state == SegmentKind::reasoning ? SegmentKind::answer : SegmentKind::unclassified;
-                kind = SegmentKind::control;
-            } else if (dolittle::at(ids, i) == end_message || dolittle::at(ids, i) == end_text) {
-                kind = SegmentKind::control;
-            }
-            result.push_back({start + i, kind});
-        }
-        return result;
+    if (!tokenizer.identity().starts_with(source + "/")) {
+      throw std::invalid_argument("tokenizer/protocol identity mismatch");
     }
+    for (const auto& [text, id] :
+         std::array<std::pair<std::string_view, std::uint32_t>, 5>{
+             {{"<|endoftext|>", end_text},
+              {"<|im_start|>", 151644},
+              {"<|im_end|>", end_message},
+              {"<think>", think_begin},
+              {"</think>", think_end}}}) {
+      const auto ids = tokenizer.encode(text);
+      if (ids.size() != 1 || ids.at(0) != id) {
+        throw std::invalid_argument("Qwen3 control token mismatch");
+      }
+    }
+    PreparedPrompt result;
+    result.protocol_identity = source + "/qwen3-single-turn-v1";
+    result.tokenizer_identity = tokenizer.identity();
+    result.thinking = prompt.thinking;
+    const auto append = [&](std::string_view s) {
+      if (s.size() > budget - result.formatted_utf8.size()) {
+        throw std::length_error("formatted prompt byte budget");
+      }
+      result.formatted_utf8 += s;
+    };
+    if (prompt.system) {
+      append("<|im_start|>system\n");
+      append(*prompt.system);
+      append("<|im_end|>\n");
+    }
+    append("<|im_start|>user\n");
+    append(prompt.user);
+    append("<|im_end|>\n<|im_start|>assistant\n");
+    if (prompt.thinking == ThinkingMode::disabled) {
+      append("<think>\n\n</think>\n\n");
+    }
+    result.ids = tokenizer.encode(result.formatted_utf8);
+    result.stop_ids = {end_message, end_text};
+    return result;
+  }
+  std::vector<TokenSegment> segment(std::span<const tokenizers::TokenId> ids,
+                                    std::size_t start,
+                                    ThinkingMode mode) const override {
+    if (mode != ThinkingMode::enabled && mode != ThinkingMode::disabled) {
+      throw std::invalid_argument("unknown thinking mode");
+    }
+    if (ids.size() > std::numeric_limits<std::size_t>::max() - start) {
+      throw std::length_error("segment position overflow");
+    }
+    std::vector<TokenSegment> result;
+    result.reserve(ids.size());
+    auto state = mode == ThinkingMode::enabled ? SegmentKind::unclassified
+                                               : SegmentKind::answer;
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+      auto kind = state;
+      if (dolittle::at(ids, i) == think_begin) {
+        state = state == SegmentKind::unclassified ? SegmentKind::reasoning
+                                                   : SegmentKind::unclassified;
+        kind = SegmentKind::control;
+      } else if (dolittle::at(ids, i) == think_end) {
+        state = state == SegmentKind::reasoning ? SegmentKind::answer
+                                                : SegmentKind::unclassified;
+        kind = SegmentKind::control;
+      } else if (dolittle::at(ids, i) == end_message ||
+                 dolittle::at(ids, i) == end_text) {
+        kind = SegmentKind::control;
+      }
+      result.push_back({start + i, kind});
+    }
+    return result;
+  }
 };
-} // namespace
-std::unique_ptr<Protocol> make_qwen3_chat(Qwen3ChatSources sources, std::size_t budget) {
-    const auto [config, generation, source] = sources;
-    if (source.empty() || !budget) {
-        throw std::invalid_argument("invalid protocol identity/budget");
+}  // namespace
+std::unique_ptr<Protocol> make_qwen3_chat(Qwen3ChatSources sources,
+                                          std::size_t budget) {
+  const auto [config, generation, source] = sources;
+  if (source.empty() || !budget) {
+    throw std::invalid_argument("invalid protocol identity/budget");
+  }
+  const auto cfg = parse(config), gen = parse(generation);
+  try {
+    if (sha256(cfg.at("chat_template").get<std::string>()) !=
+            "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d"
+            "8" ||
+        gen.at("eos_token_id") != Json::array({end_message, end_text})) {
+      throw std::invalid_argument("unsupported Qwen3 template or stop IDs");
     }
-    const auto cfg = parse(config), gen = parse(generation);
-    try {
-        if (sha256(cfg.at("chat_template").get<std::string>()) !=
-                "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8" ||
-            gen.at("eos_token_id") != Json::array({end_message, end_text})) {
-            throw std::invalid_argument("unsupported Qwen3 template or stop IDs");
-        }
-        for (const auto &[id, text] :
-             std::array<std::pair<std::string_view, std::string_view>, 5>{{{"151643", "<|endoftext|>"},
-                                                                           {"151644", "<|im_start|>"},
-                                                                           {"151645", "<|im_end|>"},
-                                                                           {"151667", "<think>"},
-                                                                           {"151668", "</think>"}}}) {
-            if (cfg.at("added_tokens_decoder").at(id).at("content") != text) {
-                throw std::invalid_argument("Qwen3 added-token mismatch");
-            }
-        }
-        auto protocol = std::make_unique<Qwen3Chat>();
-        protocol->source = source;
-        protocol->budget = budget;
-        return protocol;
-    } catch (const Json::exception &) {
-        throw std::invalid_argument("invalid Qwen3 protocol JSON schema");
+    for (const auto& [id, text] :
+         std::array<std::pair<std::string_view, std::string_view>, 5>{
+             {{"151643", "<|endoftext|>"},
+              {"151644", "<|im_start|>"},
+              {"151645", "<|im_end|>"},
+              {"151667", "<think>"},
+              {"151668", "</think>"}}}) {
+      if (cfg.at("added_tokens_decoder").at(id).at("content") != text) {
+        throw std::invalid_argument("Qwen3 added-token mismatch");
+      }
     }
+    auto protocol = std::make_unique<Qwen3Chat>();
+    protocol->source = source;
+    protocol->budget = budget;
+    return protocol;
+  } catch (const Json::exception&) {
+    throw std::invalid_argument("invalid Qwen3 protocol JSON schema");
+  }
 }
-} // namespace dolittle::text
+}  // namespace dolittle::text

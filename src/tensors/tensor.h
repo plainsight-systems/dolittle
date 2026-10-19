@@ -27,31 +27,34 @@
  * cpp-guidelines I.7 (#ri-post): checked extent does not promise dense layout.
  * cpp-guidelines ES.103 (#res-overflow): check products and sums before use.
  * cpp-perf-guidelines CDSA.32: consumer layouts are validated during setup.
- * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
+ * Source:
+ * guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
  */
 #pragma once
 
-#include "tensors/representations/representation.h"
 #include <cstddef>
 #include <span>
 #include <vector>
 
+#include "tensors/representations/representation.h"
+
 namespace dolittle::tensors {
 
 struct Layout {
-    ElementType element_type{};
-    std::vector<std::size_t> shape;
-    std::vector<std::size_t> byte_strides;
+  ElementType element_type{};
+  std::vector<std::size_t> shape;
+  std::vector<std::size_t> byte_strides;
 };
 
 struct HostView {
-    const Layout *layout{};
-    std::span<const std::byte> bytes;
+  const Layout* layout{};
+  std::span<const std::byte> bytes;
 };
 
 [[nodiscard]] std::size_t element_bytes(ElementType type);
-[[nodiscard]] std::size_t required_bytes(const Layout &layout);
-[[nodiscard]] Layout contiguous_layout(ElementType type, std::span<const std::size_t> shape);
+[[nodiscard]] std::size_t required_bytes(const Layout& layout);
+[[nodiscard]] Layout contiguous_layout(ElementType type,
+                                       std::span<const std::size_t> shape);
 void validate_view(HostView view);
 
-} // namespace dolittle::tensors
+}  // namespace dolittle::tensors

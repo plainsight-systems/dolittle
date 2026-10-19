@@ -30,34 +30,36 @@
  * Invalid inputs or allocation failure leave the RNG unchanged. Commit the RNG
  * advance only after all validation/preparation succeeds. Objects are serial,
  * not reentrant; moved-from objects permit only destruction/reassignment.
- * Overlay: docs/architecture/file-mapping.md, "Sampling without a class hierarchy".
- * Corpus consultation, header design and implementation, 2026-10-18:
- * cpp-guidelines I.1 (#ri-explicit), I.7 (#ri-post): tie/filter/draw definitions
- * and failure effects are public, not unspecified library behavior.
- * cpp-perf-guidelines MEM.1: reserve vocabulary-bounded scratch once; candidate
- * records share one draw lifetime and need no individual allocations.
- * Source: guidelines/memory/MEM.1-arena-allocator-for-frame-scope.md.
+ * Overlay: docs/architecture/file-mapping.md, "Sampling without a class
+ * hierarchy". Corpus consultation, header design and implementation,
+ * 2026-10-18: cpp-guidelines I.1 (#ri-explicit), I.7 (#ri-post):
+ * tie/filter/draw definitions and failure effects are public, not unspecified
+ * library behavior. cpp-perf-guidelines MEM.1: reserve vocabulary-bounded
+ * scratch once; candidate records share one draw lifetime and need no
+ * individual allocations. Source:
+ * guidelines/memory/MEM.1-arena-allocator-for-frame-scope.md.
  */
 #pragma once
 
-#include "inference/sampling/sampler.h"
 #include <memory>
 #include <span>
 
+#include "inference/sampling/sampler.h"
+
 namespace dolittle::inference::sampling {
 class Categorical {
-  public:
-    explicit Categorical(std::size_t vocabulary_size);
-    ~Categorical();
-    Categorical(Categorical &&) noexcept;
-    Categorical &operator=(Categorical &&) noexcept;
-    Categorical(const Categorical &) = delete;
-    Categorical &operator=(const Categorical &) = delete;
-    [[nodiscard]] std::uint32_t select(std::span<const float> logits, Settings settings,
-                                       RandomStream &random);
+ public:
+  explicit Categorical(std::size_t vocabulary_size);
+  ~Categorical();
+  Categorical(Categorical&&) noexcept;
+  Categorical& operator=(Categorical&&) noexcept;
+  Categorical(const Categorical&) = delete;
+  Categorical& operator=(const Categorical&) = delete;
+  [[nodiscard]] std::uint32_t select(std::span<const float> logits,
+                                     Settings settings, RandomStream& random);
 
-  private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
 };
-} // namespace dolittle::inference::sampling
+}  // namespace dolittle::inference::sampling

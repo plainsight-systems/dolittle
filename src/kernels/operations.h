@@ -13,20 +13,21 @@
  * operands() declares required alignment/access for each referenced tensor;
  * planner placement satisfies these requirements before binding buffers.
  *
- * Initial operations require nonempty dense row-major tensors and distinct output
- * storage, floating inputs/outputs in activation_storage and FP32 reductions.
- * Activation storage is BF16 or FP32. Singleton-axis strides may vary because
- * they do not change any logical address. Projection X/Y have rank at least two.
- * Embedding reads uint32 [N] IDs and [V,D] weights, produces [N,D]. The executor
- * validates every ID < V before upload. Projection uses W[out,in], Y=X*W^T,
- * without bias; X/Y have equal leading row counts, trailing dimensions flatten
- * to in/out. RMSNorm normalizes the final dimension with matching vector weight
- * and positive finite epsilon. Rotary acts on [N,H,d], even d, using split-half
- * pairs (i,i+d/2), angle=(first_position+p)*theta^(-2*i/d), no scaling; theta
- * is positive finite. Attention reads [N,Hq,d], [N,Hkv,d], [N,Hkv,d], emits
- * [N,Hq,d], uses Hq divisible by Hkv, kv_head=floor(h/(Hq/Hkv)), j<=p,
- * and softmax(dot/sqrt(d)). No cache, repeated KV heads or N*N buffer required.
- * Add is elementwise with identical shapes. SiluMultiply computes
+ * Initial operations require nonempty dense row-major tensors and distinct
+ * output storage, floating inputs/outputs in activation_storage and FP32
+ * reductions. Activation storage is BF16 or FP32. Singleton-axis strides may
+ * vary because they do not change any logical address. Projection X/Y have rank
+ * at least two. Embedding reads uint32 [N] IDs and [V,D] weights, produces
+ * [N,D]. The executor validates every ID < V before upload. Projection uses
+ * W[out,in], Y=X*W^T, without bias; X/Y have equal leading row counts, trailing
+ * dimensions flatten to in/out. RMSNorm normalizes the final dimension with
+ * matching vector weight and positive finite epsilon. Rotary acts on [N,H,d],
+ * even d, using split-half pairs (i,i+d/2),
+ * angle=(first_position+p)*theta^(-2*i/d), no scaling; theta is positive
+ * finite. Attention reads [N,Hq,d], [N,Hkv,d], [N,Hkv,d], emits [N,Hq,d], uses
+ * Hq divisible by Hkv, kv_head=floor(h/(Hq/Hkv)), j<=p, and
+ * softmax(dot/sqrt(d)). No cache, repeated KV heads or N*N buffer required. Add
+ * is elementwise with identical shapes. SiluMultiply computes
  * (gate/(1+exp(-gate)))*up with identical shapes. GatherRows copies selected
  * leading rows bit-for-bit in declared order; indices are fixed host metadata
  * copied during preparation, in range and strictly increasing. No-output-row
@@ -37,10 +38,10 @@
  * attention accumulate in FP32 and round final outputs. No implicit TF32.
  * Fixed FP32 arithmetic (transformer-execution.md): projection uses 16 or 32
  * strided FMA partials selected by feature widths; RMSNorm uses four-component
- * warp sums; attention dots use eight contiguous feature ranges. Attention rounds normalized
- * probabilities to FP32 before FMA accumulation of values. These orders depend
- * on feature widths and visible keys, never batch size or cache chunking.
- * Corpus consultation, numerical contract design, 2026-10-19:
+ * warp sums; attention dots use eight contiguous feature ranges. Attention
+ * rounds normalized probabilities to FP32 before FMA accumulation of values.
+ * These orders depend on feature widths and visible keys, never batch size or
+ * cache chunking. Corpus consultation, numerical contract design, 2026-10-19:
  * cpp-guidelines I.7 (#ri-post): expose arithmetic guarantees to consumers.
  * cpp-perf-guidelines GDSA.2: state fixed reductions and invariance explicitly.
  * Source: guidelines/gpu-dsa/GDSA.2-declare-each-reductions-determinism.md.
@@ -108,23 +109,25 @@
  * Overlay: transformer-execution.md, "Attention and positional semantics" and
  * "Prefill and decoding".
  * Corpus consultation, header design and implementation, 2026-10-18:
- * cpp-guidelines I.1 (#ri-explicit), I.7 (#ri-post): cache effects, runtime extents
- * and causal visibility are explicit contracts, distinct from buffer capacity.
- * cpp-perf-guidelines GPU.9: reuse admitted scratch without overwriting live K/V.
- * Source: guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
+ * cpp-guidelines I.1 (#ri-explicit), I.7 (#ri-post): cache effects, runtime
+ * extents and causal visibility are explicit contracts, distinct from buffer
+ * capacity. cpp-perf-guidelines GPU.9: reuse admitted scratch without
+ * overwriting live K/V. Source:
+ * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
  * cpp-perf-guidelines GPU.1: all append/attention intermediates stay on device.
  * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
  */
 #pragma once
 
-#include <cstdint>
-#include "tensors/tensor.h"
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <string_view>
 #include <variant>
 #include <vector>
+
+#include "tensors/tensor.h"
 
 namespace dolittle::inference::cache {
 struct ContiguousLayerView;
@@ -135,102 +138,105 @@ class Device;
 class Queue;
 class DeviceBuffer;
 struct DeviceRegion;
-} // namespace dolittle::gpu
+}  // namespace dolittle::gpu
 
 namespace dolittle::kernels {
 
 struct TensorId {
-    std::size_t value;
+  std::size_t value;
 };
 struct Embedding {
-    TensorId tokens, weight, output;
+  TensorId tokens, weight, output;
 };
 struct Projection {
-    TensorId input, weight, output;
+  TensorId input, weight, output;
 };
 struct RmsNorm {
-    TensorId input, weight, output;
-    float epsilon;
+  TensorId input, weight, output;
+  float epsilon;
 };
 struct Rotary {
-    TensorId input, output;
-    std::size_t first_position;
-    double theta;
+  TensorId input, output;
+  std::size_t first_position;
+  double theta;
 };
 struct CausalAttention {
-    TensorId query, key, value, output;
+  TensorId query, key, value, output;
 };
 struct Add {
-    TensorId left, right, output;
+  TensorId left, right, output;
 };
 struct SiluMultiply {
-    TensorId gate, up, output;
+  TensorId gate, up, output;
 };
 struct GatherRows {
-    TensorId input, output;
-    std::vector<std::size_t> rows;
+  TensorId input, output;
+  std::vector<std::size_t> rows;
 };
 
-using Operation =
-    std::variant<Embedding, Projection, RmsNorm, Rotary, CausalAttention, Add, SiluMultiply, GatherRows>;
+using Operation = std::variant<Embedding, Projection, RmsNorm, Rotary,
+                               CausalAttention, Add, SiluMultiply, GatherRows>;
 
 struct WorkspaceRequirement {
-    std::size_t bytes;
-    std::size_t alignment;
+  std::size_t bytes;
+  std::size_t alignment;
 };
 enum class OperandAccess : std::uint8_t { read, write };
 struct OperandUse {
-    TensorId tensor;
-    OperandAccess access;
+  TensorId tensor;
+  OperandAccess access;
 };
-[[nodiscard]] std::vector<OperandUse> validate_operation(const Operation &operation,
-                                                         std::span<const tensors::Layout> tensors,
-                                                         tensors::ComputationMode mode);
+[[nodiscard]] std::vector<OperandUse> validate_operation(
+    const Operation& operation, std::span<const tensors::Layout> tensors,
+    tensors::ComputationMode mode);
 struct OperandRequirement {
-    TensorId tensor;
-    OperandAccess access;
-    std::size_t alignment;
+  TensorId tensor;
+  OperandAccess access;
+  std::size_t alignment;
 };
 struct BufferBinding {
-    TensorId tensor;
-    std::variant<const gpu::DeviceBuffer *, gpu::DeviceBuffer *> storage;
-    std::size_t offset;
-    std::size_t bytes;
+  TensorId tensor;
+  std::variant<const gpu::DeviceBuffer*, gpu::DeviceBuffer*> storage;
+  std::size_t offset;
+  std::size_t bytes;
 };
 
 // Active rows are bounded by max_rows; last_row selects the final active row.
 struct RowPolicy {
-    std::size_t max_rows = 0;
-    bool last_row = false;
+  std::size_t max_rows = 0;
+  bool last_row = false;
 };
 struct ExecutionExtent {
-    std::size_t first_position;
-    std::size_t active_rows;
+  std::size_t first_position;
+  std::size_t active_rows;
 };
 class PreparedOperation {
-  public:
-    ~PreparedOperation();
-    PreparedOperation(PreparedOperation &&) noexcept;
-    PreparedOperation &operator=(PreparedOperation &&) noexcept;
-    PreparedOperation(const PreparedOperation &) = delete;
-    PreparedOperation &operator=(const PreparedOperation &) = delete;
-    [[nodiscard]] WorkspaceRequirement workspace() const noexcept;
-    [[nodiscard]] std::span<const OperandRequirement> operands() const noexcept;
-    [[nodiscard]] std::string_view implementation_name() const noexcept;
-    void submit(gpu::Queue &queue, std::span<const BufferBinding> bindings, gpu::DeviceRegion workspace,
-                const ExecutionExtent *extent = nullptr,
-                const inference::cache::ContiguousLayerView *cache = nullptr) const;
+ public:
+  ~PreparedOperation();
+  PreparedOperation(PreparedOperation&&) noexcept;
+  PreparedOperation& operator=(PreparedOperation&&) noexcept;
+  PreparedOperation(const PreparedOperation&) = delete;
+  PreparedOperation& operator=(const PreparedOperation&) = delete;
+  [[nodiscard]] WorkspaceRequirement workspace() const noexcept;
+  [[nodiscard]] std::span<const OperandRequirement> operands() const noexcept;
+  [[nodiscard]] std::string_view implementation_name() const noexcept;
+  void submit(
+      gpu::Queue& queue, std::span<const BufferBinding> bindings,
+      gpu::DeviceRegion workspace, const ExecutionExtent* extent = nullptr,
+      const inference::cache::ContiguousLayerView* cache = nullptr) const;
 
-  private:
-    struct Impl;
-    explicit PreparedOperation(std::unique_ptr<Impl>);
-    std::unique_ptr<Impl> impl_;
-    friend PreparedOperation prepare(gpu::Device &, const Operation &, std::span<const tensors::Layout>,
-                                     tensors::ComputationMode, RowPolicy);
+ private:
+  struct Impl;
+  explicit PreparedOperation(std::unique_ptr<Impl>);
+  std::unique_ptr<Impl> impl_;
+  friend PreparedOperation prepare(gpu::Device&, const Operation&,
+                                   std::span<const tensors::Layout>,
+                                   tensors::ComputationMode, RowPolicy);
 };
 
-[[nodiscard]] PreparedOperation prepare(gpu::Device &device, const Operation &operation,
-                                        std::span<const tensors::Layout> tensors,
-                                        tensors::ComputationMode mode, RowPolicy rows = {});
+[[nodiscard]] PreparedOperation prepare(
+    gpu::Device& device, const Operation& operation,
+    std::span<const tensors::Layout> tensors, tensors::ComputationMode mode,
+    RowPolicy rows = {});
 
-} // namespace dolittle::kernels
+}  // namespace dolittle::kernels

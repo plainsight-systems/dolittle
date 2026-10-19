@@ -32,11 +32,11 @@
  * apply_rotary_pos_emb:
  * https://github.com/huggingface/transformers/blob/v4.57.3/src/transformers/models/qwen3/modeling_qwen3.py.
  *
- * Contract: preparation validates shapes, byte/launch extents and device limits.
- * Inputs and the separate output buffer are borrowed until queue completion;
- * output must not overlap an input. Launches allocate no buffers and perform
- * no host readback or host wait. The caller checks immediate launch status;
- * asynchronous device errors surface at the explicit queue wait. See
+ * Contract: preparation validates shapes, byte/launch extents and device
+ * limits. Inputs and the separate output buffer are borrowed until queue
+ * completion; output must not overlap an input. Launches allocate no buffers
+ * and perform no host readback or host wait. The caller checks immediate launch
+ * status; asynchronous device errors surface at the explicit queue wait. See
  * kernels/operations.h for the public operation and failure contracts.
  *
  * Corpus consultation, comment design, 2026-10-18:
@@ -53,73 +53,88 @@
 
 namespace dolittle::kernels::cuda {
 namespace {
-template <class T> struct RotaryArguments {
-    const T *input;
-    T *output;
-    std::size_t pairs;
-    std::size_t heads;
-    std::size_t width;
-    std::size_t first_position;
-    double theta;
+template <class T>
+struct RotaryArguments {
+  const T* input;
+  T* output;
+  std::size_t pairs;
+  std::size_t heads;
+  std::size_t width;
+  std::size_t first_position;
+  double theta;
 };
 
 // Device-only indexing: preparation proves allocation extents; the loops
-// below guard tails and index shared/register arrays within their declared sizes.
-// NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-template <class T> __global__ void rotary(RotaryArguments<T> args) {
-    const auto [input, output, pairs, heads, width, first_position, theta] = args;
-    const auto half = width / 2;
-    const auto stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-    for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-         index < pairs;) {
-        const auto feature = index % half;
-        const auto row = index / half;
-        const auto position = first_position + row / heads;
-        const auto exponent = static_cast<float>(2 * feature) / static_cast<float>(width);
-        // Preserve finite double theta until the FP32 inverse-frequency boundary.
-        const auto inverse_frequency = static_cast<float>(1.0 / pow(theta, static_cast<double>(exponent)));
-        const auto angle = __fmul_rn(static_cast<float>(position), inverse_frequency);
-        const auto cosine = detail::storage_round<T>(cosf(angle));
-        const auto sine = detail::storage_round<T>(sinf(angle));
-        const auto first = detail::widen(input[row * width + feature]);
-        const auto second = detail::widen(input[row * width + feature + half]);
-        const auto first_cosine = detail::storage_round<T>(__fmul_rn(first, cosine));
-        const auto second_sine = detail::storage_round<T>(__fmul_rn(second, sine));
-        const auto second_cosine = detail::storage_round<T>(__fmul_rn(second, cosine));
-        const auto first_sine = detail::storage_round<T>(__fmul_rn(first, sine));
-        output[row * width + feature] = detail::narrow<T>(__fsub_rn(first_cosine, second_sine));
-        output[row * width + feature + half] = detail::narrow<T>(__fadd_rn(second_cosine, first_sine));
-        if (pairs - index <= stride) {
-            break;
-        }
-        index += stride;
+// below guard tails and index shared/register arrays within their declared
+// sizes. NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+template <class T>
+__global__ void rotary(RotaryArguments<T> args) {
+  const auto [input, output, pairs, heads, width, first_position, theta] = args;
+  const auto half = width / 2;
+  const auto stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
+  for (std::size_t index =
+           static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       index < pairs;) {
+    const auto feature = index % half;
+    const auto row = index / half;
+    const auto position = first_position + row / heads;
+    const auto exponent =
+        static_cast<float>(2 * feature) / static_cast<float>(width);
+    // Preserve finite double theta until the FP32 inverse-frequency boundary.
+    const auto inverse_frequency =
+        static_cast<float>(1.0 / pow(theta, static_cast<double>(exponent)));
+    const auto angle =
+        __fmul_rn(static_cast<float>(position), inverse_frequency);
+    const auto cosine = detail::storage_round<T>(cosf(angle));
+    const auto sine = detail::storage_round<T>(sinf(angle));
+    const auto first = detail::widen(input[row * width + feature]);
+    const auto second = detail::widen(input[row * width + feature + half]);
+    const auto first_cosine =
+        detail::storage_round<T>(__fmul_rn(first, cosine));
+    const auto second_sine = detail::storage_round<T>(__fmul_rn(second, sine));
+    const auto second_cosine =
+        detail::storage_round<T>(__fmul_rn(second, cosine));
+    const auto first_sine = detail::storage_round<T>(__fmul_rn(first, sine));
+    output[row * width + feature] =
+        detail::narrow<T>(__fsub_rn(first_cosine, second_sine));
+    output[row * width + feature + half] =
+        detail::narrow<T>(__fadd_rn(second_cosine, first_sine));
+    if (pairs - index <= stride) {
+      break;
     }
+    index += stride;
+  }
 }
 
 // NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
 
 template <class T>
-void submit(const void *input, void *output, std::size_t positions, std::size_t heads, std::size_t width,
-            std::size_t first_position, double theta, cudaStream_t stream) {
-    const auto pairs = positions * heads * (width / 2);
-    rotary<<<detail::grid_blocks(detail::ceil_div(pairs, detail::threads)), detail::threads, 0, stream>>>(
-        RotaryArguments<T>{.input = static_cast<const T *>(input),
-                           .output = static_cast<T *>(output),
-                           .pairs = pairs,
-                           .heads = heads,
-                           .width = width,
-                           .first_position = first_position,
-                           .theta = theta});
+void submit(const void* input, void* output, std::size_t positions,
+            std::size_t heads, std::size_t width, std::size_t first_position,
+            double theta, cudaStream_t stream) {
+  const auto pairs = positions * heads * (width / 2);
+  rotary<<<detail::grid_blocks(detail::ceil_div(pairs, detail::threads)),
+           detail::threads, 0, stream>>>(
+      RotaryArguments<T>{.input = static_cast<const T*>(input),
+                         .output = static_cast<T*>(output),
+                         .pairs = pairs,
+                         .heads = heads,
+                         .width = width,
+                         .first_position = first_position,
+                         .theta = theta});
 }
-} // namespace
+}  // namespace
 
-void launch_rotary(tensors::ElementType type, const void *input, void *output, std::size_t positions,
-                   std::size_t heads, std::size_t width, std::size_t first_position, double theta,
+void launch_rotary(tensors::ElementType type, const void* input, void* output,
+                   std::size_t positions, std::size_t heads, std::size_t width,
+                   std::size_t first_position, double theta,
                    cudaStream_t stream) {
-    if (detail::is_bfloat16(type)) {
-        submit<__nv_bfloat16>(input, output, positions, heads, width, first_position, theta, stream);
-    } else {
-        submit<float>(input, output, positions, heads, width, first_position, theta, stream);
-    }
+  if (detail::is_bfloat16(type)) {
+    submit<__nv_bfloat16>(input, output, positions, heads, width,
+                          first_position, theta, stream);
+  } else {
+    submit<float>(input, output, positions, heads, width, first_position, theta,
+                  stream);
+  }
 }
-} // namespace dolittle::kernels::cuda
+}  // namespace dolittle::kernels::cuda

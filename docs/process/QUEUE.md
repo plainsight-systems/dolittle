@@ -49,8 +49,16 @@
   bytes and final cached/full AV logits match exactly. Independent AV output
   comparisons pass the fixed per-row limits, without a bit-exactness claim.
   The integration inventory remains five; former generation workflows include AV.
-  Implementation is accepted for commit; publication remains pending. See the
+  Implementation is committed as `8c1fc19`; publication remains pending. See the
   [slice mapping](../architecture/file-mapping.md#target-to-av-interpretation-header-design).
+
+- Google formatting now has a repository config, pinned editor/CLI formatter,
+  C/C++/CUDA format-on-save, VS Code tasks and a PR/push CI check. The existing
+  sources have been formatted with the Google preset. Formatting checks, strict
+  host/CUDA builds, 18 host units and host/CUDA clang-tidy pass (39/61 commands).
+  A mechanical comparison confirms source changes are formatting and comment
+  layout only, including three relocated tokenizer lint annotations. Formatting
+  changes are accepted as a separate commit; publication remains pending.
 
 - The project site is deployed at `dolittle.plainsight-systems.com`. The first
   build and deployment passed; HTTP content, Code link, and share metadata are

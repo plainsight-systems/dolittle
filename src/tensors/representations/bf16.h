@@ -32,7 +32,9 @@
 #include <span>
 
 namespace dolittle::tensors {
-struct BFloat16 { std::uint16_t bits; };
+struct BFloat16 {
+  std::uint16_t bits;
+};
 [[nodiscard]] float to_float(BFloat16 value) noexcept;
 [[nodiscard]] BFloat16 from_float(float value) noexcept;
 [[nodiscard]] BFloat16 read_le(std::span<const std::byte, 2> bytes) noexcept;

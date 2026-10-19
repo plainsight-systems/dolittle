@@ -22,13 +22,13 @@
  *
  * Corpus consultation, implementation (full rules read), 2026-10-18:
  * cpp-guidelines R.1 (#rr-raii): archive owns files/mappings on failure too.
- * cpp-guidelines I.7 (#ri-post): verified identity and borrowed lifetime stated.
- * cpp-perf-guidelines CDSA.32: resolve stable named metadata once at load.
- * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
+ * cpp-guidelines I.7 (#ri-post): verified identity and borrowed lifetime
+ * stated. cpp-perf-guidelines CDSA.32: resolve stable named metadata once at
+ * load. Source:
+ * guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
  */
 #pragma once
 
-#include "tensors/tensor.h"
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -36,40 +36,44 @@
 #include <string_view>
 #include <vector>
 
+#include "tensors/tensor.h"
+
 namespace dolittle::tensors::formats {
 
 struct Artifact {
-    std::string relative_path;
-    std::uint64_t byte_size;
-    std::string sha256;
+  std::string relative_path;
+  std::uint64_t byte_size;
+  std::string sha256;
 };
 
 struct SourceIdentity {
-    std::string repository;
-    std::string revision;
-    std::string artifact_digest;
+  std::string repository;
+  std::string revision;
+  std::string artifact_digest;
 };
 
 struct NamedTensor {
-    std::string name;
-    Layout layout;
+  std::string name;
+  Layout layout;
 };
 
 class TensorArchive {
-  public:
-    TensorArchive(TensorArchive &&) = delete;
-    TensorArchive &operator=(TensorArchive &&) = delete;
-    virtual ~TensorArchive();
-    [[nodiscard]] virtual const SourceIdentity &identity() const noexcept = 0;
-    [[nodiscard]] virtual std::span<const NamedTensor> tensors() const noexcept = 0;
-    [[nodiscard]] virtual HostView tensor(std::string_view name) const = 0;
-    [[nodiscard]] virtual std::span<const std::byte> artifact(std::string_view relative_path) const = 0;
+ public:
+  TensorArchive(TensorArchive&&) = delete;
+  TensorArchive& operator=(TensorArchive&&) = delete;
+  virtual ~TensorArchive();
+  [[nodiscard]] virtual const SourceIdentity& identity() const noexcept = 0;
+  [[nodiscard]] virtual std::span<const NamedTensor> tensors()
+      const noexcept = 0;
+  [[nodiscard]] virtual HostView tensor(std::string_view name) const = 0;
+  [[nodiscard]] virtual std::span<const std::byte> artifact(
+      std::string_view relative_path) const = 0;
 
-    TensorArchive(const TensorArchive &) = delete;
-    TensorArchive &operator=(const TensorArchive &) = delete;
+  TensorArchive(const TensorArchive&) = delete;
+  TensorArchive& operator=(const TensorArchive&) = delete;
 
-  protected:
-    TensorArchive();
+ protected:
+  TensorArchive();
 };
 
-} // namespace dolittle::tensors::formats
+}  // namespace dolittle::tensors::formats

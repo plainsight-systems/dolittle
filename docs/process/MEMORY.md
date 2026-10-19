@@ -266,3 +266,12 @@ The workflow also checks retained captures and repeated fresh-cache variants.
 These short numerical fixtures do not establish semantic fidelity or long-context
 behavior. Reconstruction and the browser/API remain subsequent work. Verification
 status is recorded in the queue; detailed reports remain ignored.
+
+## Formatting
+
+Andrew selected Google's formatting preset and format-on-save. The repository
+uses `.clang-format` with `BasedOnStyle: Google`, clang-format 21.1.8, and the same
+resolver for VS Code and `scripts/check.py format`. C/C++/CUDA format on save via
+the existing Microsoft C/C++ extension. CI checks formatting on PRs and `main`
+pushes. Tool installation is explicit; no machine-specific path or automatic
+download on save. clang-tidy remains a separate static-analysis gate.

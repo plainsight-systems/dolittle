@@ -5,8 +5,8 @@
  * context/resource owner and report actual device/driver metadata. Invalid
  * ordinal -> invalid_argument; unavailable runtime/device -> runtime_error;
  * host allocation failure propagates. No fallback to a different GPU/backend.
- * The retained compute_86 PTX and sm_86 native code require capability 8.6 or later.
- * Returned owner outlives all buffers, queues and prepared kernel plans.
+ * The retained compute_86 PTX and sm_86 native code require capability 8.6 or
+ * later. Returned owner outlives all buffers, queues and prepared kernel plans.
  *
  * Algorithm: docs/architecture/transformer-execution.md, "Preparing the first
  * execution recipe": establish runtime ownership before capability selection
@@ -21,8 +21,9 @@
  * Source: guidelines/gpu/GPU.7-pipeline-cpu-and-gpu-work.md.
  */
 #pragma once
-#include "gpu/device.h"
 #include <memory>
+
+#include "gpu/device.h"
 
 namespace dolittle::gpu::cuda {
 [[nodiscard]] std::unique_ptr<Device> open_device(int ordinal);

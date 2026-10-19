@@ -23,32 +23,33 @@
  * measure transfer, synchronization and selection separately before optimizing.
  * Optimization: retain logits/selection scratch capacity across draws; keep all
  * transformer intermediates and KV storage on device.
- * Overlay: docs/architecture/file-mapping.md, "Sampling without a class hierarchy";
- * logical-overview.md, "2 Generate and capture".
- * Corpus consultation, header design and implementation, 2026-10-18:
- * cpp-guidelines I.1 (#ri-explicit), I.7 (#ri-post): explicit RNG ownership,
- * filtering settings and failure postconditions.
- * cpp-perf-guidelines GPU.1: name and budget the per-token host decision boundary.
- * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * Overlay: docs/architecture/file-mapping.md, "Sampling without a class
+ * hierarchy"; logical-overview.md, "2 Generate and capture". Corpus
+ * consultation, header design and implementation, 2026-10-18: cpp-guidelines
+ * I.1 (#ri-explicit), I.7 (#ri-post): explicit RNG ownership, filtering
+ * settings and failure postconditions. cpp-perf-guidelines GPU.1: name and
+ * budget the per-token host decision boundary. Source:
+ * guidelines/gpu/GPU.1-keep-data-on-device.md.
  */
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
-#include <random>
 #include <functional>
+#include <random>
 #include <span>
 
 namespace dolittle::inference::sampling {
 enum class SelectionMode : std::uint8_t { greedy, categorical };
 struct Settings {
-    SelectionMode mode;
-    double temperature;
-    std::size_t top_k; // Zero disables top-k filtering.
-    double top_p;
+  SelectionMode mode;
+  double temperature;
+  std::size_t top_k;  // Zero disables top-k filtering.
+  double top_p;
 };
 void validate_settings(Settings);
 using RandomStream = std::mt19937_64;
 // Bound once at composition. Invoked once per draw, never per vocabulary item.
-using TokenSelector = std::function<std::uint32_t(std::span<const float>, Settings, RandomStream &)>;
-} // namespace dolittle::inference::sampling
+using TokenSelector = std::function<std::uint32_t(std::span<const float>,
+                                                  Settings, RandomStream&)>;
+}  // namespace dolittle::inference::sampling

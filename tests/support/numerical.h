@@ -33,15 +33,16 @@
 
 namespace dolittle::tests {
 struct NumericalTolerance {
-    double max_absolute_error;
-    double max_relative_l2;
+  double max_absolute_error;
+  double max_relative_l2;
 };
 struct NumericalComparison {
-    bool all_values_finite{};
-    double maximum_absolute_error{};
-    std::optional<double> relative_l2;
-    bool passed{};
+  bool all_values_finite{};
+  double maximum_absolute_error{};
+  std::optional<double> relative_l2;
+  bool passed{};
 };
-[[nodiscard]] NumericalComparison compare_values(std::span<const float> reference,
-                                                 std::span<const float> actual, NumericalTolerance tolerance);
-} // namespace dolittle::tests
+[[nodiscard]] NumericalComparison compare_values(
+    std::span<const float> reference, std::span<const float> actual,
+    NumericalTolerance tolerance);
+}  // namespace dolittle::tests

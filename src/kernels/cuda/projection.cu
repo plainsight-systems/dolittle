@@ -50,129 +50,144 @@ inline constexpr unsigned half_tile = 8;
 inline constexpr std::size_t small_input_limit = 4096;
 inline constexpr std::size_t narrow_output_limit = 1024;
 
-template <class T> struct ProjectionArguments {
-    const T *input;
-    const T *weight;
-    T *output;
-    std::size_t rows;
-    std::size_t input_width;
-    std::size_t output_width;
-    std::size_t output_tiles;
-    std::size_t tasks;
+template <class T>
+struct ProjectionArguments {
+  const T* input;
+  const T* weight;
+  T* output;
+  std::size_t rows;
+  std::size_t input_width;
+  std::size_t output_width;
+  std::size_t output_tiles;
+  std::size_t tasks;
 };
 
 // Device-only indexing: preparation proves allocation extents; the loops
-// below guard tails and index shared/register arrays within their declared sizes.
-// NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic, cppcoreguidelines-avoid-c-arrays, cppcoreguidelines-pro-bounds-constant-array-index)
-template <class T, unsigned Partials> __global__ void projection(ProjectionArguments<T> args) {
-    const auto [input, weight, output, rows, input_width, output_width, output_tiles, tasks] = args;
-    __shared__ float x_tile[tile_width][tile_width];
-    __shared__ float w_tile[tile_width][padded_tile_width];
-    const auto x = threadIdx.x;
-    const auto y = threadIdx.y;
-    for (std::size_t task = blockIdx.x; task < tasks;) {
-        const auto row = (task / output_tiles) * tile_width + y;
-        const auto column = (task % output_tiles) * tile_width + x;
-        const auto weight_row = (task % output_tiles) * tile_width + y;
-        float partials[Partials]{};
-        const auto reduction_tiles = input_width / tile_width + (input_width % tile_width != 0);
-        for (std::size_t tile = 0; tile < reduction_tiles; ++tile) {
-            const auto reduction = tile * tile_width + x;
-            x_tile[y][x] = row < rows && reduction < input_width
-                               ? detail::widen(input[row * input_width + reduction])
-                               : 0.0F;
-            w_tile[x][y] = weight_row < output_width && reduction < input_width
-                               ? detail::widen(weight[weight_row * input_width + reduction])
-                               : 0.0F;
-            __syncthreads();
-            if constexpr (Partials == wide_partials) {
-                if (tile % 2 != 0) {
+// below guard tails and index shared/register arrays within their declared
+// sizes. NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic,
+// cppcoreguidelines-avoid-c-arrays,
+// cppcoreguidelines-pro-bounds-constant-array-index)
+template <class T, unsigned Partials>
+__global__ void projection(ProjectionArguments<T> args) {
+  const auto [input, weight, output, rows, input_width, output_width,
+              output_tiles, tasks] = args;
+  __shared__ float x_tile[tile_width][tile_width];
+  __shared__ float w_tile[tile_width][padded_tile_width];
+  const auto x = threadIdx.x;
+  const auto y = threadIdx.y;
+  for (std::size_t task = blockIdx.x; task < tasks;) {
+    const auto row = (task / output_tiles) * tile_width + y;
+    const auto column = (task % output_tiles) * tile_width + x;
+    const auto weight_row = (task % output_tiles) * tile_width + y;
+    float partials[Partials]{};
+    const auto reduction_tiles =
+        input_width / tile_width + (input_width % tile_width != 0);
+    for (std::size_t tile = 0; tile < reduction_tiles; ++tile) {
+      const auto reduction = tile * tile_width + x;
+      x_tile[y][x] = row < rows && reduction < input_width
+                         ? detail::widen(input[row * input_width + reduction])
+                         : 0.0F;
+      w_tile[x][y] =
+          weight_row < output_width && reduction < input_width
+              ? detail::widen(weight[weight_row * input_width + reduction])
+              : 0.0F;
+      __syncthreads();
+      if constexpr (Partials == wide_partials) {
+        if (tile % 2 != 0) {
 #pragma unroll
-                    for (unsigned k = 0; k < tile_width; ++k) {
-                        partials[k + tile_width] =
-                            __fmaf_rn(x_tile[y][k], w_tile[k][x], partials[k + tile_width]);
-                    }
-                } else {
+          for (unsigned k = 0; k < tile_width; ++k) {
+            partials[k + tile_width] =
+                __fmaf_rn(x_tile[y][k], w_tile[k][x], partials[k + tile_width]);
+          }
+        } else {
 #pragma unroll
-                    for (unsigned k = 0; k < tile_width; ++k) {
-                        partials[k] = __fmaf_rn(x_tile[y][k], w_tile[k][x], partials[k]);
-                    }
-                }
-            } else {
+          for (unsigned k = 0; k < tile_width; ++k) {
+            partials[k] = __fmaf_rn(x_tile[y][k], w_tile[k][x], partials[k]);
+          }
+        }
+      } else {
 #pragma unroll
-                for (unsigned k = 0; k < tile_width; ++k) {
-                    partials[k] = __fmaf_rn(x_tile[y][k], w_tile[k][x], partials[k]);
-                }
-            }
-            __syncthreads();
+        for (unsigned k = 0; k < tile_width; ++k) {
+          partials[k] = __fmaf_rn(x_tile[y][k], w_tile[k][x], partials[k]);
         }
-        if constexpr (Partials == wide_partials) {
-#pragma unroll
-            for (unsigned k = 0; k < tile_width; ++k) {
-                partials[k] = __fadd_rn(partials[k], partials[k + tile_width]);
-            }
-        }
-#pragma unroll
-        for (unsigned k = 0; k < half_tile; ++k) {
-            partials[k] = __fadd_rn(partials[k], partials[k + half_tile]);
-        }
-#pragma unroll
-        for (unsigned k = 0; k < 4; ++k) {
-            partials[k] = __fadd_rn(partials[k], partials[k + 4]);
-        }
-#pragma unroll
-        for (unsigned k = 0; k < 2; ++k) {
-            partials[k] = __fadd_rn(partials[k], partials[k + 2]);
-        }
-        partials[0] = __fadd_rn(partials[0], partials[1]);
-        if (row < rows && column < output_width) {
-            output[row * output_width + column] = detail::narrow<T>(partials[0]);
-        }
-        if (tasks - task <= gridDim.x) {
-            break;
-        }
-        task += gridDim.x;
+      }
+      __syncthreads();
     }
+    if constexpr (Partials == wide_partials) {
+#pragma unroll
+      for (unsigned k = 0; k < tile_width; ++k) {
+        partials[k] = __fadd_rn(partials[k], partials[k + tile_width]);
+      }
+    }
+#pragma unroll
+    for (unsigned k = 0; k < half_tile; ++k) {
+      partials[k] = __fadd_rn(partials[k], partials[k + half_tile]);
+    }
+#pragma unroll
+    for (unsigned k = 0; k < 4; ++k) {
+      partials[k] = __fadd_rn(partials[k], partials[k + 4]);
+    }
+#pragma unroll
+    for (unsigned k = 0; k < 2; ++k) {
+      partials[k] = __fadd_rn(partials[k], partials[k + 2]);
+    }
+    partials[0] = __fadd_rn(partials[0], partials[1]);
+    if (row < rows && column < output_width) {
+      output[row * output_width + column] = detail::narrow<T>(partials[0]);
+    }
+    if (tasks - task <= gridDim.x) {
+      break;
+    }
+    task += gridDim.x;
+  }
 }
 
-// NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic, cppcoreguidelines-avoid-c-arrays, cppcoreguidelines-pro-bounds-constant-array-index)
+// NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic,
+// cppcoreguidelines-avoid-c-arrays,
+// cppcoreguidelines-pro-bounds-constant-array-index)
 
 template <class T>
-void submit(const void *input, const void *weight, void *output, std::size_t rows, std::size_t input_width,
-            std::size_t output_width, cudaStream_t stream) {
-    const auto output_tiles = detail::ceil_div(output_width, tile_width);
-    const auto tasks = detail::ceil_div(rows, tile_width) * output_tiles;
-    if (input_width <= small_input_limit && output_width > narrow_output_limit) {
-        projection<T, tile_width><<<detail::grid_blocks(tasks), dim3(tile_width, tile_width), 0, stream>>>(
-            ProjectionArguments<T>{.input = static_cast<const T *>(input),
-                                   .weight = static_cast<const T *>(weight),
-                                   .output = static_cast<T *>(output),
-                                   .rows = rows,
-                                   .input_width = input_width,
-                                   .output_width = output_width,
-                                   .output_tiles = output_tiles,
-                                   .tasks = tasks});
-    } else {
-        projection<T, wide_partials><<<detail::grid_blocks(tasks), dim3(tile_width, tile_width), 0, stream>>>(
-            ProjectionArguments<T>{.input = static_cast<const T *>(input),
-                                   .weight = static_cast<const T *>(weight),
-                                   .output = static_cast<T *>(output),
-                                   .rows = rows,
-                                   .input_width = input_width,
-                                   .output_width = output_width,
-                                   .output_tiles = output_tiles,
-                                   .tasks = tasks});
-    }
+void submit(const void* input, const void* weight, void* output,
+            std::size_t rows, std::size_t input_width, std::size_t output_width,
+            cudaStream_t stream) {
+  const auto output_tiles = detail::ceil_div(output_width, tile_width);
+  const auto tasks = detail::ceil_div(rows, tile_width) * output_tiles;
+  if (input_width <= small_input_limit && output_width > narrow_output_limit) {
+    projection<T, tile_width><<<detail::grid_blocks(tasks),
+                                dim3(tile_width, tile_width), 0, stream>>>(
+        ProjectionArguments<T>{.input = static_cast<const T*>(input),
+                               .weight = static_cast<const T*>(weight),
+                               .output = static_cast<T*>(output),
+                               .rows = rows,
+                               .input_width = input_width,
+                               .output_width = output_width,
+                               .output_tiles = output_tiles,
+                               .tasks = tasks});
+  } else {
+    projection<T, wide_partials><<<detail::grid_blocks(tasks),
+                                   dim3(tile_width, tile_width), 0, stream>>>(
+        ProjectionArguments<T>{.input = static_cast<const T*>(input),
+                               .weight = static_cast<const T*>(weight),
+                               .output = static_cast<T*>(output),
+                               .rows = rows,
+                               .input_width = input_width,
+                               .output_width = output_width,
+                               .output_tiles = output_tiles,
+                               .tasks = tasks});
+  }
 }
-} // namespace
+}  // namespace
 
-void launch_projection(tensors::ElementType type, const void *input, const void *weight, void *output,
-                       std::size_t rows, std::size_t input_width, std::size_t output_width,
+void launch_projection(tensors::ElementType type, const void* input,
+                       const void* weight, void* output, std::size_t rows,
+                       std::size_t input_width, std::size_t output_width,
                        cudaStream_t stream) {
-    if (detail::is_bfloat16(type)) {
-        submit<__nv_bfloat16>(input, weight, output, rows, input_width, output_width, stream);
-    } else {
-        submit<float>(input, weight, output, rows, input_width, output_width, stream);
-    }
+  if (detail::is_bfloat16(type)) {
+    submit<__nv_bfloat16>(input, weight, output, rows, input_width,
+                          output_width, stream);
+  } else {
+    submit<float>(input, weight, output, rows, input_width, output_width,
+                  stream);
+  }
 }
-} // namespace dolittle::kernels::cuda
+}  // namespace dolittle::kernels::cuda

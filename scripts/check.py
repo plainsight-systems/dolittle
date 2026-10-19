@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import subprocess
 import tidy
+import formatting
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = "dolittle-build:cuda13.2"
@@ -41,6 +42,7 @@ def container_command(args, gpu=False, fixtures=None, force_ptx=False, image=IMA
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
+    formatting.add_arguments(sub.add_parser("format", help="check Google C/C++/CUDA formatting; --fix applies it"))
     tidy.add_arguments(sub.add_parser("tidy", help="run pinned clang-tidy static analysis; findings are errors"))
     host = sub.add_parser("host", help="build and run isolated C++ units")
     host.add_argument("--build-dir", type=Path, default=ROOT / "build/host")
@@ -56,6 +58,11 @@ def main():
     archive = sub.add_parser("archive", help="run real checkpoint file integrity integration")
     archive.add_argument("--build-dir", type=Path, default=ROOT / "build/host")
     args = parser.parse_args()
+    if args.action == "format":
+        try:
+            raise SystemExit(formatting.run(args))
+        except (OSError, ValueError, subprocess.CalledProcessError) as error:
+            parser.exit(2, f"format: {error}\n")
     if args.action == "tidy":
         try:
             if args.container:

@@ -34,6 +34,41 @@ working Docker GPU access. Container execution requires the NVIDIA Container Too
 requires compatible host CUDA libraries. See [verification commands](../tests/README.md)
 for the reference policy and scenario coverage. Keep reports in ignored storage.
 
+## Formatting
+
+C, C++ and CUDA use the unmodified Google preset in the root `.clang-format`,
+matching Serenity. clang-format **21.1.8** is pinned across editor saves, local
+checks and CI; this version is independent of Linux's clang-tidy requirement.
+Install the small development-only tool environment from the repository root:
+
+```sh
+python3 -m venv .venv-tools
+.venv-tools/bin/python -m pip install -r scripts/requirements-tools.txt
+python3 scripts/check.py format        # Read-only; fails on formatting drift.
+python3 scripts/check.py format --fix  # Apply Google formatting to project sources.
+```
+
+The checker includes C/C++/CUDA sources and headers under `src/` and `tests/`,
+including new untracked files. Build output and dependencies are excluded.
+The **C++ formatting** GitHub workflow runs the read-only check on PRs and pushes
+to `main`. It does not require a compiler, GPU, model weights or a CMake database.
+
+Open Dolittle itself as a VS Code workspace folder and install the recommended
+Microsoft C/C++ extension. Workspace settings select that extension as formatter
+and enable whole-file format-on-save for C, C++ and CUDA (`.cu` and `.cuh`).
+Reload the window if it was already open. Editor saves call `scripts/clang-format`,
+which resolves the same pinned binary as the checker. It preserves the extension's
+stdin and arguments, including the file path needed to find `.clang-format`.
+
+Discovery checks `CLANG_FORMAT` when explicitly set; otherwise it checks the
+local tool environment, PATH and Homebrew's `llvm@21`. A missing or mismatched
+formatter produces an installation message; it never installs tools on save or
+silently switches to the extension's bundled version. No machine-specific paths
+are committed. The existing CMake include/completion setup is unchanged.
+
+VS Code tasks **Dolittle: check formatting** and **Dolittle: format sources**
+run the same commands. clang-tidy remains the separate static-analysis gate below.
+
 ## Static analysis
 
 The [clang-tidy policy](../.clang-tidy) follows Serenity: Google, C++ Core

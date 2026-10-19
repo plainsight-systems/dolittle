@@ -3,8 +3,8 @@
  * borrowed tensor/observation spans. This is not a device indexing abstraction.
  * Contract: at(span, i) returns the original element by reference when i<size;
  * otherwise it throws out_of_range before touching memory. It never allocates,
- * copies elements, extends their lifetime, or changes their const qualification.
- * Container overloads delegate to the container's checked at().
+ * copies elements, extends their lifetime, or changes their const
+ * qualification. Container overloads delegate to the container's checked at().
  * Algorithm: compare index with span extent, then address that one element.
  * Cost: O(1), with an inline check the compiler can eliminate in bounded loops.
  * Corpus consultation, header design and implementation, 2026-10-19:
@@ -18,15 +18,17 @@
 #include <span>
 #include <stdexcept>
 namespace dolittle {
-template <class T, std::size_t Extent> constexpr T &at(std::span<T, Extent> values, std::size_t index) {
-    if (index >= values.size()) {
-        throw std::out_of_range("span index exceeds extent");
-    }
-    // The preceding check proves this sole unchecked access is in range.
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
-    return values[index];
+template <class T, std::size_t Extent>
+constexpr T& at(std::span<T, Extent> values, std::size_t index) {
+  if (index >= values.size()) {
+    throw std::out_of_range("span index exceeds extent");
+  }
+  // The preceding check proves this sole unchecked access is in range.
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
+  return values[index];
 }
-template <class Container> constexpr decltype(auto) at(Container &values, std::size_t index) {
-    return values.at(index);
+template <class Container>
+constexpr decltype(auto) at(Container& values, std::size_t index) {
+  return values.at(index);
 }
-} // namespace dolittle
+}  // namespace dolittle

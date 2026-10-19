@@ -26,9 +26,9 @@
  * At execution, token IDs and bound weights supply the recipe's values.
  *
  * Let D be the residual width, d the head width, Hq and Hkv the query and
- * KV head counts, and F the MLP width. A projection P(X,W) means X * transpose(W);
- * weights are stored [output_features,input_features]. RMSNorm normalizes
- * the final feature dimension and applies its learned scale.
+ * KV head counts, and F the MLP width. A projection P(X,W) means X *
+ * transpose(W); weights are stored [output_features,input_features]. RMSNorm
+ * normalizes the final feature dimension and applies its learned scale.
  * 1. Look up each token's embedding to obtain residual X[N,D].
  * 2. For every transformer block, record X as its block_input observation
  *    and construct these operations in dependency order:
@@ -54,34 +54,37 @@
  * "One Qwen3 transformer block" and "First forward pass".
  *
  * Cost: O(L) operations/parameter slots for L transformer blocks, plus
- * selected-row metadata. Dense FLOPs follow the overlay; no expanded KV heads or required N*N score tensor.
- * Optimization: one post-attention normalization reused by both MLP branches;
- * only requested rows reach vocabulary projection. Physical reuse belongs to
- * executor planning, not to changing model equations or observation values.
+ * selected-row metadata. Dense FLOPs follow the overlay; no expanded KV heads
+ * or required N*N score tensor. Optimization: one post-attention normalization
+ * reused by both MLP branches; only requested rows reach vocabulary projection.
+ * Physical reuse belongs to executor planning, not to changing model equations
+ * or observation values.
  *
  * Corpus consultation, implementation, 2026-10-18:
- * cpp-guidelines I.4 (#ri-typed): model dimensions are separate from tensor IDs.
- * cpp-guidelines I.7 (#ri-post): ordered equations and capture semantics explicit.
- * cpp-guidelines ES.103 (#res-overflow): check dimension and metadata extents.
- * cpp-perf-guidelines CDSA.32: generate the immutable recipe once per workload.
- * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
+ * cpp-guidelines I.4 (#ri-typed): model dimensions are separate from tensor
+ * IDs. cpp-guidelines I.7 (#ri-post): ordered equations and capture semantics
+ * explicit. cpp-guidelines ES.103 (#res-overflow): check dimension and metadata
+ * extents. cpp-perf-guidelines CDSA.32: generate the immutable recipe once per
+ * workload. Source:
+ * guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
  *
  * Incremental Qwen3 recipe: use the same block equations for
  * B new rows beginning at absolute position S. Q and K RoPE use S+i rather
  * than restarting at zero. In each block, expose rotated K and unrotated V as
- * append sources; causal attention uses the persistent prefix plus current rows.
- * Only queries/residuals for the new B rows are computed. The selected final
- * new row produces next-token logits; captures label absolute positions S+i.
- * The cache description comes from block_count, kv_heads and head_width. No
- * assumption about block 24, fixed Hkv or a contiguous device pointer belongs
- * in the mathematical recipe. Backend preparation selects a supported view.
- * The zero-prefix case is ordinary causal prefill; chunked prefill and decode
- * must agree with full_forward on identical consumed tokens within fixed
+ * append sources; causal attention uses the persistent prefix plus current
+ * rows. Only queries/residuals for the new B rows are computed. The selected
+ * final new row produces next-token logits; captures label absolute positions
+ * S+i. The cache description comes from block_count, kv_heads and head_width.
+ * No assumption about block 24, fixed Hkv or a contiguous device pointer
+ * belongs in the mathematical recipe. Backend preparation selects a supported
+ * view. The zero-prefix case is ordinary causal prefill; chunked prefill and
+ * decode must agree with full_forward on identical consumed tokens within fixed
  * numerical bounds, including BF16 intermediate rounding.
  * Corpus consultation, header design and implementation, 2026-10-18:
- * cpp-guidelines I.7 (#ri-post): absolute position and unchanged block equations.
- * cpp-perf-guidelines CDSA.32: prepare chunk/decode recipe shapes once.
- * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
+ * cpp-guidelines I.7 (#ri-post): absolute position and unchanged block
+ * equations. cpp-perf-guidelines CDSA.32: prepare chunk/decode recipe shapes
+ * once. Source:
+ * guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
  *
  * AV embedding capability (implemented, 2026-10-19): both full and
  * incremental recipes name the output and producer index of step 1 as
@@ -92,31 +95,32 @@
  * The descriptor costs O(1). Optimization: ordinary lookup produces all rows;
  * the executor overwrites one row without a second model implementation.
  * Overlay: transformer-execution.md, "NLA entry and exit paths".
- * Corpus consultation, header design and implementation (full rules read), 2026-10-19:
- * cpp-guidelines I.7 (#ri-post): named boundary is before every block-0 consumer.
- * cpp-perf-guidelines GPU.1: embeddings remain device-resident;
- * source guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * Corpus consultation, header design and implementation (full rules read),
+ * 2026-10-19: cpp-guidelines I.7 (#ri-post): named boundary is before every
+ * block-0 consumer. cpp-perf-guidelines GPU.1: embeddings remain
+ * device-resident; source guidelines/gpu/GPU.1-keep-data-on-device.md.
  */
 #pragma once
 
-#include "models/model.h"
 #include <cstddef>
 #include <memory>
+
+#include "models/model.h"
 
 namespace dolittle::models::qwen3 {
 
 struct Config {
-    std::size_t block_count;
-    std::size_t residual_width;
-    std::size_t query_heads;
-    std::size_t kv_heads;
-    std::size_t head_width;
-    std::size_t mlp_width;
-    std::size_t vocabulary_size;
-    SequenceLength context_limit;
-    float rms_epsilon;
-    double rope_theta;
-    tensors::ElementType weight_type;
+  std::size_t block_count;
+  std::size_t residual_width;
+  std::size_t query_heads;
+  std::size_t kv_heads;
+  std::size_t head_width;
+  std::size_t mlp_width;
+  std::size_t vocabulary_size;
+  SequenceLength context_limit;
+  float rms_epsilon;
+  double rope_theta;
+  tensors::ElementType weight_type;
 };
 
 [[nodiscard]] std::unique_ptr<Model> make_model(const Config& config);

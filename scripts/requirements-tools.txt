@@ -1,0 +1,2 @@
+# Same formatter for editor saves, local checks and CI; no inference dependency.
+clang-format==21.1.8

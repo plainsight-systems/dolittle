@@ -18,62 +18,67 @@
  * declared payload-region size. It validates duplicate names/keys, dtypes,
  * shapes and a complete, non-overlapping payload partition (empty tensors
  * occupy no bytes). Offsets are relative to that payload region. Input, decoded
- * node/string accounting and output sizes are bounded before their growth; results own names/layouts and retain no span. It opens
- * nothing and verifies no file/hash. open performs framing/integrity checks
- * before calling this same parser. Unit tests use small in-memory headers.
+ * node/string accounting and output sizes are bounded before their growth;
+ * results own names/layouts and retain no span. It opens nothing and verifies
+ * no file/hash. open performs framing/integrity checks before calling this same
+ * parser. Unit tests use small in-memory headers.
  *
  * Algorithm: docs/architecture/transformer-execution.md, "Checkpoint loading
  * and binding": verify declared files, parse bounded headers/index, validate
  * named extents, and expose immutable source bytes to model binding.
- * Cost: O(artifact bytes) hashing plus O(tensor count) metadata; max_header_bytes
- * is per file. max_metadata_bytes bounds aggregate source/node/string/catalog
- * accounting (not exact allocator RSS); JSON nesting is capped at 64, and
- * max_tensor_count bounds catalog growth. Optimization: map weight payloads
- * without eagerly converting/copying them; pin only bounded transfer staging.
- * Range/catalog ordering takes O(T log T) setup work for T tensors.
- * Artifact digest v1 hashes "dolittle-artifacts-v1", then sorted paths encoded
- * as u64-LE byte length, UTF-8 path bytes, u64-LE size and 64 lowercase hex bytes.
+ * Cost: O(artifact bytes) hashing plus O(tensor count) metadata;
+ * max_header_bytes is per file. max_metadata_bytes bounds aggregate
+ * source/node/string/catalog accounting (not exact allocator RSS); JSON nesting
+ * is capped at 64, and max_tensor_count bounds catalog growth. Optimization:
+ * map weight payloads without eagerly converting/copying them; pin only bounded
+ * transfer staging. Range/catalog ordering takes O(T log T) setup work for T
+ * tensors. Artifact digest v1 hashes "dolittle-artifacts-v1", then sorted paths
+ * encoded as u64-LE byte length, UTF-8 path bytes, u64-LE size and 64 lowercase
+ * hex bytes.
  *
  * Corpus consultation, implementation (full rules read), 2026-10-18:
  * cpp-guidelines R.1 (#rr-raii): partial mappings are reclaimed on exceptions.
  * cpp-guidelines I.7 (#ri-post): only fully checked archives escape loading.
  * cpp-perf-guidelines GPU.1: mapped input and bounded upload staging avoid
- * repeated host/device round trips. Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * repeated host/device round trips. Source:
+ * guidelines/gpu/GPU.1-keep-data-on-device.md.
  */
 #pragma once
 
-#include "tensors/formats/format.h"
 #include <filesystem>
 #include <memory>
 #include <optional>
 
+#include "tensors/formats/format.h"
+
 namespace dolittle::tensors::formats::safetensors {
 
 struct HeaderLimits {
-    std::size_t max_header_bytes;
-    std::size_t max_metadata_bytes;
-    std::size_t max_tensor_count;
+  std::size_t max_header_bytes;
+  std::size_t max_metadata_bytes;
+  std::size_t max_tensor_count;
 };
 struct TensorRange {
-    NamedTensor tensor;
-    std::uint64_t data_offset{};
-    std::uint64_t byte_count{};
+  NamedTensor tensor;
+  std::uint64_t data_offset{};
+  std::uint64_t byte_count{};
 };
-[[nodiscard]] std::vector<TensorRange> parse_header(std::span<const std::byte> header_json,
-                                                    std::uint64_t data_bytes, HeaderLimits limits);
+[[nodiscard]] std::vector<TensorRange> parse_header(
+    std::span<const std::byte> header_json, std::uint64_t data_bytes,
+    HeaderLimits limits);
 
 struct OpenRequest {
-    std::filesystem::path root;
-    std::string repository;
-    std::string revision;
-    std::vector<Artifact> artifacts;
-    std::vector<std::string> shards;
-    std::optional<std::string> index;
-    std::size_t max_header_bytes;
-    std::size_t max_metadata_bytes;
-    std::size_t max_tensor_count;
+  std::filesystem::path root;
+  std::string repository;
+  std::string revision;
+  std::vector<Artifact> artifacts;
+  std::vector<std::string> shards;
+  std::optional<std::string> index;
+  std::size_t max_header_bytes;
+  std::size_t max_metadata_bytes;
+  std::size_t max_tensor_count;
 };
 
-[[nodiscard]] std::unique_ptr<TensorArchive> open(const OpenRequest &request);
+[[nodiscard]] std::unique_ptr<TensorArchive> open(const OpenRequest& request);
 
-} // namespace dolittle::tensors::formats::safetensors
+}  // namespace dolittle::tensors::formats::safetensors

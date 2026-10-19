@@ -32,42 +32,44 @@
  * Invalid specification -> invalid_argument; overflow/budget -> length_error;
  * allocation/device failure propagates. Device/queue outlive concrete storage.
  * Overlay: docs/architecture/transformer-execution.md, "Prefill and decoding"
- * and "Storage lifetimes"; file-mapping.md, "Cache strategies and compatible attention".
- * Corpus consultation, header design and implementation, 2026-10-18:
- * cpp-guidelines I.7 (#ri-post), R.1 (#rr-raii): completion precedes shared-prefix
- * commit; resource lifetime and failure invalidation are explicit.
- * cpp-perf-guidelines GPU.9: separate long-lived cache capacity from scratch.
- * Source: guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
+ * and "Storage lifetimes"; file-mapping.md, "Cache strategies and compatible
+ * attention". Corpus consultation, header design and implementation,
+ * 2026-10-18: cpp-guidelines I.7 (#ri-post), R.1 (#rr-raii): completion
+ * precedes shared-prefix commit; resource lifetime and failure invalidation are
+ * explicit. cpp-perf-guidelines GPU.9: separate long-lived cache capacity from
+ * scratch. Source:
+ * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
  */
 #pragma once
 
-#include "tensors/representations/representation.h"
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
 
+#include "tensors/representations/representation.h"
+
 namespace dolittle::inference::cache {
 struct SequenceId {
-    std::uint64_t value;
+  std::uint64_t value;
 };
 struct LayerShape {
-    std::size_t kv_heads;
-    std::size_t head_width;
+  std::size_t kv_heads;
+  std::size_t head_width;
 };
 struct Specification {
-    std::string checkpoint_identity;
-    SequenceId sequence;
-    tensors::ComputationMode mode;
-    std::size_t capacity;
-    std::vector<LayerShape> layers;
+  std::string checkpoint_identity;
+  SequenceId sequence;
+  tensors::ComputationMode mode;
+  std::size_t capacity;
+  std::vector<LayerShape> layers;
 };
 struct Footprint {
-    std::size_t payload_bytes;
-    std::size_t allocation_bytes;
+  std::size_t payload_bytes;
+  std::size_t allocation_bytes;
 };
 struct Prefix {
-    std::size_t committed_positions;
-    bool usable;
+  std::size_t committed_positions;
+  bool usable;
 };
-} // namespace dolittle::inference::cache
+}  // namespace dolittle::inference::cache

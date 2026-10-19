@@ -4,8 +4,9 @@
  * Inputs: verified tokenizer_config.json and generation_config.json bytes,
  * source identity and a byte budget. Output: an owned immutable Protocol.
  * Validate the supported template branch, added-token IDs and stop settings
- * against the pinned tokenizer. Never execute arbitrary Jinja from a checkpoint.
- * Reject unsupported template/config changes instead of guessing equivalence.
+ * against the pinned tokenizer. Never execute arbitrary Jinja from a
+ * checkpoint. Reject unsupported template/config changes instead of guessing
+ * equivalence.
  *
  * Algorithm for prompt formatting:
  * 1. If system text is present, append exactly
@@ -35,29 +36,30 @@
  * bytes and prevent size overflow before concatenation.
  * Static-analysis design/implementation, 2026-10-19: named source records
  * distinguish metadata roles without copying bytes. Core I.1 (#ri-explicit);
- * performance CDSA.32 (source cited below): parse borrowed bytes once into owned
- * lookup tables; no view is retained.
- * Reference: Qwen/Qwen3-8B at b968826d9c46dd6066d109eabc6255188de91218;
- * artifact hashes are in scripts/validation/models-8b.json.
- * Overlay: docs/architecture/logical-overview.md, "1 Establish the run".
- * Corpus consultation, header design and implementation, 2026-10-18:
- * cpp-guidelines I.1 (#ri-explicit), I.7 (#ri-post): exact template bytes and
- * control-token transitions, independent of model arithmetic.
- * cpp-perf-guidelines CDSA.32: resolve fixed template/control data once.
- * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
+ * performance CDSA.32 (source cited below): parse borrowed bytes once into
+ * owned lookup tables; no view is retained. Reference: Qwen/Qwen3-8B at
+ * b968826d9c46dd6066d109eabc6255188de91218; artifact hashes are in
+ * scripts/validation/models-8b.json. Overlay:
+ * docs/architecture/logical-overview.md, "1 Establish the run". Corpus
+ * consultation, header design and implementation, 2026-10-18: cpp-guidelines
+ * I.1 (#ri-explicit), I.7 (#ri-post): exact template bytes and control-token
+ * transitions, independent of model arithmetic. cpp-perf-guidelines CDSA.32:
+ * resolve fixed template/control data once. Source:
+ * guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
  */
 #pragma once
 
-#include "text/protocol.h"
 #include <memory>
+
+#include "text/protocol.h"
 
 namespace dolittle::text {
 // Named borrowed inputs are valid only for the duration of the factory call.
 struct Qwen3ChatSources {
-    std::string_view tokenizer_config_json;
-    std::string_view generation_config_json;
-    std::string_view verified_source_identity;
+  std::string_view tokenizer_config_json;
+  std::string_view generation_config_json;
+  std::string_view verified_source_identity;
 };
-[[nodiscard]] std::unique_ptr<Protocol> make_qwen3_chat(Qwen3ChatSources sources,
-                                                        std::size_t max_formatted_bytes);
-} // namespace dolittle::text
+[[nodiscard]] std::unique_ptr<Protocol> make_qwen3_chat(
+    Qwen3ChatSources sources, std::size_t max_formatted_bytes);
+}  // namespace dolittle::text

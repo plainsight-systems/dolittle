@@ -23,11 +23,12 @@
  * the executor in addition to these logical extents.
  *
  * Corpus consultation, implementation, 2026-10-18:
- * cpp-guidelines I.1 (#ri-explicit): lifetimes, alignments and budget are inputs.
- * cpp-guidelines I.7 (#ri-post): non-overlap and containment are postconditions.
- * cpp-guidelines ES.103 (#res-overflow): check offset and extent arithmetic.
- * cpp-perf-guidelines GPU.9: reuse bytes only after every last reader.
- * Source: guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
+ * cpp-guidelines I.1 (#ri-explicit): lifetimes, alignments and budget are
+ * inputs. cpp-guidelines I.7 (#ri-post): non-overlap and containment are
+ * postconditions. cpp-guidelines ES.103 (#res-overflow): check offset and
+ * extent arithmetic. cpp-perf-guidelines GPU.9: reuse bytes only after every
+ * last reader. Source:
+ * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
  * cpp-perf-guidelines MEM.11: prepare offsets once from explicit lifetimes.
  * Source: guidelines/memory/MEM.11-plan-arena-offsets-from-lifetimes.md.
  * The accepted zero-byte identity contract takes precedence over that rule's
@@ -40,23 +41,25 @@
 #include <vector>
 
 namespace dolittle::inference {
-struct ResourceId { std::size_t value; };
+struct ResourceId {
+  std::size_t value;
+};
 struct ResourceLifetime {
-    ResourceId id;
-    std::size_t bytes;
-    std::size_t alignment;
-    std::size_t first_step;
-    std::size_t last_step;
+  ResourceId id;
+  std::size_t bytes;
+  std::size_t alignment;
+  std::size_t first_step;
+  std::size_t last_step;
 };
 struct ResourcePlacement {
-    ResourceId id;
-    std::size_t offset;
-    std::size_t bytes;
+  ResourceId id;
+  std::size_t offset;
+  std::size_t bytes;
 };
 struct StoragePlan {
-    std::vector<ResourcePlacement> placements;
-    std::size_t arena_bytes;
-    std::size_t arena_alignment;
+  std::vector<ResourcePlacement> placements;
+  std::size_t arena_bytes;
+  std::size_t arena_alignment;
 };
 [[nodiscard]] StoragePlan plan_storage(
     std::span<const ResourceLifetime> resources, std::size_t budget_bytes);

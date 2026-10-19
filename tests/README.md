@@ -36,6 +36,11 @@ cmake --build --preset host-debug --parallel
 ctest --preset host-units
 ```
 
+C/C++/CUDA use Google formatting with whole-file format-on-save through the
+recommended C/C++ extension. Install the pinned formatter using the
+[formatting setup](../scripts/README.md#formatting); `python3 scripts/check.py format`
+and the formatting CI workflow enforce the same version and configuration.
+
 CMake exports `compile_commands.json` into each build directory. The VS Code
 C/C++ extension uses CMake Tools as its configuration provider, so compiler,
 language standard, defines and includes come from the selected targets. This

@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""VS Code adapter: forward clang-format arguments and stdin to the pinned tool."""
+import os
+import sys
+
+from formatting import find_tool
+
+try:
+    binary = find_tool()
+    os.execv(binary, [binary, *sys.argv[1:]])
+except (OSError, ValueError) as error:
+    print(f"clang-format: {error}", file=sys.stderr)
+    sys.exit(2)
