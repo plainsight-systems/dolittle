@@ -82,6 +82,20 @@
  * cpp-guidelines I.7 (#ri-post): absolute position and unchanged block equations.
  * cpp-perf-guidelines CDSA.32: prepare chunk/decode recipe shapes once.
  * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
+ *
+ * Planned AV embedding capability (header design, 2026-10-19): both full and
+ * incremental recipes will name the output and producer index of step 1 as
+ * their EmbeddingBoundary. This is X before block 0; executor replacement must
+ * precede block_input observations and input RMSNorm. All later equations,
+ * absolute RoPE positions, cache bindings and output projection stay identical.
+ * No AV role, injection scale or selected target block enters this model kind.
+ * The descriptor costs O(1). Optimization: ordinary lookup produces all rows;
+ * the executor overwrites one row without a second model implementation.
+ * Overlay: transformer-execution.md, "NLA entry and exit paths".
+ * Corpus consultation, header design (full rules read), 2026-10-19:
+ * cpp-guidelines I.7 (#ri-post): named boundary is before every block-0 consumer.
+ * cpp-perf-guidelines GPU.1: embeddings remain device-resident;
+ * source guidelines/gpu/GPU.1-keep-data-on-device.md.
  */
 #pragma once
 

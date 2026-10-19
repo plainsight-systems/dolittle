@@ -515,6 +515,69 @@ Verification requirements and commands are in `tests/README.md`; current
 verification state is in the work queue. NLA execution and the browser
 application remain subsequent complete slices.
 
+### Target-to-AV interpretation header design
+
+This next complete slice covers target generation through retained, selectable
+AV interpretations. The declarations and opening contracts are designed for
+review; they do not implement NLA execution yet.
+
+| Owner | Responsibility in this slice |
+|---|---|
+| `nla/protocol.h` | Pair compatibility, one-row conversion, prepared AV prompt and explanation range contract |
+| `nla/pairs/qwen3_8b.h` | Pinned sources, block-24 selection, trained actor prompt, marker checks and FP32 normalization followed by BF16 conversion |
+| `models/model.h`, `models/qwen3/model.h` | Explicit embedding output/producer boundary before block 0, for full and incremental recipes |
+| `models/qwen3/checkpoint.h` | Role-neutral full causal-LM binding, sharing the existing strict target schema; AR remains excluded |
+| `inference/executor.h` | Resident weight owner, fresh per-sequence KV/scratch, ordered single-row embedding replacement |
+| `inference/generation.h` | Reuse the existing generation loop; require injection inside the prompt and preserve final-token consumption |
+| `experiment/record.h` | Owned target IDs/raw captures, absolute capture keys and immutable interpretation variants |
+| `experiment/run.h` | Admission, target release before AV loading, cancellation/failure outcomes and sequential requests |
+| `measurement.h` | Phase durations and allocation estimates, explicitly distinct from measured peaks |
+
+These remain the accepted axes and folders. Resident weights belong to execution
+planning, rather than a new model-family or cache-strategy directory. Embedding
+replacement uses the existing ordered queue upload capability; no NLA-specific
+CUDA kernel or duplicate transformer is needed. The selected AV uses the same
+verified Qwen3 config and chat template, so its pair composes the existing
+tokenizer/text implementations with its own actor prompt and source identity.
+The generic interfaces remain capable of other pairs and observation sites.
+
+Each interpretation starts a new contiguous KV cache while the AV weights stay
+resident. Cache pooling remains deferred. Target tokens and raw captures live in
+the record across both phases; interpretation never regenerates the target.
+Reconstruction, server and browser work remain subsequent slices. No placeholder
+AR/backend/application files are added for this header pass.
+
+Implementation acceptance will replace the tiny and pinned-8B generation
+integration scenarios with their corresponding **target → retained capture → AV**
+workflows, rather than adding a sixth scenario. They retain their existing target
+acceptance gates as the first phase of that same experiment. Archive, device and
+site scenarios remain; the total stays five. Pure units cover pair rejection,
+normalization, delimiter extraction, record alignment/append invariants and
+record count/byte limits without filesystem, subprocess or GPU work. Phase
+switching and cache isolation belong to the complete integration workflows.
+
+Before implementation, establish and freeze a separate AV reference fixture
+generator and its precision, source hashes, input vectors and numerical limits.
+Reuse the established independent operator policy without editing the existing
+oracle, target fixtures or limits. The AV reference adds only the independently
+specified input transformation: FP32 norm, divide, scale, BF16 cast, replacement
+of the embedding lookup row, then ordinary causal inference. Reference fixture
+generation must not import engine code or use engine outputs as expected values.
+For each comparison, both implementations receive identical raw capture bytes;
+also check the complete engine target-to-AV path with the frozen target capture
+acceptance gate. Do not compare two AV outputs fed different vectors and attribute
+their difference solely to AV arithmetic.
+
+Compare exact formatted IDs/marker alignment, normalized FP32 inputs, BF16
+replacement bytes, block-0 input, selected downstream activations/logits and
+greedy output IDs. Exercise full and chunked prefill with the injection in a
+later chunk, then decode without reinjection. A second interpretation in the
+same workflow checks fresh-cache isolation and retained capture ownership across
+weight switching. Native/PTX execution and memory checking remain required.
+Sampled prose agreement with target thinking is not a correctness gate. Freeze
+the AV baseline before debugging and locate the engine's first divergence;
+never change reference arithmetic or precision to match the engine.
+
 ### Subsequent work
 
 The layout now exposes variation beyond the initial model selection. It does

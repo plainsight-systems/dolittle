@@ -124,6 +124,57 @@
  * Source: guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
  * cpp-perf-guidelines GPU.1: batch captures at the required sampling boundary.
  * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
+ *
+ * Planned resident-model and embedding-input extension (header design only):
+ * ResidentModel owns one verified host checkpoint, one immutable uploaded weight
+ * arena and its ordered queue. It borrows Device. A sequence prepared from it
+ * borrows the stable ResidentModel and owns its own KV/scratch/staging. At most
+ * one sequence plan may be alive per resident owner. Destroy that plan before
+ * its resident owner, and the owner before Device; Run enforces this order.
+ * finish seals a sequence; destruction releases its storage and lease. Fresh
+ * sequences reuse weights only, never prefix validity or sequence IDs. Resident
+ * loading owns the checkpoint even on failure. The existing preparation overload
+ * will keep borrowing its host checkpoint and own private resident weight state;
+ * that migration and the new overloads are not implemented in this header pass.
+ *
+ * EmbeddingOverride owns exactly D contiguous elements in activation storage,
+ * a width and an absolute input position. Preparation validates bytes, finiteness,
+ * dtype and a declared recipe embedding boundary. It admits row staging and
+ * extends the destination tensor's lifetime through replacement and all readers.
+ * For each consume with prefix S and B rows:
+ * 1. Look up every exact token ID, preserving the marker ID in token history.
+ * 2. After the declared producer, if S <= p < S+B, upload the replacement to
+ *    row p-S of [B,D] on the same queue, before any observation/block-0 read.
+ *    The owned source remains alive until queue completion. Other rows keep
+ *    their original embedding bytes. Do not download or re-upload [B,D].
+ * 3. Execute ordinary blocks/cache writes/logits. Commit the injection together
+ *    with successful chunk completion. Failed submission poisons the sequence;
+ *    device failure also poisons its resident owner. Never retry a partial chunk.
+ * 4. Later chunks/decode never reapply the row. finish rejects an unconsumed
+ *    requested replacement; failure cleanup may destroy such a plan safely.
+ * Generation preflight must additionally require p < prompt length, so an
+ * arbitrary future generated token cannot be replaced accidentally. Full-forward
+ * execute's new overload validates p < sequence length and follows the same
+ * lookup/replacement order, allowing independent injected-input comparisons.
+ * Existing overloads retain their behavior; undefined new overloads cannot be
+ * called successfully until implementation. No existing API silently ignores
+ * an injection request.
+ *
+ * Admission: max_device_bytes counts resident weights plus sequence arenas,
+ * not just the incremental allocation. Resident load accounts for bounded upload
+ * staging; per-sequence host limits include the owned injection plus copy staging.
+ * Cost: one D*b upload per injected sequence; no extra per-block wait. Persistent
+ * AV weights avoid O(weight bytes) upload on every variant. Fresh KV allocation
+ * stays the accepted simple baseline; no cross-request pooling is introduced.
+ * Optimization: split persistent weight lifetime from per-sequence storage.
+ * Overlay: logical-overview.md, "3 Retain the experiment and change phases";
+ * transformer-execution.md, "NLA entry and exit paths" and "Storage lifetimes".
+ * Corpus consultation, header design (full rules read), 2026-10-19:
+ * cpp-guidelines R.1 (#rr-raii), I.7 (#ri-post): explicit owner/lease/completion.
+ * cpp-perf-guidelines GPU.1: one row transfer, no embedding round trip;
+ * source guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * cpp-perf-guidelines GPU.9: persistent weights and transient sequences separated;
+ * source guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
  */
 #pragma once
 
@@ -149,6 +200,13 @@ namespace dolittle::inference {
 
 struct ExecutionId {
     std::uint64_t value;
+};
+// Planned API: owned replacement applied after lookup, before block 0.
+struct EmbeddingOverride {
+    models::TokenPosition position;
+    std::size_t width;
+    tensors::ElementType storage_type;
+    std::vector<std::byte> bytes;
 };
 
 struct ForwardOptions {
@@ -202,6 +260,8 @@ class FullForwardPlan {
     [[nodiscard]] std::size_t estimated_peak_device_bytes() const noexcept;
     [[nodiscard]] std::size_t host_output_bytes() const noexcept;
     [[nodiscard]] ForwardResult execute(std::span<const std::uint32_t> token_ids, ExecutionId execution_id);
+    [[nodiscard]] ForwardResult execute(std::span<const std::uint32_t> token_ids, ExecutionId execution_id,
+                                        const EmbeddingOverride &);
 
   private:
     struct Impl;
@@ -240,6 +300,7 @@ struct ConsumedChunk {
     std::optional<OwnedLogitRow> next_logits;
     std::vector<OwnedCapture> captures;
 };
+class ResidentModel;
 class CachedForwardPlan {
   public:
     ~CachedForwardPlan();
@@ -255,6 +316,7 @@ class CachedForwardPlan {
     [[nodiscard]] std::span<const models::ObservationSite> capture_sites() const noexcept;
     [[nodiscard]] std::size_t capacity() const noexcept;
     [[nodiscard]] std::size_t max_prefill_chunk() const noexcept;
+    [[nodiscard]] std::optional<models::TokenPosition> embedding_override_position() const noexcept;
     [[nodiscard]] std::size_t estimated_peak_device_bytes() const noexcept;
     [[nodiscard]] ConsumedChunk consume(std::span<const std::uint32_t> token_ids, bool need_next_logits);
     void finish();
@@ -265,8 +327,41 @@ class CachedForwardPlan {
     std::unique_ptr<Impl> impl_;
     friend CachedForwardPlan prepare_cached_forward(gpu::Device &, const models::BoundCheckpoint &,
                                                     const CachedForwardOptions &);
+    friend CachedForwardPlan prepare_cached_forward(ResidentModel &, const CachedForwardOptions &,
+                                                    std::optional<EmbeddingOverride>);
 };
 [[nodiscard]] CachedForwardPlan prepare_cached_forward(gpu::Device &, const models::BoundCheckpoint &,
                                                        const CachedForwardOptions &);
+
+struct ResidentOptions {
+    tensors::ComputationMode numerical_mode;
+    std::size_t max_device_bytes;
+    std::size_t max_host_staging_bytes;
+};
+// Stable owner: moving it would invalidate sequence leases.
+class ResidentModel {
+  public:
+    ~ResidentModel();
+    ResidentModel(const ResidentModel &) = delete;
+    ResidentModel &operator=(const ResidentModel &) = delete;
+    ResidentModel(ResidentModel &&) = delete;
+    ResidentModel &operator=(ResidentModel &&) = delete;
+    [[nodiscard]] std::string_view checkpoint_identity() const noexcept;
+    [[nodiscard]] std::size_t resident_device_bytes() const noexcept;
+    [[nodiscard]] bool usable() const noexcept;
+
+  private:
+    struct Impl;
+    explicit ResidentModel(std::unique_ptr<Impl>);
+    std::unique_ptr<Impl> impl_;
+    friend std::unique_ptr<ResidentModel> load_resident_model(
+        gpu::Device &, std::unique_ptr<models::BoundCheckpoint>, const ResidentOptions &);
+    friend CachedForwardPlan prepare_cached_forward(ResidentModel &, const CachedForwardOptions &,
+                                                    std::optional<EmbeddingOverride>);
+};
+[[nodiscard]] std::unique_ptr<ResidentModel> load_resident_model(
+    gpu::Device &, std::unique_ptr<models::BoundCheckpoint>, const ResidentOptions &);
+[[nodiscard]] CachedForwardPlan prepare_cached_forward(
+    ResidentModel &, const CachedForwardOptions &, std::optional<EmbeddingOverride> = std::nullopt);
 
 } // namespace dolittle::inference

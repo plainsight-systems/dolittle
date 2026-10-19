@@ -235,3 +235,18 @@ remain fixed. Diagnostics and detailed validation evidence stay ignored.
 
 See [QUEUE.md](QUEUE.md), [architecture](../architecture/README.md) and
 [build and verification commands](../../tests/README.md).
+
+## Target-to-AV header design
+
+The next complete slice is target generation through selectable AV interpretations.
+Andrew approved its header design and authorized committing it and proceeding
+with implementation. The design
+separates persistent model weights from each sequence's cache so AV variants reuse
+weights while receiving fresh contiguous KV. Target GPU resources are released
+before AV loading; owned raw captures and exact tokens survive in the record.
+The model recipe declares its embedding boundary explicitly, and the executor
+replaces one row in the prompt chunk containing its absolute position. Pair-specific
+block selection, trained prompt, scale and output tags remain in the NLA pair.
+Both local C++ corpora were consulted for this phase. The selected AV's config and
+chat-template hashes match the target's; existing Qwen3 implementations can be
+reused with the AV's own provenance. Reconstruction and browser work remain later.

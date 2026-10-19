@@ -46,6 +46,23 @@
  * cpp-guidelines I.7 (#ri-post): every required parameter is validated.
  * cpp-perf-guidelines CDSA.32: bind once in the model consumer's slot order.
  * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
+ *
+ * Planned full-AV binding (header design, 2026-10-19): the selected AV's config
+ * is byte-identical to the target config and uses the same complete parameter
+ * schema. Add bind_causal_lm as the role-neutral entry point; bind_target remains
+ * a compatibility entry with the same validation and binding identity. Do not
+ * change existing target identity/fixtures merely to rename this entry point.
+ * The caller selects only the full AV's shards, not ar/ shards. Both paths
+ * validate every tensor as above. NLA source/prompt compatibility is separately
+ * enforced by Pair before upload. AR/value-head binding is still unsupported.
+ * Algorithm and costs remain the verified Qwen3 binder's steps above; do not
+ * duplicate the loader or permit unknown tensors for the AV. Optimization:
+ * both roles share one schema/binding implementation and immutable payload views.
+ * Corpus consultation, header design (full rules read), 2026-10-19:
+ * cpp-guidelines R.1 (#rr-raii), I.7 (#ri-post): consumed archive owns all views;
+ * successful binding is complete regardless of the caller's model role.
+ * cpp-perf-guidelines GPU.1: retain mapped views for bounded weight upload;
+ * source guidelines/gpu/GPU.1-keep-data-on-device.md.
  */
 #pragma once
 
@@ -56,6 +73,9 @@
 #include <string_view>
 
 namespace dolittle::models::qwen3 {
+[[nodiscard]] std::unique_ptr<BoundCheckpoint>
+bind_causal_lm(std::unique_ptr<tensors::formats::TensorArchive> archive,
+              std::string_view configuration_artifact);
 struct ParameterBinding {
     ParameterId parameter;
     std::string tensor_name;

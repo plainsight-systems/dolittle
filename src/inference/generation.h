@@ -62,6 +62,25 @@
  * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
  * cpp-perf-guidelines GPU.9: admit/reserve persistent, transient and output arenas.
  * Source: guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
+ *
+ * Planned AV reuse (header design, 2026-10-19): this same loop consumes the
+ * Pair's PreparedPrompt and a resident-AV sequence plan. PreparedPrompt.thinking
+ * records the AV template setting, not the target trace's classification. The
+ * Pair validates its own tokenizer/protocol identities; no target text is copied
+ * into the AV prompt. Before the first consume, inspect the plan's optional
+ * embedding_override_position and require it < prompt.ids.size(). The executor
+ * handles the replacement in whichever prompt chunk contains it; decode must
+ * never apply a replacement. Preserve exact AV prompt/generated IDs, settings,
+ * seed, consumed count and stop/failure as for target generation. The experiment
+ * attaches the role and original capture identity, then extracts output tags.
+ * No second generation algorithm, new sampling law or early tag-based stop.
+ * Optimization: reuse progression and bounded decode work; only one injected
+ * row adds a transfer, with no per-token change after prefill.
+ * Overlay: logical-overview.md, "4 Interpret selected positions".
+ * Corpus consultation, header design (full rules read), 2026-10-19:
+ * cpp-guidelines I.7 (#ri-post): replacement is restricted to the prompt.
+ * cpp-perf-guidelines GPU.1: no repeated injection transfer during decode;
+ * source guidelines/gpu/GPU.1-keep-data-on-device.md.
  */
 #pragma once
 

@@ -43,7 +43,10 @@ planning accepts any model-advertised block input/output. The separate full AV,
 28-block AR and AR value head remain later implementation work. Sequential BF16
 execution fits the 24 GB 3090 Ti in the historical reference workload.
 
-The completed source scope is one full causal target pass with current-pass K/V.
-Persistent cache, tokenizer/text protocols, generation, NLA interpretation and
-reconstruction, serving and the browser application remain subsequent slices.
-Keep their accepted architecture visible without generating empty source stubs.
+The implemented scope includes full target forward execution and cached target
+generation, with tokenizer/text protocols, sampling and completed raw captures.
+The next complete target-to-AV slice has
+[header designs for review](file-mapping.md#target-to-av-interpretation-header-design):
+pairing and injection, resident weights with fresh sequence caches, retained
+records and phase scheduling. Those new declarations are not an implemented NLA
+path. Reconstruction, serving and the browser application remain subsequent work.

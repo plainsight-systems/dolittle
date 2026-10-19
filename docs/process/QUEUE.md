@@ -35,8 +35,21 @@
   Strict host/CUDA builds, 16 host units, ASan/UBSan, archive/site checks and
   native/PTX tiny/8B generation pass. The frozen oracle and limits remain fixed;
   8B numerical comparisons retain zero error and tiny CUDA memcheck is clean.
-  Analysis is clean on macOS and Linux/CUDA. Andrew approved the cleanup commit.
+  Analysis is clean on macOS and Linux/CUDA. Accepted and pushed as `b2be166`.
   Diagnostic inventories and detailed reports remain in ignored storage.
+
+- Andrew approved the complete target-to-AV interpretation header design: pairing,
+  explicit embedding replacement, resident weights/fresh sequence caches,
+  retained records, scheduling and measurement contracts. Both C++ corpora were
+  queried and applicable full rules read for this design phase. The pinned AV
+  metadata/config/template hashes were checked. New APIs are declarations only;
+  individual header syntax checks, the strict host build, all 16 existing host
+  units and host clang-tidy (including isolated new-header checks) pass.
+  Implementation and AV numerical acceptance remain pending. See the
+  [slice mapping](../architecture/file-mapping.md#target-to-av-interpretation-header-design).
+  Preserve the frozen target oracle; establish a separate frozen AV baseline
+  before implementing. Replace the two generation integration scenarios with
+  complete target-to-AV workflows so the repository remains at five.
 
 - The project site is deployed at `dolittle.plainsight-systems.com`. The first
   build and deployment passed; HTTP content, Code link, and share metadata are
