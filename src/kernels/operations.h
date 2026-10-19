@@ -35,6 +35,15 @@
  * multiplication; Rotary rounds trigonometric values and each product before
  * addition; SiluMultiply rounds SiLU before multiplying up. Projection and
  * attention accumulate in FP32 and round final outputs. No implicit TF32.
+ * Fixed FP32 arithmetic (transformer-execution.md): projection uses 16 or 32
+ * strided FMA partials selected by feature widths; RMSNorm uses four-component
+ * warp sums; attention dots use eight contiguous feature ranges. Attention rounds normalized
+ * probabilities to FP32 before FMA accumulation of values. These orders depend
+ * on feature widths and visible keys, never batch size or cache chunking.
+ * Corpus consultation, numerical contract design, 2026-10-19:
+ * cpp-guidelines I.7 (#ri-post): expose arithmetic guarantees to consumers.
+ * cpp-perf-guidelines GDSA.2: state fixed reductions and invariance explicitly.
+ * Source: guidelines/gpu-dsa/GDSA.2-declare-each-reductions-determinism.md.
  *
  * submit binds exactly the operation's distinct referenced tensor IDs, once
  * each. A write operand needs mutable storage. Extents/alignment and device
@@ -72,6 +81,39 @@
  * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
  * cpp-perf-guidelines GPU.9: caller admits/reuses declared workspace.
  * Source: guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
+ *
+ * Incremental operation contract: cached attention reads
+ * Q[B,Hq,d], persistent K/V with declared capacity C, committed length S and
+ * new rows [S,S+B). Its result is Y[B,Hq,d]. Query row i uses key j <= S+i
+ * and KV head floor(h/(Hq/Hkv)); the score/softmax/rounding equations remain
+ * those of CausalAttention. Cache append precedes attention for each block.
+ *
+ * Operation preparation validates Bmax, mode and tensor extents. The cached
+ * plan admits C and owns contiguous storage. Submission validates S/B and the
+ * cache view's capacity, shape, byte extents and device ownership; the executor
+ * guarantees that rows [0,S+B) have been written in queue order. Uninitialized
+ * capacity must never be treated as valid sequence data.
+ * Rotary likewise receives S as a checked runtime position base. Projection,
+ * normalization, embedding and elementwise launches receive active row counts
+ * within the prepared shape; inactive rows are neither read nor written.
+ * RowPolicy declares the prepared row bound and last-active-row gather.
+ * ExecutionExtent supplies S/B for each call; a ContiguousLayerView supplies
+ * read-only K/V bindings for dynamic attention. Static full-forward descriptors
+ * remain immutable and retain the same extent/alias validation.
+ * Cache destinations are disjoint append subregions; old-prefix regions remain
+ * read-only. Append sources must survive the ordered copy; attention reads only
+ * after that copy. No CPU callback per element or implicit host cache copy.
+ * Cost: attention O(B*(S+B)*Hq*d), append O(B*Hkv*d) per block. Workspace is
+ * bounded by prepared shapes; no sequence-growing score matrix is required.
+ * Overlay: transformer-execution.md, "Attention and positional semantics" and
+ * "Prefill and decoding".
+ * Corpus consultation, header design and implementation, 2026-10-18:
+ * cpp-guidelines I.1 (#ri-explicit), I.7 (#ri-post): cache effects, runtime extents
+ * and causal visibility are explicit contracts, distinct from buffer capacity.
+ * cpp-perf-guidelines GPU.9: reuse admitted scratch without overwriting live K/V.
+ * Source: guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
+ * cpp-perf-guidelines GPU.1: all append/attention intermediates stay on device.
+ * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
  */
 #pragma once
 
@@ -82,6 +124,10 @@
 #include <string_view>
 #include <variant>
 #include <vector>
+
+namespace dolittle::inference::cache {
+struct ContiguousLayerView;
+}
 
 namespace dolittle::gpu {
 class Device;
@@ -127,6 +173,15 @@ struct BufferBinding {
     std::size_t bytes;
 };
 
+// Active rows are bounded by max_rows; last_row selects the final active row.
+struct RowPolicy {
+    std::size_t max_rows = 0;
+    bool last_row = false;
+};
+struct ExecutionExtent {
+    std::size_t first_position;
+    std::size_t active_rows;
+};
 class PreparedOperation {
 public:
     ~PreparedOperation();
@@ -137,19 +192,20 @@ public:
     [[nodiscard]] WorkspaceRequirement workspace() const noexcept;
     [[nodiscard]] std::span<const OperandRequirement> operands() const noexcept;
     [[nodiscard]] std::string_view implementation_name() const noexcept;
-    void submit(gpu::Queue& queue, std::span<const BufferBinding> bindings,
-                gpu::DeviceRegion workspace) const;
-private:
+    void submit(gpu::Queue &queue, std::span<const BufferBinding> bindings, gpu::DeviceRegion workspace,
+                const ExecutionExtent *extent = nullptr,
+                const inference::cache::ContiguousLayerView *cache = nullptr) const;
+
+  private:
     struct Impl;
     explicit PreparedOperation(std::unique_ptr<Impl>);
     std::unique_ptr<Impl> impl_;
-    friend PreparedOperation prepare(
-        gpu::Device&, const Operation&, std::span<const tensors::Layout>,
-        tensors::ComputationMode);
+    friend PreparedOperation prepare(gpu::Device &, const Operation &, std::span<const tensors::Layout>,
+                                     tensors::ComputationMode, RowPolicy);
 };
 
-[[nodiscard]] PreparedOperation prepare(
-    gpu::Device& device, const Operation& operation,
-    std::span<const tensors::Layout> tensors, tensors::ComputationMode mode);
+[[nodiscard]] PreparedOperation prepare(gpu::Device &device, const Operation &operation,
+                                        std::span<const tensors::Layout> tensors,
+                                        tensors::ComputationMode mode, RowPolicy rows = {});
 
 }  // namespace dolittle::kernels

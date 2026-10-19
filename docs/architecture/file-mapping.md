@@ -63,7 +63,8 @@ dolittle/
 │   │   ├── protocol.h               # Message formatting and segmentation contract
 │   │   └── qwen3_chat.{h,cpp}        # Initial chat/thinking protocol
 │   ├── inference/
-│   │   ├── generation.{h,cpp}       # One sequence's progression and termination
+│   │   ├── generation.{h,cpp}       # One sequence's generation and termination
+│   │   ├── progression.cpp          # Pure next-action rule; linked without CUDA
 │   │   ├── executor.{h,cpp}         # Forward execution and resource planning
 │   │   ├── observations.{h,cpp}     # Resolve requests, sizes and immutable capture views
 │   │   ├── storage_plan.{h,cpp}     # Pure scratch lifetime/alignment placement
@@ -110,6 +111,10 @@ dolittle/
 │   └── view.js                      # Presentation
 ├── tests/
 │   ├── core/                        # Isolated in-memory contract tests
+│   │   ├── test_sampling.cpp
+│   │   ├── test_progression.cpp
+│   │   ├── test_byte_bpe.cpp
+│   │   ├── test_qwen3_chat.cpp
 │   │   ├── test_tensor.cpp
 │   │   ├── test_bf16.cpp
 │   │   ├── test_observations.cpp
@@ -125,11 +130,12 @@ dolittle/
 │   │   └── test_checkpoint_archive.cpp # Real file integrity and binding workflow
 │   ├── gpu/                         # Numerical checks through production paths
 │   │   ├── forward_reference.{h,cpp} # Completed-result comparison contract
-│   │   ├── test_forward.cpp          # Tiny and pinned 8B numerical scenarios
+│   │   ├── test_generation.cpp       # Tiny and pinned 8B generation scenarios
 │   │   └── test_device.cpp           # CUDA resources/transfers/completion scenario
 │   ├── app/
 │   ├── fixtures/
 │   ├── support/
+│   │   ├── text_fixture.h           # In-memory tokenizer/protocol contract data
 │   │   ├── check.h                  # Minimal in-process assertion helpers
 │   │   └── numerical.{h,cpp}        # Pure array error metrics; launches nothing
 │   └── test_site.py                 # Existing
@@ -211,6 +217,21 @@ The initial proposal is preallocated contiguous BF16 storage sized to the
 admitted run, with attention reading only the valid prefix. Physical allocation
 uses the device backend. The strategy is not tied to Qwen3: dimensions and
 attention requirements come from the model, and the plan checks compatibility.
+
+This is a deliberately basic baseline, not an optimized cache lifecycle across
+turns or a claim of an optimal storage strategy. One run means one prompt and
+its response through stopping and final-token capture completion. Allocate
+once for that turn, reuse the allocation throughout prefill/decode, and release
+it after pending GPU work completes. A follow-up turn starts with a fresh
+allocation and prefix; no allocation pooling or prefix reuse is implemented.
+
+Known tradeoffs are allocation/release overhead per turn and unused capacity
+when generation stops before the admitted limit. Evaluate representative runs
+before changing this policy: measure allocation/release time, peak and unused
+capacity, prefill/decode latency and memory pressure when switching to the NLA.
+Allocation reuse, pooling or another storage kind are candidates if the measured
+cost warrants them. Keeping physical storage would not itself authorize reusing
+its logical contents for different tokens or weights.
 
 Alternative allocation strategies, host/device placement and numerical
 representation are distinct choices. Offloading is not another model family;
@@ -310,10 +331,10 @@ concern. Safetensors and Qwen3 parsers accept in-memory inputs so unit tests do
 not have to launch a loader. Numerical array comparison is likewise separate
 from the integration harness that obtains completed model outputs.
 
-First-slice header design now covers loading through complete forward-result
-comparison. Tokenizers/text protocols, generation/sampling, persistent cache,
-AV/AR conventions, experiment scheduling, serving and application behavior
-remain subsequent slices. Do not generate those files ahead of their design.
+The forward-pass boundary covers loading through complete forward-result
+comparison. Target generation extends it as described below. AV/AR conventions,
+experiment scheduling, serving and application behavior remain subsequent slices.
+Do not generate those files ahead of their design.
 
 The first forward-pass source scope is now implemented: tensor/BF16 handling,
 observation and scratch planning, operation/recipe validation, Qwen3 recipes and
@@ -321,11 +342,9 @@ checkpoint binding, verified safetensors loading, CUDA resources and kernels,
 execution, and completed-result comparison. See the
 [verification commands](../../tests/README.md) for scenario coverage.
 
-The current inventory contains 40 C++/CUDA source files under `src/` (19 `.h`,
-14 `.cpp`, six `.cu` and one `.cuh`) and 19 C++ support/test files under `tests/`
-(three `.h` and 16 `.cpp`). Every implementation file in that scope has working
-bodies; later tokenizer/cache/NLA/application destinations have no generated
-stubs. The concrete additions stay within their existing axes:
+The forward and target-generation source families have implementation bodies;
+NLA and application destinations remain planned, with no generated stubs.
+The concrete additions stay within their existing axes:
 
 - `tensors/formats/json_metadata.h` shares bounded metadata parsing between
   the format reader and model binder; it introduces no model dependency into
@@ -438,6 +457,63 @@ represent their semantics. Conversely, the first implementation must not leak
 its private assumptions into every consumer.
 
 ## Implementation sequence
+
+### Target generation
+
+The target-generation implementation takes a formatted text prompt through
+cached target generation and returns exact token IDs and captures for every
+consumed position. Its contracts are in:
+
+| Responsibility | Contract entry point |
+| --- | --- |
+| Token encoding and byte provenance | `src/tokenizers/tokenizer.h`, `byte_bpe.h` |
+| Single-turn prompt and thinking segmentation | `src/text/protocol.h`, `qwen3_chat.h` |
+| Selection law and independent random stream | `src/inference/sampling/sampler.h`, `categorical.h` |
+| Logical cache ownership and initial storage kind | `src/inference/cache/cache.h`, `contiguous.h` |
+| Incremental execution and completed chunk ownership | `src/inference/executor.h`, `observations.h` |
+| Sequence progression and final-token consumption | `src/inference/generation.h` |
+
+Incremental recipe, operation and CUDA attention extensions are described in
+the existing model/kernel file openings. The no-cache implementation remains
+the comparison baseline. The executor must receive explicit cache producers
+from the model; it must not infer them from tensor names or operation order.
+
+The baseline uses preallocated contiguous cache capacity and host
+sampling. Prefill is chunked; decode consumes one new token. Rotated K and
+unrotated V are appended once per block. Absolute positions continue across
+chunks, and attention reads only the valid causal prefix. One shared prefix
+length commits after the entire call succeeds.
+
+Captures join each chunk's logit readback at its existing completion boundary.
+Completed host chunks survive a later device failure. This costs capture bytes
+per step but adds no per-block host wait. A final emitted token is consumed
+even when no further token will be sampled. Stop IDs remain in provenance.
+
+For the selected BF16 model, KV capacity costs 144 KiB per position; one
+captured site costs 8 KiB per retained host position. At 4096 positions these
+are 576 MiB and 32 MiB respectively. Weights, bounded chunk scratch, aligned
+arenas, transfer staging, per-call copies and metadata are additional costs.
+Each host sampling draw requires a 303872-byte BF16 vocabulary row and queue
+completion. These are derived costs, not measured generation performance.
+
+The tokenizer design uses the existing pinned tokenizer artifacts, including
+NFC normalization, exact Unicode splitting, ranked byte merges and added-token
+matching. NFC uses source-pinned utf8proc 2.10.0 and the declared regex uses Oniguruma
+6.9.10. The generation scenario checks exact IDs against tokenizers 0.22.2;
+these helpers supply Unicode primitives, not tokenization or inference.
+The protocol initially supports an optional system message and one user prompt,
+with thinking enabled or disabled. History, tools and multimodal inputs are
+outside this slice. Sampling uses explicit greedy or temperature/top-k/top-p
+selection; its tie and RNG semantics are independent of reference-library RNGs.
+
+`progression.cpp` implements the pure next-action rule separately from the GPU
+loop so contract tests can link it without CUDA. This is an implementation split
+within the same generation responsibility, not another architectural axis.
+Verification requirements and commands are in `tests/README.md`; current
+verification state is in the work queue. NLA execution and the browser
+application remain subsequent complete slices.
+
+### Subsequent work
 
 The layout now exposes variation beyond the initial model selection. It does
 not expand the first release to multiple models, tokenizers, cache strategies

@@ -1,7 +1,7 @@
 /*
  * Prepared full forward execution; numerical verification is recorded separately.
  * Axis: X1, execution planning. This first interface is a complete causal
- * forward pass; persistent KV caching and autoregressive sampling are later.
+ * forward pass plus single-turn cached prefill/decode. Sampling is separate.
  *
  * Contract: preparation borrows a verified BoundCheckpoint and Device, which
  * must both outlive the plan. Checkpoint data remains immutable; callers must
@@ -73,10 +73,63 @@
  * Source: guidelines/copy-move/COPY.5-resource-owning-types-are-move-only.md.
  * cpp-perf-guidelines GPU.9: scratch reuse includes observation last uses.
  * Source: guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
+ *
+ * Incremental execution: cached target execution.
+ * Input: a bound model, numerical mode, capacity C, maximum prompt chunk Bmax,
+ * selected observation sites and device/host byte budgets. Output: a serial,
+ * single-sequence plan owning weights, cache, scratch, staging and token history.
+ * The caller establishes the tokenizer/protocol pairing with this checkpoint;
+ * the executor validates token IDs and mathematical capabilities, not chat text.
+ *
+ * Cached algorithm:
+ * 1. Prepare the model's incremental recipe and all resource requirements for
+ *    up to Bmax new positions and a cache prefix up to C. The same schedule
+ *    accepts B=1 for decode. Reuse one weight arena across both.
+ * 2. For each consume(ids), let S be committed positions and B be ids.size().
+ *    Require 0 < B <= Bmax, S+B <= C and valid IDs before submitting anything.
+ *    Use absolute RoPE positions S+i; existing cached keys are already rotated.
+ * 3. Execute every block for these B positions. Copy its new K/V into that
+ *    block's cache at [S,S+B); attention reads keys through S+i for query i.
+ *    Copy requested residual rows before scratch is reused. A capture's absolute
+ *    position is S+i even though its temporary row index is i.
+ * 4. If requested, project only the final new row to vocabulary logits. Batch
+ *    this row and the chunk's captures into the same readback/completion point.
+ * 5. After completion, return owned chunk bytes and commit S+B atomically across
+ *    blocks. Generation appends them to its retained host result. Earlier chunks
+ *    then survive a later poisoned-device failure without another GPU readback.
+ * 6. On failure, drain work and invalidate this plan/cache. Do not return the
+ *    failed chunk or advance S. finish seals the plan; no restart or resume.
+ * Malformed calls rejected before submission leave the plan usable. Failure
+ * after submission makes it unusable. Result bytes/views outlive the plan.
+ *
+ * Implementation design: prepare bounded shapes once, pass current S/B as
+ * checked launch parameters, and keep scratch layouts at admitted capacity.
+ * Do not build a model recipe, upload weights or allocate device memory per
+ * emitted token. FullForwardPlan remains the independent no-cache path.
+ * Cost: cache is sum(2*C*Hkv*d*element_bytes), scratch scales with Bmax,
+ * device capture staging with Bmax*sum(site_width*element_bytes). Host retained
+ * captures scale with C; host staging and per-call result bytes are separate
+ * peak costs. Host admission counts payload buffers, positions and sampling
+ * scratch; excludes archive mappings, tokenizer tables, allocator overhead and
+ * schedule/owner metadata. This is not a bound on process resident memory. Each sampling step has one readback wait. Capture bytes join that
+ * existing boundary instead of adding a host wait for each block.
+ * Optimization: resident weights/cache, reused chunk/decode schedules, batched
+ * capture/logit transfers. Include prompt tails and zero-logit finalization in
+ * preparation; padding to Bmax must never become a valid attention position.
+ * Overlay: transformer-execution.md, "Prefill and decoding" and "Storage lifetimes".
+ * Corpus consultation, header design and implementation, 2026-10-18:
+ * cpp-guidelines I.7 (#ri-post), R.1 (#rr-raii): transactional prefix commit and
+ * owned host results preserve completed chunks after a later device failure.
+ * cpp-perf-guidelines GPU.9: admit persistent/cache/scratch arenas separately.
+ * Source: guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
+ * cpp-perf-guidelines GPU.1: batch captures at the required sampling boundary.
+ * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
  */
 #pragma once
 
 #include "inference/observations.h"
+#include "inference/cache/cache.h"
+#include <optional>
 
 #include <cstddef>
 #include <cstdint>
@@ -162,5 +215,57 @@ private:
     const models::BoundCheckpoint& checkpoint,
     models::SequenceLength sequence_length,
     const ForwardOptions& options);
+
+// Single-turn incremental execution with persistent K/V.
+struct CachedForwardOptions {
+    tensors::ComputationMode numerical_mode;
+    cache::SequenceId sequence;
+    std::size_t capacity;
+    std::size_t max_prefill_chunk;
+    std::vector<models::ObservationPoint> capture_sites;
+    ObservationLimits observation_limits;
+    std::size_t max_device_bytes;
+    std::size_t max_host_bytes;
+};
+struct OwnedLogitRow {
+    models::TokenPosition consumed_position;
+    std::size_t vocabulary_size;
+    tensors::ElementType storage_type;
+    std::vector<std::byte> bytes;
+};
+struct ConsumedChunk {
+    models::TokenPosition first_position;
+    std::vector<std::uint32_t> tokens;
+    std::optional<OwnedLogitRow> next_logits;
+    std::vector<OwnedCapture> captures;
+};
+class CachedForwardPlan {
+  public:
+    ~CachedForwardPlan();
+    CachedForwardPlan(CachedForwardPlan &&) noexcept;
+    CachedForwardPlan &operator=(CachedForwardPlan &&) noexcept;
+    CachedForwardPlan(const CachedForwardPlan &) = delete;
+    CachedForwardPlan &operator=(const CachedForwardPlan &) = delete;
+    [[nodiscard]] std::string_view checkpoint_identity() const noexcept;
+    [[nodiscard]] cache::SequenceId sequence_id() const noexcept;
+    [[nodiscard]] tensors::ComputationMode numerical_mode() const noexcept;
+    [[nodiscard]] cache::Prefix prefix() const noexcept;
+    [[nodiscard]] std::size_t vocabulary_size() const noexcept;
+    [[nodiscard]] std::span<const models::ObservationSite> capture_sites() const noexcept;
+    [[nodiscard]] std::size_t capacity() const noexcept;
+    [[nodiscard]] std::size_t max_prefill_chunk() const noexcept;
+    [[nodiscard]] std::size_t estimated_peak_device_bytes() const noexcept;
+    [[nodiscard]] ConsumedChunk consume(std::span<const std::uint32_t> token_ids, bool need_next_logits);
+    void finish();
+
+  private:
+    struct Impl;
+    explicit CachedForwardPlan(std::unique_ptr<Impl>);
+    std::unique_ptr<Impl> impl_;
+    friend CachedForwardPlan prepare_cached_forward(gpu::Device &, const models::BoundCheckpoint &,
+                                                    const CachedForwardOptions &);
+};
+[[nodiscard]] CachedForwardPlan prepare_cached_forward(gpu::Device &, const models::BoundCheckpoint &,
+                                                       const CachedForwardOptions &);
 
 }  // namespace dolittle::inference

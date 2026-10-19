@@ -14,6 +14,10 @@
  * values are examined and selected-logit numerical row order is not proved.
  * Layout matching ignores singleton-axis stride differences: those strides
  * address no additional elements. All stride units and extents remain checked.
+ * Incremental validation then checks one CacheAppend per attention operation,
+ * with matching K/V producer IDs and consecutive block identities, before the
+ * last-row gather. Its output tail permits only norm/projection operations;
+ * cache completion and initialized prefix length are runtime responsibilities.
  * Design and cost: O(tensors+operand uses+sites) expected work with indexed state,
  * plus model metadata creation. Optimization: validate once before resource planning.
  * Tests check producer, shape, site and ownership contracts using in-memory data;
@@ -222,6 +226,52 @@ void validate_recipe(
         if (sources[recipe.logits->value] != Source::operation || !same_layout(layout, expected)) {
             throw std::invalid_argument("selected logits layout or producer mismatch");
         }
+    }
+}
+
+IncrementalRecipe Model::incremental_forward(SequenceLength, tensors::ComputationMode) const {
+    throw std::invalid_argument("model does not support incremental execution");
+}
+void validate_incremental_recipe(const Model &model, const IncrementalRecipe &incremental,
+                                 SequenceLength length, tensors::ComputationMode mode) {
+    if (!length.value)
+        throw std::invalid_argument("empty incremental chunk");
+    const std::array<TokenPosition, 1> positions{{{length.value - 1}}};
+    const auto &recipe = incremental.forward;
+    validate_recipe(model, recipe, length, mode, positions);
+    if (incremental.cache_appends.empty() || incremental.logits_begin >= recipe.operations.size())
+        throw std::invalid_argument("incomplete incremental recipe");
+    const auto *gather = std::get_if<kernels::GatherRows>(&recipe.operations[incremental.logits_begin]);
+    if (!gather || gather->rows != std::vector<std::size_t>{length.value - 1})
+        throw std::invalid_argument("incremental output must select the last new row");
+    std::size_t next = 0;
+    for (std::size_t i = 0; i < recipe.operations.size(); ++i) {
+        const auto *attention = std::get_if<kernels::CausalAttention>(&recipe.operations[i]);
+        if (!attention)
+            continue;
+        if (i >= incremental.logits_begin || next >= incremental.cache_appends.size())
+            throw std::invalid_argument("unbound incremental attention");
+        const auto &append = incremental.cache_appends[next];
+        if (append.block.value != next || append.attention_step != i ||
+            append.rotated_key.value != attention->key.value || append.value.value != attention->value.value)
+            throw std::invalid_argument("invalid incremental cache binding");
+        ++next;
+    }
+    if (next != incremental.cache_appends.size())
+        throw std::invalid_argument("unused cache binding");
+    for (std::size_t i = incremental.logits_begin; i < recipe.operations.size(); ++i) {
+        for (const auto &use : kernels::validate_operation(recipe.operations[i], recipe.tensors, mode)) {
+            if (use.access != kernels::OperandAccess::write)
+                continue;
+            for (const auto &observation : recipe.observations)
+                if (observation.tensor.value == use.tensor.value)
+                    throw std::invalid_argument("capture producer lies in optional logit tail");
+        }
+    }
+    for (std::size_t i = incremental.logits_begin + 1; i < recipe.operations.size(); ++i) {
+        if (!std::holds_alternative<kernels::RmsNorm>(recipe.operations[i]) &&
+            !std::holds_alternative<kernels::Projection>(recipe.operations[i]))
+            throw std::invalid_argument("unsupported incremental logit branch");
     }
 }
 

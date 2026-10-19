@@ -17,12 +17,11 @@ captured at selected positions. The first hardware target is a
 pairing is **Qwen3 8B with marco-bazzani's natural language autoencoder**,
 interpreting activations at block 24 (zero-based).
 
-**Status: the first full forward-pass implementation passes native and forced-PTX
-checks on the RTX 3090 Ti.** C++20/CUDA sources now cover verified checkpoint
-loading and Qwen3 binding, device resources, kernels, execution, configurable
-observations and reference comparison. A pass computes current-sequence K/V
-without a persistent KV cache. Tokenization, generation, the NLA paths and the
-live browser application remain later slices.
+**Status: target generation is implemented; full-model generation verification
+is still in progress.** The C++20/CUDA engine covers verified checkpoint loading,
+byte-BPE tokenization, Qwen3 chat formatting, cached prefill/decode, sampling,
+stopping and configurable captures. It retains the verified no-cache forward
+path. The NLA paths and live browser application remain later slices.
 
 CUDA 13.2 builds retain native Ampere code and PTX. Use the
 [build and verification commands](tests/README.md) to check your environment.

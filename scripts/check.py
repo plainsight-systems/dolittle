@@ -40,7 +40,7 @@ def main():
     build = sub.add_parser("cuda-build", help="build CUDA engine and integration drivers")
     build.add_argument("--native", action="store_true", help="use installed CUDA 13.2+ and build dependencies")
     build.add_argument("--build-dir", type=Path, default=ROOT / "build/cuda")
-    gpu = sub.add_parser("gpu", help="run device, tiny forward and pinned 8B integration scenarios")
+    gpu = sub.add_parser("gpu", help="run device, tiny generation and pinned 8B integration scenarios")
     gpu.add_argument("--fixtures", type=Path, required=True)
     gpu.add_argument("--build-dir", type=Path, default=ROOT / "build/cuda")
     gpu.add_argument("--container", action="store_true", help="requires working Docker GPU access")
@@ -77,9 +77,9 @@ def main():
         suffix = "ptx" if args.force_ptx else "native"
         scenarios = {
             "device": [build_dir / "test_device"],
-            "forward-tiny": [build_dir / "test_forward", fixtures / "tiny-fp32/fixture.json",
+            "generation-tiny": [build_dir / "test_generation", fixtures / "tiny-fp32/fixture.json",
                              fixtures / "tiny-bf16/fixture.json"],
-            "forward-8b": [build_dir / "test_forward", fixtures / "qwen3-8b-bf16/fixture.json"],
+            "generation-8b": [build_dir / "test_generation", fixtures / "qwen3-8b-bf16/fixture.json"],
         }
         for name, invocation in scenarios.items():
             if args.container:

@@ -226,4 +226,20 @@ int main() {
     invalid_configuration();
     invalid_requests();
     context_and_vocabulary_boundaries();
+    const auto model = make_model(configuration());
+    const tensors::ComputationMode mode{ElementType::bfloat16, ElementType::float32};
+    auto recipe = model->incremental_forward({4}, mode);
+    models::validate_incremental_recipe(*model, recipe, {4}, mode);
+    auto missing = recipe;
+    missing.cache_appends.pop_back();
+    expect_throws<std::invalid_argument>(
+        [&] { models::validate_incremental_recipe(*model, missing, {4}, mode); });
+    auto wrong = recipe;
+    wrong.cache_appends.front().value = wrong.cache_appends.front().rotated_key;
+    expect_throws<std::invalid_argument>(
+        [&] { models::validate_incremental_recipe(*model, wrong, {4}, mode); });
+    auto invalid_tail = recipe;
+    invalid_tail.logits_begin = 0;
+    expect_throws<std::invalid_argument>(
+        [&] { models::validate_incremental_recipe(*model, invalid_tail, {4}, mode); });
 }

@@ -1,9 +1,9 @@
 /*
- * Prepared no-cache execution with owned arenas and result metadata.
- * Axis X1: orchestrate one prepared full causal forward pass.
+ * Prepared full and cached execution with owned arenas and result metadata.
+ * Axis X1: orchestrate full passes and serial incremental token consumption.
  * Contract: implement executor.h's borrowed checkpoint/device lifetime, serial
- * reuse, host-ready owned result and failure cleanup. No persistent KV cache,
- * sampler, tokenizer or NLA. Validate all token IDs before enqueuing their upload.
+ * reuse, host-ready owned result and failure cleanup. Sampling, tokenization
+ * and NLA execution are separate responsibilities. Validate all token IDs before enqueuing their upload.
  * Algorithm: transformer overlay, "Preparing the first execution recipe",
  * "Configurable observation points" and "Storage lifetimes":
  * 1. Resolve selections; obtain and validate the model recipe; prepare kernels
@@ -18,6 +18,24 @@
  *    completed staging into result-owned bytes with stable metadata/views.
  * 5. On failure drain submitted work before releasing its resources; publish no
  *    successful partial result. Poisoned devices invalidate plans.
+ * Cached algorithm: inputs are B new IDs, committed prefix length S, prepared
+ * model/cache bindings and selected semantic sites. Output is an owned chunk.
+ * 1. Admit C positions and Bmax scratch once. Obtain K/V producer IDs and the
+ *    logit-tail boundary from IncrementalRecipe; do not infer model names.
+ * 2. Upload active IDs only; execute the bounded recipe with runtime rows B
+ *    and RoPE base S. Before each attention step, copy its newly rotated K and
+ *    projected V to the owned per-block cache at [S,S+B).
+ * 3. Attention reads keys j<=S+i for local query i. Copy each selected residual
+ *    after its producer and before its scratch storage can be reused.
+ * 4. When logits are requested, gather local row B-1 and run final norm and
+ *    vocabulary projection. Otherwise skip that tail; all blocks still run.
+ * 5. Enqueue the logit/capture downloads and wait once. Materialize owned host
+ *    bytes, then commit history and S+B. A submitted failure invalidates the
+ *    entire cache; earlier returned chunks remain owned and readable.
+ * Optimization: one weight/cache/scratch allocation per turn, one prepared
+ * schedule for both chunked prefill and B=1 decode. Per-call host results and
+ * one final wait remain explicit costs. Cache lifecycle limitations are in
+ * cache/contiguous.h; no pooling or cross-turn prefix reuse is implemented.
  * Design and cost: model/placement setup is amortized. Per-call host allocations,
  * input upload and final readback remain explicit. Optimization: no per-layer host
  * wait or tensor allocation, no all-position vocabulary projection when unneeded.
@@ -37,6 +55,7 @@
 
 #include "gpu/device.h"
 #include "inference/storage_plan.h"
+#include "inference/cache/contiguous.h"
 #include "models/checkpoint.h"
 #include <algorithm>
 #include <array>
@@ -367,4 +386,330 @@ ForwardResult FullForwardPlan::execute(std::span<const std::uint32_t> token_ids,
     }
     return ForwardResult(std::move(result));
 }
+
+struct CachedForwardPlan::Impl {
+    struct Capture {
+        models::ObservationSite site;
+        kernels::TensorId source;
+        std::size_t offset, row_bytes;
+    };
+    const models::BoundCheckpoint *checkpoint;
+    CachedForwardOptions options;
+    models::IncrementalRecipe recipe;
+    std::vector<Slot> slots;
+    std::vector<Step> steps;
+    std::vector<Capture> captures;
+    std::vector<models::ObservationSite> sites;
+    std::vector<std::vector<std::size_t>> copies_after;
+    std::vector<std::optional<std::size_t>> cache_at;
+    std::vector<std::uint32_t> history;
+    std::size_t committed = 0, peak = 0, output_bytes = 0, logit_bytes = 0;
+    bool failed = false, finished = false;
+    std::optional<gpu::Queue> queue;
+    std::optional<gpu::DeviceBuffer> weights, scratch, output;
+    std::optional<gpu::HostBuffer> upload, readback;
+    std::unique_ptr<cache::Contiguous> cache;
+    Impl(const models::BoundCheckpoint &c, CachedForwardOptions o, models::IncrementalRecipe r)
+        : checkpoint(&c), options(std::move(o)), recipe(std::move(r)) {}
+    ~Impl() {
+        if (queue) {
+            try {
+                queue->drain();
+            } catch (...) {
+            }
+        }
+    }
+    gpu::DeviceBuffer *buffer(Arena arena) {
+        switch (arena) {
+        case Arena::weight:
+            return &*weights;
+        case Arena::scratch:
+            return &*scratch;
+        case Arena::output:
+            return &*output;
+        }
+        throw std::logic_error("unknown cached arena");
+    }
+    gpu::ConstDeviceRegion source(kernels::TensorId id, std::size_t bytes) {
+        const auto &slot = slots[id.value];
+        return {buffer(slot.arena), slot.offset, bytes};
+    }
+};
+CachedForwardPlan::CachedForwardPlan(std::unique_ptr<Impl> p) : impl_(std::move(p)) {}
+CachedForwardPlan::~CachedForwardPlan() = default;
+CachedForwardPlan::CachedForwardPlan(CachedForwardPlan &&) noexcept = default;
+CachedForwardPlan &CachedForwardPlan::operator=(CachedForwardPlan &&) noexcept = default;
+std::string_view CachedForwardPlan::checkpoint_identity() const noexcept {
+    return impl_->checkpoint->identity();
+}
+cache::SequenceId CachedForwardPlan::sequence_id() const noexcept {
+    return impl_->options.sequence;
+}
+tensors::ComputationMode CachedForwardPlan::numerical_mode() const noexcept {
+    return impl_->options.numerical_mode;
+}
+cache::Prefix CachedForwardPlan::prefix() const noexcept {
+    return {impl_->committed, !impl_->failed && !impl_->finished};
+}
+std::size_t CachedForwardPlan::capacity() const noexcept {
+    return impl_->options.capacity;
+}
+std::size_t CachedForwardPlan::max_prefill_chunk() const noexcept {
+    return impl_->options.max_prefill_chunk;
+}
+std::size_t CachedForwardPlan::estimated_peak_device_bytes() const noexcept {
+    return impl_->peak;
+}
+std::size_t CachedForwardPlan::vocabulary_size() const noexcept {
+    return impl_->checkpoint->model().vocabulary_size();
+}
+std::span<const models::ObservationSite> CachedForwardPlan::capture_sites() const noexcept {
+    return impl_->sites;
+}
+void CachedForwardPlan::finish() {
+    if (impl_->failed)
+        throw std::runtime_error("failed cached execution plan");
+    impl_->finished = true;
+}
+CachedForwardPlan prepare_cached_forward(gpu::Device &device, const models::BoundCheckpoint &checkpoint,
+                                         const CachedForwardOptions &options) {
+    const auto &model = checkpoint.model();
+    const auto count = options.max_prefill_chunk;
+    if (!count || !options.capacity || count > options.capacity ||
+        options.capacity > model.context_limit().value)
+        throw std::invalid_argument("invalid cached capacity/chunk");
+    auto recipe = model.incremental_forward({count}, options.numerical_mode);
+    models::validate_incremental_recipe(model, recipe, {count}, options.numerical_mode);
+    std::vector<ObservationRequest> requests;
+    for (auto point : options.capture_sites)
+        requests.push_back({point, AllPositions{}});
+    const auto observations = prepare_observations(model.observation_sites(options.numerical_mode),
+                                                   {options.capacity}, requests, options.observation_limits);
+    auto p = std::make_unique<CachedForwardPlan::Impl>(checkpoint, options, std::move(recipe));
+    auto &forward = p->recipe.forward;
+    cache::Specification spec{
+        std::string(checkpoint.identity()), options.sequence, options.numerical_mode, options.capacity, {}};
+    p->cache_at.resize(forward.operations.size());
+    for (const auto &append : p->recipe.cache_appends) {
+        const auto &shape = forward.tensors[append.rotated_key.value].shape;
+        spec.layers.push_back({shape[1], shape[2]});
+        p->cache_at[append.attention_step] = append.block.value;
+    }
+    const auto cache_bytes = cache::estimate_contiguous(spec).allocation_bytes;
+    p->slots.resize(forward.tensors.size());
+    p->copies_after.resize(forward.operations.size());
+    std::vector<std::size_t> first(p->slots.size(), std::numeric_limits<std::size_t>::max()),
+        last(p->slots.size(), 0);
+    for (std::size_t i = 0; i < p->slots.size(); ++i) {
+        p->slots[i].bytes = tensors::required_bytes(forward.tensors[i]);
+        p->slots[i].alignment = tensors::element_bytes(forward.tensors[i].element_type);
+    }
+    for (std::size_t i = 0; i < forward.operations.size(); ++i) {
+        kernels::RowPolicy rows;
+        if (i <= p->recipe.logits_begin)
+            rows = {count, i == p->recipe.logits_begin};
+        auto operation =
+            kernels::prepare(device, forward.operations[i], forward.tensors, options.numerical_mode, rows);
+        if (operation.workspace().bytes)
+            throw std::invalid_argument("cached plan requires zero-workspace operation kind");
+        for (const auto &use : operation.operands()) {
+            auto &slot = p->slots[use.tensor.value];
+            slot.alignment = std::max(slot.alignment, use.alignment);
+            first[use.tensor.value] = std::min(first[use.tensor.value], i);
+            last[use.tensor.value] = i;
+        }
+        p->steps.push_back({std::move(operation), {}});
+    }
+    // Retain one vocabulary row; captures are chunk-sized, not capacity-sized.
+    const auto logits = *forward.logits;
+    auto &logit_slot = p->slots[logits.value];
+    logit_slot.arena = Arena::output;
+    logit_slot.offset = 0;
+    p->logit_bytes = logit_slot.bytes;
+    p->output_bytes = p->logit_bytes;
+    for (const auto &observation : observations.entries()) {
+        const auto it =
+            std::find_if(forward.observations.begin(), forward.observations.end(), [&](const auto &value) {
+                return same_point(value.site.point, observation.site.point);
+            });
+        if (it == forward.observations.end())
+            throw std::invalid_argument("unresolved cached observation");
+        const auto row =
+            multiply(observation.site.vector_width, tensors::element_bytes(observation.site.storage_type));
+        p->sites.push_back(observation.site);
+        p->captures.push_back({observation.site, it->tensor, p->output_bytes, row});
+        p->output_bytes = add(p->output_bytes, multiply(count, row));
+        bool found = false;
+        for (std::size_t i = 0; i < p->steps.size(); ++i) {
+            for (const auto &use : p->steps[i].operation.operands()) {
+                if (use.tensor.value == it->tensor.value && use.access == kernels::OperandAccess::write) {
+                    p->copies_after[i].push_back(p->captures.size() - 1);
+                    last[it->tensor.value] = std::max(last[it->tensor.value], i);
+                    found = true;
+                }
+            }
+        }
+        if (!found)
+            throw std::invalid_argument("capture lacks producer");
+    }
+    std::size_t weight_bytes = 0;
+    for (const auto &input : forward.parameters) {
+        auto &slot = p->slots[input.tensor.value];
+        slot.arena = Arena::weight;
+        const auto view = checkpoint.parameter(input.parameter);
+        tensors::validate_view(view);
+        const auto &expected = forward.tensors[input.tensor.value];
+        if (view.layout->shape != expected.shape || view.layout->element_type != expected.element_type ||
+            view.bytes.size() != slot.bytes)
+            throw std::invalid_argument("cached parameter shape/extent mismatch");
+        for (std::size_t axis = 0; axis < expected.shape.size(); ++axis)
+            if (expected.shape[axis] > 1 && expected.byte_strides[axis] != view.layout->byte_strides[axis])
+                throw std::invalid_argument("cached parameter strides mismatch");
+        weight_bytes = align_up(weight_bytes, slot.alignment);
+        slot.offset = weight_bytes;
+        weight_bytes = add(weight_bytes, slot.bytes);
+    }
+    first[forward.token_input.value] = 0;
+    std::vector<ResourceLifetime> lifetimes;
+    for (std::size_t i = 0; i < p->slots.size(); ++i) {
+        const auto &slot = p->slots[i];
+        if (slot.arena == Arena::scratch) {
+            if (first[i] == std::numeric_limits<std::size_t>::max())
+                throw std::invalid_argument("unused cached scratch");
+            lifetimes.push_back({{i}, slot.bytes, slot.alignment, first[i], last[i]});
+        }
+    }
+    const auto fixed = add(add(weight_bytes, cache_bytes), p->output_bytes);
+    if (fixed > options.max_device_bytes)
+        throw std::length_error("cached fixed arenas exceed device budget");
+    const auto storage = plan_storage(lifetimes, options.max_device_bytes - fixed);
+    p->peak = add(fixed, storage.arena_bytes);
+    for (const auto &placement : storage.placements)
+        p->slots[placement.id.value].offset = placement.offset;
+    const auto upload_bytes = std::max(multiply(count, sizeof(std::uint32_t)),
+                                       std::min(weight_bytes, std::size_t{16} * 1024 * 1024));
+    auto host_bytes = add(upload_bytes, multiply(2, p->output_bytes));
+    host_bytes = add(host_bytes, observations.payload_bytes());
+    host_bytes = add(host_bytes, multiply(options.capacity, 2 * sizeof(std::uint32_t)));
+    host_bytes = add(host_bytes, multiply(count, sizeof(std::uint32_t)));
+    host_bytes =
+        add(host_bytes, multiply(multiply(count, p->captures.size()), sizeof(models::TokenPosition)));
+    host_bytes = add(host_bytes,
+                     multiply(multiply(options.capacity, p->captures.size()), sizeof(models::TokenPosition)));
+    host_bytes = add(host_bytes, multiply(model.vocabulary_size(),
+                                          sizeof(float) + sizeof(double) + 2 * sizeof(std::uint32_t)));
+    if (host_bytes > options.max_host_bytes)
+        throw std::length_error("cached host outputs exceed budget");
+    p->history.reserve(options.capacity);
+    p->queue.emplace(device.create_queue());
+    p->weights.emplace(device.allocate({weight_bytes, 4}));
+    p->scratch.emplace(device.allocate({storage.arena_bytes, storage.arena_alignment}));
+    p->output.emplace(device.allocate({p->output_bytes, 4}));
+    p->upload.emplace(device.allocate_staging({upload_bytes, 4}));
+    p->readback.emplace(device.allocate_staging({p->output_bytes, 4}));
+    p->cache = cache::allocate_contiguous(device, *p->queue, spec, cache_bytes);
+    for (const auto &input : forward.parameters) {
+        const auto view = checkpoint.parameter(input.parameter);
+        const auto &slot = p->slots[input.tensor.value];
+        for (std::size_t offset = 0; offset < slot.bytes;) {
+            const auto bytes = std::min(upload_bytes, slot.bytes - offset);
+            std::memcpy(p->upload->bytes().data(), view.bytes.data() + offset, bytes);
+            p->queue->upload({&*p->weights, slot.offset + offset, bytes}, {&*p->upload, 0, bytes});
+            p->queue->wait(p->queue->mark());
+            offset += bytes;
+        }
+    }
+    for (auto &step : p->steps)
+        for (const auto &use : step.operation.operands()) {
+            const auto &slot = p->slots[use.tensor.value];
+            auto *buffer = p->buffer(slot.arena);
+            if (use.access == kernels::OperandAccess::read)
+                step.bindings.push_back(
+                    {use.tensor, static_cast<const gpu::DeviceBuffer *>(buffer), slot.offset, slot.bytes});
+            else
+                step.bindings.push_back({use.tensor, buffer, slot.offset, slot.bytes});
+        }
+    return CachedForwardPlan(std::move(p));
+}
+ConsumedChunk CachedForwardPlan::consume(std::span<const std::uint32_t> ids, bool need_logits) {
+    auto &p = *impl_;
+    if (p.failed || p.finished)
+        throw std::runtime_error("cached plan is no longer usable");
+    if (ids.empty() || ids.size() > p.options.max_prefill_chunk ||
+        ids.size() > p.options.capacity - p.committed)
+        throw std::invalid_argument("cached token chunk outside admitted bounds");
+    for (auto id : ids)
+        if (id >= vocabulary_size())
+            throw std::invalid_argument("token outside vocabulary");
+    ConsumedChunk result;
+    result.first_position = {p.committed};
+    result.tokens.assign(ids.begin(), ids.end());
+    if (need_logits)
+        result.next_logits = OwnedLogitRow{{p.committed + ids.size() - 1},
+                                           vocabulary_size(),
+                                           p.options.numerical_mode.activation_storage,
+                                           std::vector<std::byte>(p.logit_bytes)};
+    result.captures.reserve(p.captures.size());
+    for (const auto &capture : p.captures) {
+        OwnedCapture out{capture.site, {}, std::vector<std::byte>(multiply(ids.size(), capture.row_bytes))};
+        out.positions.reserve(ids.size());
+        for (std::size_t i = 0; i < ids.size(); ++i)
+            out.positions.push_back({p.committed + i});
+        result.captures.push_back(std::move(out));
+    }
+    const kernels::ExecutionExtent extent{p.committed, ids.size()};
+    try {
+        const auto &tokens = p.slots[p.recipe.forward.token_input.value];
+        const auto bytes = ids.size_bytes();
+        std::memcpy(p.upload->bytes().data(), ids.data(), bytes);
+        p.queue->upload({&*p.scratch, tokens.offset, bytes}, {&*p.upload, 0, bytes});
+        for (std::size_t i = 0; i < p.steps.size(); ++i) {
+            if (!need_logits && i == p.recipe.logits_begin)
+                break;
+            std::optional<cache::ContiguousLayerView> view;
+            if (p.cache_at[i]) {
+                const auto block = *p.cache_at[i];
+                const auto &append = p.recipe.cache_appends[block];
+                view = p.cache->layer(block);
+                const auto bytes_per_row =
+                    multiply(multiply(view->shape.kv_heads, view->shape.head_width),
+                             tensors::element_bytes(p.options.numerical_mode.activation_storage));
+                p.cache->append(*p.queue, block, p.committed, ids.size(),
+                                p.source(append.rotated_key, multiply(ids.size(), bytes_per_row)),
+                                p.source(append.value, multiply(ids.size(), bytes_per_row)));
+            }
+            auto &step = p.steps[i];
+            step.operation.submit(*p.queue, step.bindings, {}, i <= p.recipe.logits_begin ? &extent : nullptr,
+                                  view ? &*view : nullptr);
+            for (auto c : p.copies_after[i]) {
+                const auto &capture = p.captures[c];
+                const auto bytes = multiply(ids.size(), capture.row_bytes);
+                p.queue->copy({&*p.output, capture.offset, bytes}, p.source(capture.source, bytes));
+            }
+        }
+        if (need_logits)
+            p.queue->download({&*p.readback, 0, p.logit_bytes}, {&*p.output, 0, p.logit_bytes});
+        for (const auto &capture : p.captures) {
+            const auto bytes = multiply(ids.size(), capture.row_bytes);
+            p.queue->download({&*p.readback, capture.offset, bytes}, {&*p.output, capture.offset, bytes});
+        }
+        p.queue->wait(p.queue->mark());
+        if (need_logits)
+            std::memcpy(result.next_logits->bytes.data(), p.readback->bytes().data(), p.logit_bytes);
+        for (std::size_t c = 0; c < p.captures.size(); ++c)
+            std::memcpy(result.captures[c].bytes.data(), p.readback->bytes().data() + p.captures[c].offset,
+                        result.captures[c].bytes.size());
+        p.history.insert(p.history.end(), ids.begin(), ids.end());
+        p.committed += ids.size();
+    } catch (...) {
+        p.failed = true;
+        try {
+            p.queue->drain();
+        } catch (...) {
+        }
+        throw;
+    }
+    return result;
+}
+
 }  // namespace dolittle::inference

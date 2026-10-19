@@ -37,6 +37,10 @@
  * Overlay: docs/architecture/transformer-execution.md,
  * "One Qwen3 transformer block" and "First forward pass".
  *
+ * Incremental construction uses the same block equations for Bmax new rows.
+ * Each attention declares its rotated-K and projected-V append sources. The
+ * last-row gather marks the optional logit tail. Runtime S/B supplies absolute
+ * RoPE positions and causal cache visibility; no old Q/K/V is recomputed.
  * Design and cost: O(blocks+selected rows) metadata; widths come from Config, not
  * the selected checkpoint's constants. Optimization: reuse the second norm, keep
  * KV heads grouped, and do not project unused logit rows. Store each mathematical
@@ -61,6 +65,7 @@
 #include "models/qwen3/model.h"
 
 #include <cmath>
+#include <array>
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
@@ -177,6 +182,22 @@ public:
 
     ForwardRecipe full_forward(SequenceLength length, tensors::ComputationMode mode,
                               std::span<const TokenPosition> positions) const override {
+        return build_forward(length, mode, positions, nullptr);
+    }
+    IncrementalRecipe incremental_forward(SequenceLength length,
+                                          tensors::ComputationMode mode) const override {
+        if (!length.value)
+            throw std::invalid_argument("empty incremental chunk");
+        IncrementalRecipe result{};
+        const std::array<TokenPosition, 1> positions{{{length.value - 1}}};
+        result.forward = build_forward(length, mode, positions, &result);
+        return result;
+    }
+
+  private:
+    ForwardRecipe build_forward(SequenceLength length, tensors::ComputationMode mode,
+                                std::span<const TokenPosition> positions,
+                                IncrementalRecipe *incremental) const {
         validate_mode(mode);
         if (length.value == 0 || length.value > config_.context_limit.value) {
             throw std::invalid_argument("Qwen3 sequence outside context limit");
@@ -246,6 +267,8 @@ public:
             query = rotary(norm(query, block.query_norm));
             key = rotary(norm(key, block.key_norm));
             const auto attention = activation({n, config_.query_heads, h});
+            if (incremental)
+                incremental->cache_appends.push_back({{i}, recipe.operations.size(), key, value});
             recipe.operations.emplace_back(kernels::CausalAttention{query, key, value, attention});
             residual = add(residual, project(attention, block.attention_projection, {n, d}));
             const auto post_attention = norm(residual, block.post_attention_norm);
@@ -256,6 +279,8 @@ public:
             residual = add(residual, project(activated, block.down_projection, {n, d}));
             recipe.observations.push_back({site(ObservationBoundary::block_output, i), residual});
         }
+        if (incremental)
+            incremental->logits_begin = recipe.operations.size();
         if (!positions.empty()) {
             std::vector<std::size_t> rows;
             rows.reserve(positions.size());

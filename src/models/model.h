@@ -45,6 +45,31 @@
  * cpp-guidelines I.7 (#ri-post): single producers and complete sites explicit.
  * cpp-perf-guidelines CDSA.32: model metadata is resolved into execution order.
  * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
+ *
+ * Incremental model contract: an incremental recipe is an
+ * additional explicit capability, not full_forward on a repeatedly growing
+ * sequence. The Model supplies per-block KV shapes and identifies produced
+ * rotated-K/unrotated-V values, cache reads and semantic observation tensors.
+ * Input shape is a bounded new-token span; runtime state supplies committed
+ * prefix length S and active row count B. The executor binds cache resources,
+ * but must not discover K/V producers by operation order or parameter names.
+ *
+ * Recipe validation must distinguish immutable parameters, old cache prefix,
+ * new cache writes and ordinary single-producer intermediates. Each block writes
+ * exactly [S,S+B), then attention may read [0,S+i] for query i. Reject missing,
+ * duplicate, incompatible or reordered append/read declarations. Validation
+ * alone does not commit cache validity; completion remains the executor's job.
+ * IncrementalRecipe owns the ordinary bounded ForwardRecipe plus CacheAppend
+ * entries naming each attention step and its rotated-K/unrotated-V tensors.
+ * logits_begin marks the last-active-row gather and optional output tail.
+ * The default incremental capability rejects unsupported model kinds.
+ * All shape-dependent metadata is prepared once, not rebuilt per token.
+ * Overlay: transformer-execution.md, "Prefill and decoding".
+ * Corpus consultation, header design and implementation, 2026-10-18:
+ * cpp-guidelines I.1 (#ri-explicit), I.7 (#ri-post): incremental capability and
+ * external cache effects must be declared in the recipe and validated.
+ * cpp-perf-guidelines CDSA.32: resolve producer/cache bindings into execution order.
+ * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
  */
 #pragma once
 
@@ -72,6 +97,17 @@ struct ForwardRecipe {
     std::optional<kernels::TensorId> logits;
 };
 
+struct CacheAppend {
+    BlockIndex block;
+    std::size_t attention_step;
+    kernels::TensorId rotated_key, value;
+};
+struct IncrementalRecipe {
+    ForwardRecipe forward;
+    std::vector<CacheAppend> cache_appends;
+    std::size_t logits_begin;
+};
+
 class Model {
 public:
     virtual ~Model();
@@ -84,6 +120,8 @@ public:
     [[nodiscard]] virtual ForwardRecipe full_forward(
         SequenceLength length, tensors::ComputationMode mode,
         std::span<const TokenPosition> logit_positions) const = 0;
+    [[nodiscard]] virtual IncrementalRecipe incremental_forward(SequenceLength max_chunk,
+                                                                tensors::ComputationMode mode) const;
     Model(const Model&) = delete;
     Model& operator=(const Model&) = delete;
 protected:
@@ -94,4 +132,6 @@ void validate_recipe(
     const Model& model, const ForwardRecipe& recipe, SequenceLength length,
     tensors::ComputationMode mode, std::span<const TokenPosition> logit_positions);
 
+void validate_incremental_recipe(const Model &, const IncrementalRecipe &, SequenceLength max_chunk,
+                                 tensors::ComputationMode);
 }  // namespace dolittle::models

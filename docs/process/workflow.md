@@ -148,7 +148,7 @@ run separately as in-memory unit tests against `check_site_snapshot`; they do
 not touch files or launch Hugo. The site therefore occupies one of the five
 repository-wide integration slots. The current five-scenario inventory is site
 publication, checkpoint archive integrity, CUDA device resources, tiny CUDA
-forward comparison and pinned 8B CUDA forward comparison; see `tests/README.md`
+generation comparison and pinned 8B CUDA generation comparison; see `tests/README.md`
 for registration and execution requirements. The budget is full. Update the
 inventory and replace or remove existing coverage before adding a scenario.
 
@@ -158,6 +158,15 @@ Verify GPU computation on the 3090 against appropriate independent reference
 results. Define numerical comparisons for logits, captured activations,
 injected inputs, and reconstructed vectors as those paths are designed.
 Generated prose alone is insufficient evidence of numerical correctness.
+
+Freeze the independent reference implementation, precision, fixtures and error
+limits before correcting a numerical failure. Compare operations on identical
+inputs to locate the engine's first divergence. Do not rewrite the reference's
+arithmetic to match the engine, raise its precision, or relax limits to clear a
+failure. An engine-aligned arithmetic model can check conformance separately;
+it cannot replace independent acceptance. A demonstrated reference defect or an
+explicitly agreed contract change requires preserving the old evidence and
+establishing a new independent baseline before claiming a fix.
 
 Keep build/non-GPU checks separate from GPU execution checks. Record the device,
 driver, toolchain, precision, model revision, and workload for measurements.

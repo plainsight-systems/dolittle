@@ -11,12 +11,25 @@
  * "One Qwen3 transformer block": validate descriptors, flatten dimensions once,
  * check capabilities, bind/validate existing regions, enqueue the concrete kernel
  * or contiguous gathered-row copies, check launch status, defer completion to Queue.
+ * Dynamic row policy keeps maximum binding extents unchanged. At submit,
+ * validate 0<B<=Bmax and S+B<=cache capacity, then scale active launch rows
+ * (including flattened head/feature counts). RoPE receives S. Attention uses
+ * the declared contiguous K/V regions; last-row gather copies local row B-1.
+ * All cache extents/device identities and output overlap are checked before
+ * launch; the owning executor guarantees earlier queue-ordered append writes.
  * Design/cost: O(operand ranks + gathered rows) preparation and bounded metadata;
  * submit uses fixed stack bindings, no allocation or waits. Gather copies cost
  * one enqueue per maximal consecutive selected range. Teardown conservatively
  * drains the device, including partially submitted work. No TF32/CPU fallback.
  * Optimization: cached dimensions and owned gather metadata avoid hot-path layout
  * discovery, GPU index uploads and hidden workspace. Numerical work stays on GPU.
+ * Attention admission accounts for three width-sized FP32 arrays (query and
+ * two value sums), 256 reduction values and three scalar slots. RMSNorm uses
+ * warp registers without shared scratch. Overflow checks precede byte scaling.
+ * Corpus consultation, storage-bound design/implementation, 2026-10-19:
+ * cpp-guidelines I.7 (#ri-post): admitted shared bytes cover the launched kernel.
+ * cpp-perf-guidelines GDSA.16: count the actual per-output on-chip state.
+ * Source: guidelines/gpu-dsa/GDSA.16-tile-through-on-chip-memory.md.
  * Corpus consultation, design/implementation, 2026-10-18:
  * cpp-guidelines I.1 (#ri-explicit): explicit bindings, numerical mode and device.
  * cpp-guidelines I.7 (#ri-post): exact region/access/completion contracts.
@@ -29,6 +42,7 @@
 #include "kernels/operations.h"
 #include "kernels/cuda/launch.h"
 #include "gpu/cuda/backend.h"
+#include "inference/cache/contiguous.h"
 
 #include <array>
 #include <cmath>
@@ -64,6 +78,7 @@ struct PreparedOperation::Impl {
     std::vector<OperandRequirement> requirements;
     std::array<std::size_t, 4> extents{};
     std::array<std::size_t, 4> dimensions{};
+    RowPolicy rows;
 
     Impl(gpu::Device& owner, const Operation& op, tensors::ElementType storage)
         : device(&owner), operation(op), type(storage) {}
@@ -82,9 +97,9 @@ std::string_view PreparedOperation::implementation_name() const noexcept {
     return "cuda-direct-fp32-accumulation";
 }
 
-PreparedOperation prepare(gpu::Device& device, const Operation& operation,
-                          std::span<const tensors::Layout> layouts,
-                          tensors::ComputationMode mode) {
+PreparedOperation prepare(gpu::Device &device, const Operation &operation,
+                          std::span<const tensors::Layout> layouts, tensors::ComputationMode mode,
+                          RowPolicy rows) {
     const auto uses = validate_operation(operation, layouts, mode);
     const auto& properties = Bridge::properties(device);
     require(properties.maxThreadsPerBlock >= 256 && properties.maxThreadsDim[0] >= 256 &&
@@ -92,6 +107,7 @@ PreparedOperation prepare(gpu::Device& device, const Operation& operation,
     require(properties.major > 8 || (properties.major == 8 && properties.minor >= 6),
             "CUDA build requires compute capability 8.6 or later");
     auto impl = std::make_unique<PreparedOperation::Impl>(device, operation, mode.activation_storage);
+    impl->rows = rows;
     impl->requirements.reserve(uses.size());
     for (std::size_t i = 0; i < uses.size(); ++i) {
         const auto& layout = layouts[uses[i].tensor.value];
@@ -119,7 +135,7 @@ PreparedOperation prepare(gpu::Device& device, const Operation& operation,
         } else if constexpr (std::is_same_v<T, RmsNorm>) {
             d[1] = layout(op.input).shape.back();
             d[0] = count(op.input) / d[1];
-            shared_bytes = 256 * sizeof(float);
+            shared_bytes = 0;
         } else if constexpr (std::is_same_v<T, Rotary>) {
             const auto& shape = layout(op.input).shape;
             d = {shape[0], shape[1], shape[2], 0};
@@ -128,7 +144,7 @@ PreparedOperation prepare(gpu::Device& device, const Operation& operation,
         } else if constexpr (std::is_same_v<T, CausalAttention>) {
             const auto& shape = layout(op.query).shape;
             d = {shape[0], shape[1], layout(op.key).shape[1], shape[2]};
-            const auto shared_values = product(d[3], 2);
+            const auto shared_values = product(d[3], 3);
             if (shared_values > std::numeric_limits<std::size_t>::max() - 259)
                 throw std::length_error("attention shared storage overflows");
             shared_bytes = product(shared_values + 259, sizeof(float));
@@ -141,13 +157,47 @@ PreparedOperation prepare(gpu::Device& device, const Operation& operation,
         }
     }, operation);
     require(shared_bytes <= properties.sharedMemPerBlock, "operation exceeds CUDA shared memory");
+    if (rows.last_row) {
+        const auto *gather = std::get_if<GatherRows>(&operation);
+        require(rows.max_rows && gather && gather->rows == std::vector<std::size_t>{rows.max_rows - 1},
+                "last-row policy requires a final-row gather");
+    } else if (rows.max_rows) {
+        require(!std::holds_alternative<GatherRows>(operation), "dynamic gather requires last-row policy");
+        // Every non-weight input/output has the admitted leading row count.
+        for (const auto &use : uses) {
+            bool weight = false;
+            std::visit(
+                [&](const auto &op) {
+                    using T = std::decay_t<decltype(op)>;
+                    if constexpr (std::is_same_v<T, Embedding> || std::is_same_v<T, Projection> ||
+                                  std::is_same_v<T, RmsNorm>)
+                        weight = use.tensor.value == op.weight.value;
+                },
+                operation);
+            require(weight || layouts[use.tensor.value].shape[0] == rows.max_rows,
+                    "dynamic operation leading dimension mismatch");
+        }
+    }
     return PreparedOperation(std::move(impl));
 }
 
-void PreparedOperation::submit(gpu::Queue& queue, std::span<const BufferBinding> bindings,
-                               gpu::DeviceRegion workspace_region) const {
+void PreparedOperation::submit(gpu::Queue &queue, std::span<const BufferBinding> bindings,
+                               gpu::DeviceRegion workspace_region, const ExecutionExtent *extent,
+                               const inference::cache::ContiguousLayerView *cache) const {
     auto& device = *impl_->device;
     const auto stream = Bridge::stream(queue, device);
+    const bool dynamic = impl_->rows.max_rows != 0;
+    require(dynamic == (extent != nullptr), "runtime extent/preparation mismatch");
+    if (extent) {
+        require(extent->active_rows && extent->active_rows <= impl_->rows.max_rows,
+                "active rows outside prepared capacity");
+        require(extent->first_position <= std::numeric_limits<std::size_t>::max() - extent->active_rows,
+                "runtime positions overflow");
+    }
+    require(!cache || (dynamic && std::holds_alternative<CausalAttention>(impl_->operation)),
+            "cache binding requires dynamic attention");
+    require(!dynamic || !std::holds_alternative<CausalAttention>(impl_->operation) || cache,
+            "dynamic attention requires an initialized cache prefix");
     require(bindings.size() == impl_->requirements.size(), "binding count differs from operation");
     require(workspace_region.bytes == 0, "operation requires zero workspace bytes");
     if (workspace_region.owner) {
@@ -199,7 +249,37 @@ void PreparedOperation::submit(gpu::Queue& queue, std::span<const BufferBinding>
         throw std::logic_error("prepared operand is absent");
     };
     const auto output = [&](TensorId id) -> void* { return const_cast<void*>(input(id)); };
-    const auto& d = impl_->dimensions;
+    auto d = impl_->dimensions;
+    if (dynamic && !impl_->rows.last_row)
+        d[0] = (d[0] / impl_->rows.max_rows) * extent->active_rows;
+    const void *cached_key = nullptr;
+    const void *cached_value = nullptr;
+    if (cache) {
+        require(extent->first_position <= cache->capacity &&
+                    extent->active_rows <= cache->capacity - extent->first_position &&
+                    cache->shape.kv_heads == d[2] && cache->shape.head_width == d[3],
+                "cached attention shape mismatch");
+        const auto bytes =
+            product(product(product(cache->capacity, d[2]), d[3]), tensors::element_bytes(impl_->type));
+        const auto pointer = [&](gpu::ConstDeviceRegion region) -> const void * {
+            require(region.owner && region.bytes == bytes && region.offset <= region.owner->size_bytes() &&
+                        bytes <= region.owner->size_bytes() - region.offset,
+                    "cache region extent mismatch");
+            const auto *base = static_cast<const std::byte *>(Bridge::pointer(*region.owner, device));
+            require(reinterpret_cast<std::uintptr_t>(base + region.offset) %
+                            tensors::element_bytes(impl_->type) ==
+                        0,
+                    "cache alignment mismatch");
+            for (std::size_t i = 0; i < impl_->requirements.size(); ++i)
+                if (impl_->requirements[i].access == OperandAccess::write && bound[i].owner == region.owner)
+                    require(bound[i].offset >= region.offset + bytes ||
+                                region.offset >= bound[i].offset + bound[i].bytes,
+                            "attention output overlaps cache");
+            return base + region.offset;
+        };
+        cached_key = pointer(cache->keys);
+        cached_value = pointer(cache->values);
+    }
     std::visit([&](const auto& op) {
         using T = std::decay_t<decltype(op)>;
         if constexpr (std::is_same_v<T, Embedding>) {
@@ -212,11 +292,12 @@ void PreparedOperation::submit(gpu::Queue& queue, std::span<const BufferBinding>
             cuda::launch_rms_norm(impl_->type, input(op.input), input(op.weight),
                 output(op.output), d[0], d[1], op.epsilon, stream);
         } else if constexpr (std::is_same_v<T, Rotary>) {
-            cuda::launch_rotary(impl_->type, input(op.input), output(op.output),
-                d[0], d[1], d[2], op.first_position, op.theta, stream);
+            cuda::launch_rotary(impl_->type, input(op.input), output(op.output), d[0], d[1], d[2],
+                                extent ? extent->first_position : op.first_position, op.theta, stream);
         } else if constexpr (std::is_same_v<T, CausalAttention>) {
-            cuda::launch_attention(impl_->type, input(op.query), input(op.key), input(op.value),
-                output(op.output), d[0], d[1], d[2], d[3], stream);
+            cuda::launch_attention(impl_->type, input(op.query), cache ? cached_key : input(op.key),
+                                   cache ? cached_value : input(op.value), output(op.output), d[0], d[1],
+                                   d[2], d[3], stream, extent ? extent->first_position : 0);
         } else if constexpr (std::is_same_v<T, Add>) {
             cuda::launch_add(impl_->type, input(op.left), input(op.right), output(op.output), d[0], stream);
         } else if constexpr (std::is_same_v<T, SiluMultiply>) {
@@ -224,6 +305,11 @@ void PreparedOperation::submit(gpu::Queue& queue, std::span<const BufferBinding>
         } else if constexpr (std::is_same_v<T, GatherRows>) {
             const auto* source = static_cast<const std::byte*>(input(op.input));
             auto* destination = static_cast<std::byte*>(output(op.output));
+            if (impl_->rows.last_row) {
+                Bridge::check(device, cudaMemcpyAsync(destination, source + (extent->active_rows - 1) * d[0],
+                                                      d[0], cudaMemcpyDeviceToDevice, stream));
+                return;
+            }
             for (std::size_t first = 0; first < op.rows.size();) {
                 auto end = first + 1;
                 while (end < op.rows.size() && op.rows[end] == op.rows[end - 1] + 1) ++end;

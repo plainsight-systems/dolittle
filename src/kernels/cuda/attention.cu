@@ -1,117 +1,118 @@
 /*
- * Axis X5: full-sequence causal grouped-query attention.
- * Inputs: Q[N,Hq,d], K[N,Hkv,d] and V[N,Hkv,d], where N is the sequence
- * length, d is the head width, and Hq is a positive multiple of Hkv.
- * Output: Y[N,Hq,d] in the same BF16 or FP32 storage type as the inputs.
+ * Axis X5: full or cached causal grouped-query attention.
+ * Inputs: Q[B,Hq,d], K[S+B,Hkv,d], V[S+B,Hkv,d]. S is the cached prefix
+ * (zero for a full forward pass); Hq is a positive multiple of Hkv.
+ * Output: Y[B,Hq,d] in the same BF16 or FP32 storage type.
+ * Algorithm for local query i and head h:
+ * 1. Select KV head g=floor(h/(Hq/Hkv)); visible keys are j=0..S+i.
+ *    Score s[j]=dot(Q[i,h,:],K[j,g,:])/sqrt(d) in FP32. Dot products
+ *    use eight contiguous feature ranges of ceil(d/8) features, visited in
+ *    ascending order with FP32 FMA. Merge at offsets 4,2,1. Round the inverse
+ *    square root scale once to FP32 on the host.
+ * 2. Visit visible keys to find m=max(s[j]). Visit them again to compute
+ *    e[j]=exp(s[j]-m) and denominator l=sum_j e[j]. Thirty-two partials
+ *    own j modulo 32, merged with the descending half-reduction tree.
+ * 3. Visit the keys a third time. Recompute each score and round
+ *    p[j]=FP32(e[j]/l) to FP32 BEFORE weighting V. Accumulate
+ *    Y[...,f]=sum_j p[j]*V[j,g,f] using two contiguous key ranges, the
+ *    first of ceil((S+i+1)/2) keys. Each range uses ascending FP32 FMA;
+ *    add its two sums in FP32, then round the completed vector to storage.
+ * The probability rounding is explicit; carrying an unnormalized numerator
+ * and dividing it at the end is a different floating-point computation.
+ * CUDA implementation: 256 threads own one query/head. Q, the output sums
+ * and a reduction buffer live in shared memory. Three passes recompute QK
+ * dots rather than retaining an N-by-N score matrix. K is read three times,
+ * V once; barriers protect shared reductions and scalar broadcasts.
+ * Cost: O(B*(S+B)*Hq*d) work, with three score passes, and (3*d+259)
+ * shared floats per block. This spends extra arithmetic to preserve the
+ * probability rounding boundary without sequence-sized scratch.
+ * Optimization: stage Q and sums on chip; directly index shared KV heads.
+ * Cached K/V appends precede attention on the same queue. Query indices
+ * remain local, KV indices absolute. Never read unwritten cache capacity.
  *
- * Algorithm: for each query position p and query head h:
- * 1. Select KV head g = floor(h / (Hq/Hkv)). Queries in the same group
- *    share this head; K and V do not need duplicated head arrays.
- * 2. For each key position j in [0,p], compute the FP32 score
- *    s_j = dot(Q[p,h,:], K[j,g,:]) / sqrt(d).
- * 3. Compute softmax over those scores and use its probabilities to weight
- *    the corresponding V vectors. The result is
- *    Y[p,h,:] = sum_j(exp(s_j-m) * V[j,g,:]) / sum_j(exp(s_j-m)),
- *    where m is the maximum score for this query.
- * 4. Round the resulting vector to storage. No scores, probabilities or
- *    intermediate weighted sums are rounded to BF16.
- * Only j <= p participates: a query cannot see future positions. Inputs
- * are unpadded, so every query has at least key position zero.
- *
- * Streaming implementation of step 3: retain a maximum m, scalar denominator
- * l and vector numerator a instead of storing all scores. For the first key,
- * set m = s_0, l = 1 and a = V[0,g,:]. For each later key j:
- *   next_m = max(m, s_j)
- *   alpha = exp(m - next_m); beta = exp(s_j - next_m)
- *   l = alpha*l + beta
- *   a = alpha*a + beta*V[j,g,:]
- *   m = next_m
- * The rescaling keeps earlier contributions expressed relative to the new
- * maximum. After the last key, store a/l. All carried state is FP32.
- *
- * CUDA implementation: a 256-thread block handles one query position/head
- * at a time. It retains Q and a in shared memory, streams one K/V row at a
- * time, and reduces the dot product across feature threads. Thread zero
- * updates the scalar state; barriers make each update visible before the
- * next key. Blocks advance to more queries when needed.
- * Cost: O(N*N*Hq*d) work and (2*d+259) shared floats per block.
- * Optimization: keep query and running state on chip, read contiguous K/V
- * features, and avoid an N-by-N score/probability buffer or expanded KV heads.
- * Reduction order can differ from other attention backends; equivalence is
- * numerical within validated bounds, not a bitwise guarantee.
- *
- * Overlay: docs/architecture/transformer-execution.md,
- * "Attention and positional semantics".
- *
- * Contract: preparation validates shapes, byte/launch extents and device limits.
- * Inputs and the separate output buffer are borrowed until queue completion;
- * output must not overlap an input. Launches allocate no buffers and perform
- * no host readback or host wait. The caller checks immediate launch status;
- * asynchronous device errors surface at the explicit queue wait. See
- * kernels/operations.h for the public operation and failure contracts.
- *
- * Corpus consultation, comment design, 2026-10-18:
- * cpp-guidelines I.7 (#ri-post): state the output and rounding guarantees.
- * cpp-perf-guidelines GPU.2: contiguous features map to adjacent threads.
- * Source: guidelines/gpu/GPU.2-shape-data-for-coalesced-lane-access.md.
- * cpp-perf-guidelines GDSA.16: combine each incoming key with small on-chip
- * state rather than materializing the score matrix.
+ * Overlay: docs/architecture/transformer-execution.md, "One Qwen3 transformer
+ * block" and "Attention and positional semantics".
+ * Contract: preparation validates shapes, extents and device limits. Inputs
+ * and the separate output buffer are borrowed until queue completion; output
+ * cannot overlap inputs. Launches allocate no buffers, read nothing to the
+ * host and perform no host wait. The caller checks immediate launch status;
+ * asynchronous errors surface at the explicit queue wait.
+ * Same-build/device repeatability and row/chunk invariance are required.
+ * Cross-GPU bit equality is unverified. No TF32 or FP64 tensor accumulation.
+ * Corpus consultation, header design and implementation, 2026-10-19:
+ * cpp-guidelines I.7 (#ri-post): specify intermediate and final rounding.
+ * cpp-perf-guidelines GDSA.2: fix partial ownership and combination order
+ * independently of batch size, scheduling and cache chunks.
+ * Source: guidelines/gpu-dsa/GDSA.2-declare-each-reductions-determinism.md.
+ * cpp-perf-guidelines GDSA.16: bound on-chip state and account for rereads.
  * Source: guidelines/gpu-dsa/GDSA.16-tile-through-on-chip-memory.md.
  */
 #include "kernels/cuda/common.cuh"
 
+#include <cmath>
+
 namespace dolittle::kernels::cuda {
 namespace {
 template <class T>
-__global__ void attention(const T* query, const T* key, const T* value, T* output,
-                          std::size_t tasks, std::size_t query_heads,
-                          std::size_t kv_heads, std::size_t width) {
+__global__ void attention(const T *query, const T *key, const T *value, T *output, std::size_t tasks,
+                          std::size_t query_heads, std::size_t kv_heads, std::size_t width,
+                          std::size_t first_position, float scale) {
     extern __shared__ float shared[];
     auto* q = shared;
     auto* numerator = q + width;
-    auto* reduction = numerator + width;
+    auto* second_sum = numerator + width;
+    auto* reduction = second_sum + width;
     auto* update = reduction + detail::threads;
-    const auto scale = 1.0F / sqrtf(static_cast<float>(width));
     for (std::size_t task = blockIdx.x; task < tasks;) {
-        const auto position = task / query_heads;
+        const auto position = first_position + task / query_heads;
         const auto head = task % query_heads;
         const auto kv_head = head / (query_heads / kv_heads);
         for (std::size_t feature = threadIdx.x; feature < width; feature += blockDim.x) {
             q[feature] = detail::widen(query[task * width + feature]);
             numerator[feature] = 0.0F;
+            second_sum[feature] = 0.0F;
         }
-        if (threadIdx.x == 0) update[2] = 0.0F;
         __syncthreads();
-        float maximum = 0.0F;  // Only lane zero owns the running maximum.
-        for (std::size_t key_position = 0; key_position <= position; ++key_position) {
-            const auto kv_offset = (key_position * kv_heads + kv_head) * width;
-            float partial = 0.0F;
-            for (std::size_t feature = threadIdx.x; feature < width; feature += blockDim.x) {
-                partial = fmaf(q[feature], detail::widen(key[kv_offset + feature]), partial);
-            }
-            const auto score = __fmul_rn(detail::block_sum(partial, reduction), scale);
-            if (threadIdx.x == 0) {
-                if (key_position == 0) {
-                    maximum = score;
-                    update[0] = 0.0F;
-                    update[1] = 1.0F;
-                } else {
-                    const auto next_maximum = fmaxf(maximum, score);
-                    update[0] = expf(maximum - next_maximum);
-                    update[1] = expf(score - next_maximum);
-                    maximum = next_maximum;
+        float maximum = 0.0F;
+        float denominator_partial = 0.0F;
+        for (unsigned pass = 0; pass < 3; ++pass) {
+            for (std::size_t key_position = 0; key_position <= position; ++key_position) {
+                const auto kv_offset = (key_position * kv_heads + kv_head) * width;
+                float partial = 0.0F;
+                if (threadIdx.x < 8) {
+                    const auto span = width / 8 + (width % 8 != 0);
+                    const auto begin = threadIdx.x * span;
+                    const auto end = begin < width ? begin + min(span, width - begin) : width;
+                    for (std::size_t feature = begin; feature < end; ++feature) {
+                        partial = __fmaf_rn(q[feature], detail::widen(key[kv_offset + feature]), partial);
+                    }
                 }
-                update[2] = fmaf(update[0], update[2], update[1]);
+                const auto score = __fmul_rn(detail::block_sum(partial, reduction), scale);
+                if (pass == 0) {
+                    maximum = key_position == 0 ? score : fmaxf(maximum, score);
+                } else if (pass == 1) {
+                    if (threadIdx.x == key_position % 32) {
+                        denominator_partial = __fadd_rn(denominator_partial, expf(score - maximum));
+                    }
+                } else {
+                    if (threadIdx.x == 0) update[0] = expf(score - maximum) / update[2];
+                    __syncthreads();
+                    for (std::size_t feature = threadIdx.x; feature < width; feature += blockDim.x) {
+                        auto* sum = key_position < (position / 2 + 1) ? numerator : second_sum;
+                        sum[feature] = __fmaf_rn(update[0],
+                            detail::widen(value[kv_offset + feature]), sum[feature]);
+                    }
+                }
+                __syncthreads();
             }
-            __syncthreads();
-            for (std::size_t feature = threadIdx.x; feature < width; feature += blockDim.x) {
-                numerator[feature] = fmaf(update[1], detail::widen(value[kv_offset + feature]),
-                                          __fmul_rn(update[0], numerator[feature]));
+            if (pass == 1) {
+                const auto denominator = detail::block_sum(denominator_partial, reduction);
+                if (threadIdx.x == 0) update[2] = denominator;
+                __syncthreads();
             }
-            __syncthreads();
         }
         for (std::size_t feature = threadIdx.x; feature < width; feature += blockDim.x) {
-            output[task * width + feature] = detail::narrow<T>(numerator[feature] / update[2]);
+            output[task * width + feature] = detail::narrow<T>(__fadd_rn(numerator[feature], second_sum[feature]));
         }
         __syncthreads();
         if (tasks - task <= gridDim.x) break;
@@ -120,25 +121,27 @@ __global__ void attention(const T* query, const T* key, const T* value, T* outpu
 }
 
 template <class T>
-void submit(const void* query, const void* key, const void* value, void* output,
-            std::size_t positions, std::size_t query_heads, std::size_t kv_heads,
-            std::size_t width, cudaStream_t stream) {
+void submit(const void *query, const void *key, const void *value, void *output, std::size_t positions,
+            std::size_t query_heads, std::size_t kv_heads, std::size_t width, cudaStream_t stream,
+            std::size_t first_position) {
     const auto tasks = positions * query_heads;
-    const auto shared_bytes = (2 * width + detail::threads + 3) * sizeof(float);
+    const auto shared_bytes = (3 * width + detail::threads + 3) * sizeof(float);
     attention<<<detail::grid_blocks(tasks), detail::threads, shared_bytes, stream>>>(
-        static_cast<const T*>(query), static_cast<const T*>(key), static_cast<const T*>(value),
-        static_cast<T*>(output), tasks, query_heads, kv_heads, width);
+        static_cast<const T *>(query), static_cast<const T *>(key), static_cast<const T *>(value),
+        static_cast<T *>(output), tasks, query_heads, kv_heads, width, first_position,
+        static_cast<float>(1.0 / std::sqrt(static_cast<double>(width))));
 }
 }  // namespace
 
-void launch_attention(tensors::ElementType type, const void* query, const void* key,
-                      const void* value, void* output, std::size_t positions,
-                      std::size_t query_heads, std::size_t kv_heads,
-                      std::size_t width, cudaStream_t stream) {
+void launch_attention(tensors::ElementType type, const void *query, const void *key, const void *value,
+                      void *output, std::size_t positions, std::size_t query_heads, std::size_t kv_heads,
+                      std::size_t width, cudaStream_t stream, std::size_t first_position) {
     if (detail::is_bfloat16(type)) {
-        submit<__nv_bfloat16>(query, key, value, output, positions, query_heads, kv_heads, width, stream);
+        submit<__nv_bfloat16>(query, key, value, output, positions, query_heads, kv_heads, width, stream,
+                              first_position);
     } else {
-        submit<float>(query, key, value, output, positions, query_heads, kv_heads, width, stream);
+        submit<float>(query, key, value, output, positions, query_heads, kv_heads, width, stream,
+                      first_position);
     }
 }
 }  // namespace dolittle::kernels::cuda

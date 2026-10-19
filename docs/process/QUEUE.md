@@ -11,8 +11,22 @@
   Native and forced-PTX tiny/8B numerical scenarios pass on the 3090 Ti, as do
   device/loader integration, host units/sanitizers and CUDA memcheck. Exactly
   five integration scenarios remain. Detailed development records stay local.
-  Andrew accepted the slice and authorized commit/push on 2026-10-18. Deliver
-  complete accepted slices, not partial batches presented as completed slices.
+  Accepted and pushed to origin/main as `77f038c`. Deliver complete accepted
+  slices, not partial batches presented as completed slices.
+
+- Target generation is implemented and verified across the accepted tokenizer,
+  text, sampling, cache and execution families. Strict host/CUDA builds, 15 host
+  unit tests, Linux ASan/UBSan, tiny native/PTX generation, CUDA memcheck, archive,
+  device and site checks pass. Pinned tokenizer parity passes 405 ID vectors and
+  12 prompt cases. The integration inventory remains exactly five.
+  Independent numerical acceptance now passes against the restored oracle with
+  unchanged generator, original 8B fixture and limits (checksum verified).
+  Native and forced-PTX tiny FP32/BF16 and 8B pass; all 485 measured 8B numerical
+  comparisons have zero error. Exact cache/full-trace comparisons and tiny CUDA
+  memcheck pass. Engine fixes cover projection partitions, RMSNorm reduction
+  layouts and attention probability/value rounding. The earlier engine-aligned
+  reference claim remains withdrawn; only independent evidence closes this gate.
+
 
 - The project site is deployed at `dolittle.plainsight-systems.com`. The first
   build and deployment passed; HTTP content, Code link, and share metadata are
@@ -22,13 +36,10 @@
 
 ## Next
 
-1. Commit and push the accepted first-forward implementation, including strict
-   builds, editor configuration and readable algorithm/implementation comments.
-2. Design the next complete target-generation slice: exact tokenizer/text
-   protocol, persistent KV storage and token selection/termination. Keep model,
-   tokenizer, cache and backend variation in their existing families. Query both
-   C++ corpora for header design and again for implementation; retain contracts,
-   algorithm responsibilities and exact applied citations in file openings.
+1. Commit and push the accepted target-generation slice, as authorized by Andrew.
+   Keep the independent reference and original limits fixed.
+2. Make cleanup a separate commit before further implementation. Development
+   diagnostics and reports remain in ignored local storage.
 3. Configure host NVIDIA Container Toolkit access before claiming Docker GPU
    execution. The digest-pinned source build and native Linux execution work;
    this setup limitation does not invalidate the recorded native checks.

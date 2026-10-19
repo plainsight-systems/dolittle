@@ -6,11 +6,11 @@ they do not launch systems or depend on private implementation details.
 Integration tests cover real component interactions and are capped at five
 across the repository. A test runner's name does not determine test scope.
 
-The forward-pass sources and comparison harness are implemented. Builds and
+The full-forward and cached target-generation paths are implemented. Builds and
 unit checks alone do not establish transformer equivalence: use the independent
 GPU scenarios below. NLA computation and the browser/API remain later work.
 
-The suite contains **eleven C++ unit executables, twelve Python unit tests and
+The suite contains **fifteen C++ unit executables, twelve Python unit tests and
 five integration scenarios**. Fixtures and full weights stay in ignored caches
 with recorded revisions, hashes and reference environment details.
 
@@ -39,7 +39,7 @@ ctest --preset host-units
 CMake exports `compile_commands.json` into each build directory. The VS Code
 C/C++ extension uses CMake Tools as its configuration provider, so compiler,
 language standard, defines and includes come from the selected targets. This
-includes fetched JSON headers, OpenSSL and CUDA where enabled. No manually
+includes fetched JSON/Unicode headers, OpenSSL and CUDA where enabled. No manually
 maintained include-path list or machine-specific SDK path is checked in.
 See [Microsoft's configuration-provider documentation](https://code.visualstudio.com/docs/cpp/configure-intellisense).
 
@@ -59,9 +59,11 @@ GNU line markers. These settings apply to tests as well as engine libraries.
 ## Host unit tests
 
 The root CMake build requires C++20, CMake 3.24+ and OpenSSL 3 development files.
-It compiles with strict warnings and fetches SHA-pinned nlohmann/json 3.12.0 on
-initial configuration. These support hashing and metadata parsing; model
-computation is implemented directly. CUDA and model downloads are unnecessary
+It compiles with strict warnings and fetches SHA-pinned nlohmann/json 3.12.0,
+utf8proc 2.10.0 and Oniguruma 6.9.10 on initial configuration. A C compiler is
+also required for the Unicode libraries. These supply metadata parsing, NFC and
+Unicode regex primitives; hashing uses OpenSSL. BPE and model computation are
+implemented directly. Dependency licenses are recorded in `NOTICE`. CUDA and model downloads are unnecessary
 for host unit checks. The standard entry point is:
 
 ```sh
@@ -83,6 +85,10 @@ workflows hidden behind a unit label.
 
 | Unit | Contracts exercised |
 | --- | --- |
+| Categorical sampling | Greedy ties, top-k/top-p boundaries, masked inputs, one-draw RNG semantics and independent streams |
+| Sequence progression | Emitted versus consumed counts, stop precedence and final-token consumption |
+| Byte BPE | Ranked merges, normalization, literal added tokens, raw-byte provenance and bounds |
+| Qwen3 chat | Exact prompt bytes, optional system messages, thinking modes and delimiter classification |
 | Tensor layouts | Scalar/empty/strided extents, byte containment, invalid metadata and arithmetic overflow |
 | BF16 | All 65,536 stored encodings, exact widening/serialization, nearest-even boundaries and canonical NaNs |
 | Observation preparation | Configurable sites/positions, owned metadata, moves and independent byte/row budgets |
@@ -123,12 +129,12 @@ The repository uses **all five integration slots**:
 | Site publication | Real Hugo build and publication boundary under a deployment subpath |
 | `integration.checkpoint_archive` | Real file integrity, root containment, mapped storage and Qwen3 binding |
 | `integration.device` | CUDA resource ownership, queue completion and buffer transfers |
-| `integration.forward_tiny` | Tiny independent FP32/BF16 forward fixtures through the CUDA path |
-| `integration.forward_8b` | Pinned Qwen3-8B forward fixture through the CUDA path |
+| `integration.generation_tiny` | Tiny FP32/BF16 full/cached computation, generation and stop/capture completion |
+| `integration.generation_8b` | Pinned tokenizer/protocol and Qwen3-8B full/cached generation comparison |
 
-The device scenario requires a CUDA build and NVIDIA GPU. The two forward
+The device scenario requires a CUDA build and NVIDIA GPU. The two generation
 scenarios additionally require generated fixtures; CTest registers them when
-`DOLITTLE_FORWARD_FIXTURES` is configured. `scripts/check.py gpu` accepts the
+`DOLITTLE_GENERATION_FIXTURES` is configured. `scripts/check.py gpu` accepts the
 fixture root directly and runs the three GPU scenarios. This inventory records
 scope, not a claim that every scenario has passed. Replace existing coverage
 before adding another integration workflow.
@@ -145,6 +151,51 @@ ctest --test-dir build/host --output-on-failure -R integration.checkpoint_archiv
 ```
 
 ## CUDA build and numerical verification
+
+### Target-generation verification
+
+The two generation scenarios retain independent full-forward comparisons and
+extend them through uneven cached prefill and one-token decode. The generator
+records a four-token greedy trace, then recomputes its complete consumed prefix
+without caching to produce logits and raw observations at every position.
+Oracle arithmetic is explicit in fixture provenance; numerical budgets do
+not adapt to custom-engine results. The harness compares chunk-final logits and every captured row,
+including the final emitted token, against those independent values.
+It also executes the same complete trace without caching and requires each
+cached chunk's logits and captures to match that path byte for byte. This
+separates cache/positioning regressions from differences against the independent
+reference. Numerical failures retain their output/position, measured error and
+fixed limit in diagnostics and cause a nonzero exit.
+
+The acceptance oracle uses BF16/FP32 storage and fixed-shape independent FP32
+library projections and dense causal attention. It requires stored-byte
+invariance across prefix lengths and peer-batch positions. Engine changes
+must pass that reference and the original budgets. Agreement with a rewritten reference that follows the engine's
+arithmetic cannot substitute for this gate.
+
+It also checks capture-on/off and one-row/chunked equivalence. Tiny workloads
+exercise stop IDs, zero generation budget, cooperative cancellation and a
+selector failure, preserving completed captures. Exact greedy IDs are checked
+for these bounded fixtures; this is not a claim of identical sampled prose
+across arbitrary floating-point implementations. Categorical RNG semantics are
+covered by isolated unit contracts, independently of Transformers' RNG.
+
+The 8B scenario verifies 405 exact reference tokenizer ID vectors and 12 prompt
+templates (thinking enabled/disabled, absent/empty/nonempty system message).
+Vectors include NFC, Unicode scripts, whitespace, embedded NUL, contractions,
+added tokens, overlapping byte merges and seeded Unicode strings. The fixture
+records tokenizers 0.22.2; the native Unicode dependencies are source-pinned.
+Passing these vectors establishes bounded compatibility evidence, not an
+exhaustive proof for every Unicode string or future tokenizer version.
+
+Reports separate preparation/upload, host-ready prefill/decode calls, complete
+generation and diagnostic comparison time. They include admitted device bytes
+and actual capture/logit readback byte counts. A host-ready call includes host
+allocation, submission, transfer and completion wait; it is not isolated kernel
+time. Isolating transfer/wait costs and representative long-context profiling
+remain performance work. Reports and measurements stay in ignored storage.
+
+### Building and running the scenarios
 
 On Linux, build from the digest-pinned CUDA 13.2.0/Ubuntu 24.04 environment:
 
@@ -163,8 +214,8 @@ execution. Container GPU execution is unverified. With independent fixtures
 prepared in the pinned reference environment, run both paths:
 
 ```sh
-python3 scripts/check.py gpu --fixtures .cache/forward-fixtures
-python3 scripts/check.py gpu --fixtures .cache/forward-fixtures --force-ptx
+python3 scripts/check.py gpu --fixtures .cache/generation-fixtures
+python3 scripts/check.py gpu --fixtures .cache/generation-fixtures --force-ptx
 ```
 
 These commands write separate per-scenario JSON reports under `.cache/checks`.
@@ -173,24 +224,25 @@ provided by [forward_reference.py](../scripts/validation/forward_reference.py);
 see [script usage](../scripts/README.md#independent-reference-fixtures).
 
 The numerical scenarios cover selected logits and block observations, causal
-prefix behavior, capture-on/off equivalence and owned result lifetime. Exact
-consumed token IDs avoid mixing tokenizer correctness into this slice. The
+prefix behavior, cached generation, capture-on/off equivalence and owned result
+lifetime. Tokenizer parity is checked before device execution. The
 reference records environment, revisions, weights and numerical tolerances
-before acceptance. Its dense FP32 attention-intermediate policy and stock-eager
-sensitivity comparison are explicit; reduced-precision equations must not be
-assumed identical merely because their algebra matches.
+before acceptance. Its accumulation and rounding policies and stock-eager
+sensitivity comparison are explicit; floating-point implementations must not
+be assumed identical merely because their algebra matches.
 
-The 8B fixtures exercise full five-token, three-token prefix and alternate
-five-token inputs, observing block input/output at 0, 18, 24 and 35. These
+The 8B fixtures retain five-token, three-token prefix and alternate-token
+comparisons, then generate from the real thinking-enabled chat prompt
+“What is 2 + 2?”. They observe block input/output at 0, 18, 24 and 35. These
 scenarios establish bounded numerical checks, not long-context coverage or
 performance on every supported GPU. Keep generated reports in ignored caches.
 
-CUDA memory checking can reuse the tiny forward scenario:
+CUDA memory checking can reuse the tiny generation scenario:
 
 ```sh
 compute-sanitizer --tool memcheck --error-exitcode 99 \
-  build/cuda/test_forward .cache/forward-fixtures/tiny-fp32/fixture.json \
-  .cache/forward-fixtures/tiny-bf16/fixture.json
+  build/cuda/test_generation .cache/generation-fixtures/tiny-fp32/fixture.json \
+  .cache/generation-fixtures/tiny-bf16/fixture.json
 ```
 
 ## Site verification

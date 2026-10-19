@@ -65,6 +65,23 @@
  * cpp-guidelines ES.103 (#res-overflow): check dimension and metadata extents.
  * cpp-perf-guidelines CDSA.32: generate the immutable recipe once per workload.
  * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
+ *
+ * Incremental Qwen3 recipe: use the same block equations for
+ * B new rows beginning at absolute position S. Q and K RoPE use S+i rather
+ * than restarting at zero. In each block, expose rotated K and unrotated V as
+ * append sources; causal attention uses the persistent prefix plus current rows.
+ * Only queries/residuals for the new B rows are computed. The selected final
+ * new row produces next-token logits; captures label absolute positions S+i.
+ * The cache description comes from block_count, kv_heads and head_width. No
+ * assumption about block 24, fixed Hkv or a contiguous device pointer belongs
+ * in the mathematical recipe. Backend preparation selects a supported view.
+ * The zero-prefix case is ordinary causal prefill; chunked prefill and decode
+ * must agree with full_forward on identical consumed tokens within fixed
+ * numerical bounds, including BF16 intermediate rounding.
+ * Corpus consultation, header design and implementation, 2026-10-18:
+ * cpp-guidelines I.7 (#ri-post): absolute position and unchanged block equations.
+ * cpp-perf-guidelines CDSA.32: prepare chunk/decode recipe shapes once.
+ * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
  */
 #pragma once
 

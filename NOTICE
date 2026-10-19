@@ -10,9 +10,31 @@ under CC BY 4.0. Suggested attribution:
 Third-party components and weights
 =================================
 
-No third-party runtime implementation or model weights are bundled in this
-repository. Linked research and model repositories are
-references. Record licenses and attribution here as dependencies are selected.
+Model weights are not bundled. The build fetches these source-pinned helpers:
+
+- nlohmann/json 3.12.0: MIT, https://github.com/nlohmann/json
+  Metadata parsing; its source archive retains LICENSE.MIT.
+- utf8proc 2.10.0: MIT and Unicode data terms,
+  https://github.com/JuliaStrings/utf8proc
+  NFC normalization only; full notices: docs/licenses/utf8proc-LICENSE.md.
+- Oniguruma 6.9.10: BSD 2-Clause, https://github.com/kkos/oniguruma
+  Unicode regex matching only; full notice: docs/licenses/oniguruma-COPYING.
+
+The host links OpenSSL 3 (Apache-2.0) for SHA-256. CUDA builds use NVIDIA's
+CUDA Toolkit under its own terms. Dependency source archives/toolkit packages
+retain their upstream licenses; these are not relicensed as project code.
+BPE, sampling, cache management and transformer computation are implemented
+in Dolittle rather than delegated to a tokenizer or inference runtime.
+
+Qwen3 protocol fixture
+=====================
+
+tests/support/text_fixture.h contains tokenizer pipeline/added-token metadata
+and the chat template from Qwen/Qwen3-8B, revision
+b968826d9c46dd6066d109eabc6255188de91218, distributed under Apache-2.0.
+Its vocabulary/merges are replaced with a small test alphabet and merge set.
+Source: https://huggingface.co/Qwen/Qwen3-8B
+License: docs/licenses/Qwen3-Apache-2.0.txt.
 
 IBM Plex fonts
 ==============

@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 # Export the actual target flags/includes for editor and analysis tooling.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-project(dolittle LANGUAGES CXX)
+project(dolittle LANGUAGES C CXX)
 
 # Shared host preparation and verified checkpoint loading.
 include(FetchContent)
@@ -13,8 +13,27 @@ FetchContent_Declare(nlohmann_json
 set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(nlohmann_json)
 find_package(OpenSSL 3 REQUIRED COMPONENTS Crypto)
+# Unicode support only; token matching/BPE and model computation are our own code.
+set(UTF8PROC_INSTALL OFF CACHE BOOL "" FORCE)
+set(UTF8PROC_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(utf8proc
+    URL https://codeload.github.com/JuliaStrings/utf8proc/tar.gz/refs/tags/v2.10.0
+    URL_HASH SHA256=6f4f1b639daa6dca9f80bc5db1233e9cbaa31a67790887106160b33ef743f136
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(BUILD_TEST OFF CACHE BOOL "" FORCE)
+set(INSTALL_DOCUMENTATION OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(oniguruma
+    URL https://codeload.github.com/kkos/oniguruma/tar.gz/refs/tags/v6.9.10
+    URL_HASH SHA256=ad92309d0d13eebc27f6592e875f3efbfa3dda2bf6da5952e00f0a2120c921a8
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+FetchContent_MakeAvailable(utf8proc oniguruma)
 
 add_library(dolittle_host STATIC
+    src/tokenizers/byte_bpe.cpp
+    src/text/qwen3_chat.cpp
+    src/inference/sampling/categorical.cpp
+    src/inference/progression.cpp
     src/tensors/tensor.cpp
     src/tensors/representations/bf16.cpp
     src/inference/observations.cpp
@@ -29,7 +48,7 @@ add_library(dolittle_host STATIC
 )
 target_include_directories(dolittle_host PUBLIC "${PROJECT_SOURCE_DIR}/src")
 target_compile_features(dolittle_host PUBLIC cxx_std_20)
-target_link_libraries(dolittle_host PUBLIC nlohmann_json::nlohmann_json OpenSSL::Crypto)
+target_link_libraries(dolittle_host PUBLIC nlohmann_json::nlohmann_json OpenSSL::Crypto utf8proc onig)
 set_target_properties(dolittle_host PROPERTIES CXX_EXTENSIONS OFF)
 
 function(dolittle_warnings target)
@@ -49,7 +68,7 @@ if(BUILD_TESTING)
     set_target_properties(dolittle_numerical PROPERTIES CXX_EXTENSIONS OFF)
     dolittle_warnings(dolittle_numerical)
 
-    foreach(unit IN ITEMS tensor bf16 observations storage_plan numerical
+    foreach(unit IN ITEMS sampling progression byte_bpe qwen3_chat tensor bf16 observations storage_plan numerical
                           operations model_recipe qwen3_model safetensors qwen3_checkpoint)
         add_executable(test_${unit} tests/core/test_${unit}.cpp)
         target_include_directories(test_${unit} PRIVATE "${PROJECT_SOURCE_DIR}")
@@ -92,7 +111,9 @@ if(DOLITTLE_CUDA)
         src/kernels/cuda/attention.cu
         src/kernels/cuda/embedding.cu
         src/kernels/cuda/elementwise.cu
-        src/inference/executor.cpp)
+        src/inference/executor.cpp
+        src/inference/cache/contiguous.cpp
+        src/inference/generation.cpp)
     target_link_libraries(dolittle_cuda PUBLIC dolittle_host CUDA::cudart)
     target_compile_features(dolittle_cuda PUBLIC cxx_std_20)
     set_target_properties(dolittle_cuda PROPERTIES
@@ -111,18 +132,18 @@ if(DOLITTLE_CUDA)
         dolittle_warnings(test_device)
         add_test(NAME integration.device COMMAND test_device)
         set_tests_properties(integration.device PROPERTIES LABELS integration RUN_SERIAL TRUE)
-        add_executable(test_forward tests/gpu/test_forward.cpp tests/gpu/forward_reference.cpp)
-        target_include_directories(test_forward PRIVATE "${PROJECT_SOURCE_DIR}")
-        target_link_libraries(test_forward PRIVATE dolittle_cuda dolittle_numerical)
-        dolittle_warnings(test_forward)
-        set(DOLITTLE_FORWARD_FIXTURES "" CACHE PATH "Independent forward fixture root")
-        if(DOLITTLE_FORWARD_FIXTURES)
-            add_test(NAME integration.forward_tiny COMMAND test_forward
-                "${DOLITTLE_FORWARD_FIXTURES}/tiny-fp32/fixture.json"
-                "${DOLITTLE_FORWARD_FIXTURES}/tiny-bf16/fixture.json")
-            add_test(NAME integration.forward_8b COMMAND test_forward
-                "${DOLITTLE_FORWARD_FIXTURES}/qwen3-8b-bf16/fixture.json")
-            set_tests_properties(integration.forward_tiny integration.forward_8b
+        add_executable(test_generation tests/gpu/test_generation.cpp tests/gpu/forward_reference.cpp)
+        target_include_directories(test_generation PRIVATE "${PROJECT_SOURCE_DIR}")
+        target_link_libraries(test_generation PRIVATE dolittle_cuda dolittle_numerical)
+        dolittle_warnings(test_generation)
+        set(DOLITTLE_GENERATION_FIXTURES "" CACHE PATH "Independent generation fixture root")
+        if(DOLITTLE_GENERATION_FIXTURES)
+            add_test(NAME integration.generation_tiny COMMAND test_generation
+                "${DOLITTLE_GENERATION_FIXTURES}/tiny-fp32/fixture.json"
+                "${DOLITTLE_GENERATION_FIXTURES}/tiny-bf16/fixture.json")
+            add_test(NAME integration.generation_8b COMMAND test_generation
+                "${DOLITTLE_GENERATION_FIXTURES}/qwen3-8b-bf16/fixture.json")
+            set_tests_properties(integration.generation_tiny integration.generation_8b
                 PROPERTIES LABELS integration RUN_SERIAL TRUE)
         endif()
     endif()

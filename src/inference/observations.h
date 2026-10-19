@@ -46,6 +46,19 @@
  * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
  * cpp-perf-guidelines GPU.1: batch required readbacks, preserve device intermediates.
  * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
+ *
+ * Incremental results: OwnedCapture carries completed incremental rows in their
+ * original storage type. For a chunk starting at S, resolve local row i to
+ * absolute position S+i before publication. Append chunks in increasing position
+ * order; failed chunks publish no rows. The executor copies each completed chunk
+ * to owned host storage at its existing readback boundary, so a later GPU failure
+ * cannot erase captures already delivered. AllPositions means all consumed
+ * positions, not unused admitted capacity. Explicit future positions remain
+ * unfulfilled on early stop and never receive fabricated data.
+ * Corpus consultation, header design and implementation, 2026-10-18:
+ * cpp-guidelines I.7 (#ri-post): owned rows have completed bytes and absolute IDs.
+ * cpp-perf-guidelines GPU.1: batch row transfers with required step readbacks.
+ * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
  */
 #pragma once
 
@@ -84,6 +97,14 @@ struct CapturedRows {
     models::ObservationSite site;
     std::span<const models::TokenPosition> positions;
     std::span<const std::byte> bytes;
+};
+
+// Owned incremental capture result. Unlike CapturedRows, this retains its bytes
+// and absolute positions across later steps and executor/device destruction.
+struct OwnedCapture {
+    models::ObservationSite site;
+    std::vector<models::TokenPosition> positions;
+    std::vector<std::byte> bytes;
 };
 
 class ObservationPlan {

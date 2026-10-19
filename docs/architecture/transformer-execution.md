@@ -101,10 +101,55 @@ BF16 is a stored-bit format. Host conversion widens exactly to FP32 and narrows
 with round-to-nearest, ties-to-even; raw capture copies perform no conversion.
 Each CUDA operation states its FP32 intermediates and BF16 rounding boundaries.
 These must be checked against the reference rather than assuming that equal
-algebra implies equal reduced-precision execution. Initial projection uses
-FP32 accumulation without silently enabling TF32. Initial attention streams
-causal K/V tiles with an online softmax state and no full score matrix. Kernel
-tile choices are private tuning choices, not contracts asserted by unit tests.
+algebra implies equal reduced-precision execution. The CUDA implementation uses
+fixed FP32 reductions, with no TF32 or FP64 tensor accumulation:
+
+- Projection: use 16 strided partials when input width is at most 4,096 and
+  output width exceeds 1,024; otherwise 32. Partial `t` visits features `t+P*k` in ascending `k`, with one FP32 FMA
+  per feature. Merge upper halves into lower halves at offsets `P/2,...,1`,
+  then round to storage. These choices depend on feature widths, never row count.
+- RMSNorm: each of 32 lanes owns four sums. Component `c` in lane `t` sums
+  squared features `4*t+c+128*k` for widths above 128, or `t+32*c`
+  for widths at most 128, rounding squares and additions separately.
+  Combine the four sums left to right, then reduce lanes with ascending shuffle
+  offsets 1, 2, 4, 8, 16. Multiply by FP32 `1/width`, add epsilon and use FP32
+  reciprocal square root. Preserve both normalization/learned-scale storage
+  boundaries.
+- Attention scores: eight contiguous feature ranges of `ceil(d/8)` features,
+  each accumulated with FP32 FMA; merge at offsets 4, 2, 1. Multiply by the
+  inverse square root of head width, rounded once to FP32 on the host.
+- Attention softmax/value sum: visit visible keys in three passes to find the
+  maximum, sum exponentials, and accumulate probability-weighted values.
+  The exponential sum uses 32 strided partials and a descending half tree.
+  **Divide each exponential by that sum in FP32 before multiplying V.**
+  Accumulate values in two contiguous key ranges, the first containing
+  `ceil(visible_keys/2)` keys; each range uses ascending FP32 FMA. Add the
+  two sums in FP32, then round to storage. Recomputing scores costs three
+  QK passes but retains O(d) state instead of a sequence-sized probability
+  buffer. Partition boundaries depend on the query's actual causal prefix,
+  which is identical for that query in full and cached execution.
+
+
+These partitions remain independent of launch geometry, occupancy, batch size
+and cache chunks. Scheduling and storage optimizations must preserve their
+ordered operations. Numerical changes require comparison against the existing
+independent oracle: fixed-shape library projections, dense causal attention and
+stock Transformers normalization. That oracle and its acceptance limits are
+not derived from these CUDA reductions. Correctness includes both agreement
+within those limits and exact full/cached engine invariance.
+
+For a fixed build/device, an existing token's result must not change when future
+tokens or other requests change the execution shape. In the initial single-
+sequence engine this includes prefill chunk boundaries and full versus cached
+execution. The independent oracle must satisfy the same invariance while using
+the same storage/accumulation precision while remaining independent of the
+engine's reduction order. Projection reductions are fixed per row, and
+attention reductions include only each query's causal prefix.
+Fixture generation checks shared storage bytes across prefix lengths and peer
+batch positions. Future multi-request engine batching must preserve this contract;
+current peer-batch evidence applies to the oracle, not an unimplemented engine
+batch scheduler. Cross-GPU reproducibility remains a separate requirement.
+
 
 ```mermaid
 flowchart TD

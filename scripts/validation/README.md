@@ -76,15 +76,15 @@ head to the last block's final-token state. These conventions differ from the
 4B adapters and are checked against the checkpoint metadata and cited
 reference source. Full outputs and per-phase memory/timings are saved.
 
-## Independent forward-pass fixtures
+## Independent full-forward and generation fixtures
 
 `forward_reference.py` generates expected values without importing or executing
 Dolittle. Use the same pinned environment above (PyTorch 2.7.1+cu128,
 Transformers 4.57.3). From the repository root:
 
 ```sh
-.venv-validation/bin/python scripts/validation/forward_reference.py --kind tiny --output .cache/forward-fixtures
-.venv-validation/bin/python scripts/validation/forward_reference.py --kind actual --output .cache/forward-fixtures --actual-checkpoint .cache/validation-8b/models/Qwen--Qwen3-8B
+.venv-validation/bin/python scripts/validation/forward_reference.py --kind tiny --output .cache/generation-fixtures
+.venv-validation/bin/python scripts/validation/forward_reference.py --kind actual --output .cache/generation-fixtures --actual-checkpoint .cache/validation-8b/models/Qwen--Qwen3-8B
 ```
 
 The tiny FP32 and BF16 bundles use seed 20261018, three blocks, residual width
@@ -94,17 +94,36 @@ projection width different from the residual width. Cases cover a 17-token
 sequence, its five-token prefix, and different tokens at the original length.
 The actual 8B BF16 bundle uses five-token, three-token-prefix and alternate-token
 cases. Each records selected logits and block input/output rows at the first,
-middle and last blocks, plus block 24 where present. No cache, sampling or NLA
-execution is involved.
+middle and last blocks, plus block 24 where present. The generation case adds
+a real thinking-enabled 8B prompt (a small ID prompt for tiny models), four
+greedy emissions and a complete no-cache recomputation of that consumed trace.
+Every position has reference logits/captures. The actual bundle also carries
+405 reference tokenizer ID vectors and 12 exact prompt templates. No Dolittle
+code, cache or NLA execution is used to produce reference values.
 
-The reference retains Transformers' model equations, RMSNorm, RoPE and SiLU.
-Its one explicit override is eager attention: widen Q/K/V to FP32, compute
-dense scores and softmax with PyTorch, accumulate weighted values in FP32,
-then cast the attention output to model storage. This matches the accepted
-engine arithmetic contract. Stock Transformers BF16 eager attention also rounds
-scores and probabilities to BF16; it is a different numerical policy. TF32 and
-BF16 reduced-precision matmul reductions are disabled. The generator records
-the override source and measures stock-eager sensitivity separately.
+CUDA is the default reference device; `--device cpu` supports reference
+generation without GPU residency. Device provenance remains in the fixture;
+CPU reference generation is not evidence that the CUDA engine executed.
+
+The acceptance oracle retains BF16 storage for the actual model and FP32
+accumulation. Each projection uses a fixed one-row FP32 library call; attention
+uses independent dense FP32 scores, softmax and weighted sums for each query's
+causal prefix. RMSNorm, RoPE and SiLU remain the pinned Transformers operations.
+This reference must remain independent of the engine's selected reduction
+order. Changing it to match engine arithmetic does not resolve a failed
+independent comparison. TF32 and FP64 accumulation are not used.
+
+Before writing any fixture, the generator requires original storage bytes for
+all shared logits and selected captures to match at prefix lengths 1, prompt
+length and complete-trace length minus one. It also evaluates the trace in both
+slots of a two-sequence batch with an unrelated peer. Per-row byte hashes include
+signed zero. These checks establish invariance for the fixture/environment;
+they do not establish cross-GPU reproducibility. All arithmetic override sources and every
+invariance result are recorded in provenance.
+
+Stock Transformers BF16 eager attention also rounds scores and probabilities to
+BF16. Its different policy is measured separately, never used to select limits.
+FP64 experiments remain diagnostic evidence and do not generate acceptance fixtures.
 
 Acceptance budgets were fixed before custom-engine results. For each output,
 let `peak` be its largest absolute reference value; both error bounds must pass:
@@ -122,20 +141,18 @@ Use each output's recorded bounds; bundle-wide maxima are only conservative
 summaries. Large target residual outliers make those summaries especially loose.
 Do not change bounds after observing an engine failure merely to admit it.
 
-In the generated full cases, stock eager versus the FP32-attention reference
-gave identical tiny FP32 outputs. Tiny BF16 logits differed by maximum absolute
-error `0.0009765625`, relative L2 `0.00244770`; actual 8B logits differed by
-`0.3984375` and `0.0203072`. Actual block-24 output differed by `0.625` and
-`0.000156392`. These are **reference-policy differences**, not engine errors,
-and did not determine or change the acceptance budgets.
+The 3% target limit remains a required acceptance gate, not an empirically
+established bound on variation between BF16 implementations. No automatic
+tolerance fitting occurs in this generator. Generation comparisons require each individual row to pass,
+as well as retaining aggregate diagnostics and exact cache/full-trace equality.
 
 Each bundle contains standard configuration/weight artifacts and `fixture.json`
 with artifact sizes/SHA-256 hashes, exact tokens/selections, FP32-decoded values,
 original storage types, per-output tolerances, generator/source hashes, package
 versions, device/driver details and attention policy. The actual model uses
-revision `b968826d9c46dd6066d109eabc6255188de91218`; its config, index and five
+revision `b968826d9c46dd6066d109eabc6255188de91218`; its config, tokenizer/protocol artifacts, index and five
 shards are verified against `models-8b.json`, then hardlinked into the output
 bundle. Keep that output on the checkpoint's filesystem and keep linked artifacts
 immutable. Fixture outputs stay in the ignored cache; the actual JSON is about
-25 MiB. GPU execution and comparison belong to the separate forward integration
+100 MiB including complete generation rows. GPU execution and comparison belong to the generation integration
 scenario, not to this generator or the isolated unit tests.

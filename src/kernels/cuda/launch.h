@@ -4,6 +4,9 @@
  * tensor byte extents, aligned device pointers on one device and a live ordered
  * stream. Output does not overlap inputs. Tokens are validated uint32 indices;
  * RoPE width is even, positions do not overflow; Hq is divisible by Hkv.
+ * Attention first_position S makes local query i attend through key S+i.
+ * Its K/V pointers contain every initialized row [0,S+B); query/output store
+ * only the B active rows. S=0 supplies the existing full-forward behavior.
  * Pointers borrow storage until stream completion. Calls enqueue only: no tensor
  * allocation, transfer, wait or ownership change. Unsupported type throws
  * invalid_argument; caller checks immediate CUDA launch status and waits for
@@ -48,10 +51,9 @@ void launch_rms_norm(tensors::ElementType type, const void* input,
 void launch_rotary(tensors::ElementType type, const void* input, void* output,
                    std::size_t positions, std::size_t heads, std::size_t width,
                    std::size_t first_position, double theta, cudaStream_t stream);
-void launch_attention(tensors::ElementType type, const void* query, const void* key,
-                      const void* value, void* output, std::size_t positions,
-                      std::size_t query_heads, std::size_t kv_heads,
-                      std::size_t width, cudaStream_t stream);
+void launch_attention(tensors::ElementType type, const void *query, const void *key, const void *value,
+                      void *output, std::size_t positions, std::size_t query_heads, std::size_t kv_heads,
+                      std::size_t width, cudaStream_t stream, std::size_t first_position = 0);
 void launch_embedding(tensors::ElementType type, const std::uint32_t* tokens,
                       const void* weight, void* output, std::size_t rows,
                       std::size_t width, cudaStream_t stream);

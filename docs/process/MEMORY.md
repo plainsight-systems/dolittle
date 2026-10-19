@@ -4,9 +4,9 @@
 
 - **Project:** Dolittle, named after Doctor Dolittle.
 - **Parent entity:** Plainsight Systems LLC; no separate operating brand.
-- **Status:** project site and complete first no-cache C++/CUDA forward slice.
-  Native and forced-PTX numerical checks pass on the 3090 Ti; generation, NLA
-  execution and live application remain later slices.
+- **Status:** project site, verified first forward slice and implemented target
+  generation. Independent numerical acceptance passes on the pinned 3090 Ti
+  workload. NLA execution and the live application remain later slices.
 - **Remote:** `origin` is https://github.com/plainsight-systems/dolittle.git.
   The site’s Code link points to this repository. Andrew authorized the first
   push and Pages deployment on 2026-10-16.
@@ -160,10 +160,56 @@ runtime or performance result.
 
 ## Current implementation
 
-The engine implements verified Qwen3 checkpoint loading and a complete CUDA
-forward pass with current-sequence K/V, configurable observation sites and owned
-results. Tokenization, persistent caching, generation, NLA execution and the
-application remain future work. Shared execution must not hardcode block 24.
+The engine implements verified Qwen3 checkpoint loading, full-forward CUDA
+execution and target generation: byte BPE, Qwen3 single-turn protocol,
+categorical/greedy sampling, contiguous persistent KV, chunked prefill/decode,
+stop handling and final consumed-token captures. Observation sites remain
+configurable; shared execution does not hardcode block 24. NLA execution and
+the application remain future work.
+
+The first forward slice is accepted and pushed as `77f038c`. Target generation
+and subsequent kernel corrections are verified and accepted for commit/push.
+The restored independent
+BF16/FP32 oracle now passes: tiny FP32, tiny BF16 and pinned Qwen3-8B pass native
+and forced-PTX execution on the 3090 Ti. All 485 measured 8B numerical comparisons
+have zero absolute/relative error; cached/full-trace bytes and expected generated
+IDs also agree. Strict builds, 15 host units and tiny CUDA memcheck pass.
+
+The oracle generator, original 8B fixture and original limits stayed unchanged
+through the fix, verified by checksum. The engine corrections preserve projection
+partitions by feature widths, distinct head/residual RMSNorm reduction orders,
+and FP32 softmax probabilities before value accumulation. Attention recomputes
+scores in three passes with O(d) shared state. The numerical contract and kernel
+headers describe these choices; long contexts and other hardware remain unmeasured.
+
+The earlier exact-match claim from rewriting the reference to follow engine
+arithmetic remains withdrawn. The accepted evidence above comes from the restored
+independent reference: fixed one-row library projections, dense per-query causal
+FP32 attention, and stock Transformers RMSNorm/RoPE/SiLU.
+
+Keep the independent reference and original error-budget rules fixed while
+correcting the engine. A separately written reference deliberately aligned to
+engine arithmetic checks conformance, not independent fidelity, and cannot
+replace this acceptance gate. FP64 and loosened limits remain rejected as
+workarounds. Shape invariance and exact cache/full-trace equality remain
+required but do not substitute for independent numerical acceptance.
+
+Detailed diagnostics and the withdrawn conformance reference remain ignored.
+Andrew authorized committing and pushing this slice, followed by a separate
+cleanup commit before further implementation.
+
+Unicode helpers are utf8proc 2.10.0 and Oniguruma 6.9.10, source-hash pinned.
+They supply NFC and regex matching; BPE and inference remain direct code.
+The pure progression rule is linked in `inference/progression.cpp` so its
+invariants can be tested without CUDA. The integration inventory stays at five:
+tiny/8B generation scenarios replace the former forward scenarios.
+
+The initial cache lifecycle is an accepted simple baseline: allocate contiguous
+capacity once per prompt/response turn, reuse it during generation, then release
+after final captures and pending GPU work complete. It is not optimized for
+reuse across turns; per-turn allocation cost and unused reserved capacity are
+known tradeoffs. Evaluate representative runs before introducing allocation
+pooling, prefix reuse or another cache strategy; no optimality is claimed.
 
 Implementation records and validation reports belong in gitignored `.local/`.
 Keep this file for settled project decisions and the queue for concise work
