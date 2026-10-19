@@ -59,10 +59,34 @@
  * host access explicit and confine necessary native API operations.
  * cpp-perf-guidelines COPY.7: borrow spans/references without hidden payload copies.
  * Source: guidelines/copy-move/COPY.7-eliminate-hidden-copies.md.
+ *
+ * Resident execution: upload weights once into aligned parameter-ID slots and
+ * retain one ordered queue. A sequence leases that state and owns fresh KV,
+ * scratch and staging; shared internal ownership guards pending resource lifetime
+ * while the public owner/sequence destruction order remains explicit. Reject a
+ * second live sequence. Preparation failure releases the lease; execution failure
+ * poisons it and the resident state. The legacy overload still owns private weights.
+ * Each supplied replacement is validated against the explicit embedding boundary.
+ * After lookup, upload D*b bytes from separate stable host staging to row p-S
+ * exactly when S <= p < S+B, before block-0 reads or observation copies. Commit
+ * replacement only with chunk completion. Full-forward maps the recipe producer
+ * to its expanded schedule index, so inserted observation gathers cannot move the
+ * injection after a consumer. Token-upload and replacement staging never overlap.
+ * Weights use 256-byte parameter offsets; kernel alignment is checked against
+ * those offsets. No per-token weight upload or extra per-block wait is introduced.
+ * Corpus consultation, implementation (both servers queried, full rules read),
+ * 2026-10-19: cpp-guidelines R.1 (#rr-raii) ties resources to their owning phase;
+ * I.7 (#ri-post) makes completion, provenance and failure effects explicit.
+ * cpp-perf-guidelines GPU.1 keeps intermediate embeddings on device and budgets
+ * required transfers; source guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * cpp-perf-guidelines GPU.9 separates persistent weights from sequence storage;
+ * source guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
  */
 #include "bounds.h"
 #include <cstdint>
 #include "inference/executor.h"
+#include "tensors/representations/bf16.h"
+#include <cmath>
 
 #include "gpu/device.h"
 #include "inference/storage_plan.h"
@@ -115,6 +139,8 @@ struct Step {
     kernels::PreparedOperation operation;
     std::vector<kernels::BufferBinding> bindings;
 };
+void validate_injection(const models::ForwardRecipe &, const EmbeddingOverride &, std::size_t,
+                        tensors::ComputationMode);
 struct ResultCapture {
     models::ObservationSite site;
     std::vector<models::TokenPosition> positions;
@@ -134,18 +160,29 @@ struct ForwardResult::Impl {
     std::vector<ResultCapture> capture_metadata;
     std::vector<CapturedRows> capture_views;
 };
-ForwardResult::ForwardResult(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+ForwardResult::ForwardResult(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {
+}
 ForwardResult::~ForwardResult() = default;
 ForwardResult::ForwardResult(ForwardResult &&) noexcept = default;
 ForwardResult &ForwardResult::operator=(ForwardResult &&) noexcept = default;
-ExecutionId ForwardResult::execution_id() const noexcept { return impl_->id; }
-std::string_view ForwardResult::checkpoint_identity() const noexcept { return impl_->identity; }
-std::span<const std::uint32_t> ForwardResult::token_ids() const noexcept { return impl_->tokens; }
-tensors::ComputationMode ForwardResult::numerical_mode() const noexcept { return impl_->mode; }
+ExecutionId ForwardResult::execution_id() const noexcept {
+    return impl_->id;
+}
+std::string_view ForwardResult::checkpoint_identity() const noexcept {
+    return impl_->identity;
+}
+std::span<const std::uint32_t> ForwardResult::token_ids() const noexcept {
+    return impl_->tokens;
+}
+tensors::ComputationMode ForwardResult::numerical_mode() const noexcept {
+    return impl_->mode;
+}
 LogitRows ForwardResult::logits() const noexcept {
     return {impl_->logit_positions, impl_->vocabulary, impl_->mode.activation_storage, impl_->logits};
 }
-std::span<const CapturedRows> ForwardResult::captures() const noexcept { return impl_->capture_views; }
+std::span<const CapturedRows> ForwardResult::captures() const noexcept {
+    return impl_->capture_views;
+}
 
 struct FullForwardPlan::Impl {
     const models::BoundCheckpoint *checkpoint;
@@ -162,12 +199,15 @@ struct FullForwardPlan::Impl {
     std::optional<gpu::Queue> queue;
     std::optional<gpu::DeviceBuffer> weights, scratch, output, workspace;
     std::optional<gpu::HostBuffer> staging, readback;
+    std::size_t injection_staging_offset = 0;
+    std::optional<std::size_t> injection_step;
 
     Impl(const models::BoundCheckpoint &checkpoint_in, models::SequenceLength length_in,
          tensors::ComputationMode mode_in, models::ForwardRecipe recipe_in, ObservationPlan observations_in,
          std::vector<models::TokenPosition> positions)
         : checkpoint(&checkpoint_in), length(length_in), mode(mode_in), recipe(std::move(recipe_in)),
-          observations(std::move(observations_in)), logit_positions(std::move(positions)) {}
+          observations(std::move(observations_in)), logit_positions(std::move(positions)) {
+    }
     Impl(const Impl &) = delete;
     Impl &operator=(const Impl &) = delete;
     Impl(Impl &&) = delete;
@@ -193,13 +233,20 @@ struct FullForwardPlan::Impl {
         throw std::logic_error("unknown forward arena");
     }
 };
-FullForwardPlan::FullForwardPlan(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+FullForwardPlan::FullForwardPlan(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {
+}
 FullForwardPlan::~FullForwardPlan() = default;
 FullForwardPlan::FullForwardPlan(FullForwardPlan &&) noexcept = default;
 FullForwardPlan &FullForwardPlan::operator=(FullForwardPlan &&) noexcept = default;
-models::SequenceLength FullForwardPlan::sequence_length() const noexcept { return impl_->length; }
-std::size_t FullForwardPlan::estimated_peak_device_bytes() const noexcept { return impl_->peak; }
-std::size_t FullForwardPlan::host_output_bytes() const noexcept { return impl_->host_bytes; }
+models::SequenceLength FullForwardPlan::sequence_length() const noexcept {
+    return impl_->length;
+}
+std::size_t FullForwardPlan::estimated_peak_device_bytes() const noexcept {
+    return impl_->peak;
+}
+std::size_t FullForwardPlan::host_output_bytes() const noexcept {
+    return impl_->host_bytes;
+}
 
 FullForwardPlan prepare_full_forward(gpu::Device &device, const models::BoundCheckpoint &checkpoint,
                                      models::SequenceLength length, const ForwardOptions &options) {
@@ -262,13 +309,19 @@ FullForwardPlan prepare_full_forward(gpu::Device &device, const models::BoundChe
             .emplace_back(kernels::GatherRows{found->tensor, target, std::move(rows)});
     }
     // Resolve every operation, including captures, before allocating tensor storage.
-    for (const auto &operation : plan->recipe.operations) {
+    for (std::size_t operation_index = 0; operation_index < plan->recipe.operations.size();
+         ++operation_index) {
+        const auto &operation = plan->recipe.operations.at(operation_index);
         auto prepared = kernels::prepare(device, operation, plan->recipe.tensors, plan->mode);
         std::vector<kernels::TensorId> produced;
         for (const auto &use : prepared.operands()) {
             if (use.access == kernels::OperandAccess::write) {
                 produced.push_back(use.tensor);
             }
+        }
+        if (plan->recipe.embedding_boundary &&
+            plan->recipe.embedding_boundary->producer_step == operation_index) {
+            plan->injection_step = plan->steps.size();
         }
         plan->steps.push_back({std::move(prepared), {}});
         for (auto output : produced) {
@@ -385,7 +438,14 @@ FullForwardPlan prepare_full_forward(gpu::Device &device, const models::BoundChe
     // Bounded weight staging is reused serially during setup; token staging may
     // require more bytes for an explicitly admitted long sequence.
     const auto staging_bytes = std::max(token_bytes, std::min(weight_bytes, std::size_t{16} * 1024 * 1024));
-    plan->staging.emplace(device.allocate_staging({staging_bytes, alignof(std::uint32_t)}));
+    plan->injection_staging_offset = staging_bytes;
+    std::size_t injection_bytes = 0;
+    if (plan->recipe.embedding_boundary) {
+        const auto &layout = plan->recipe.tensors.at(plan->recipe.embedding_boundary->tensor.value);
+        injection_bytes = multiply(layout.shape.at(1), tensors::element_bytes(layout.element_type));
+    }
+    plan->staging.emplace(
+        device.allocate_staging({add(staging_bytes, injection_bytes), alignof(std::uint32_t)}));
     for (const auto &input : plan->recipe.parameters) {
         if (first.at(input.tensor.value) == std::numeric_limits<std::size_t>::max()) {
             continue;
@@ -418,6 +478,14 @@ FullForwardPlan prepare_full_forward(gpu::Device &device, const models::BoundChe
 }
 
 ForwardResult FullForwardPlan::execute(std::span<const std::uint32_t> token_ids, ExecutionId id) {
+    return execute_impl(token_ids, id, nullptr);
+}
+ForwardResult FullForwardPlan::execute(std::span<const std::uint32_t> token_ids, ExecutionId id,
+                                       const EmbeddingOverride &injection) {
+    return execute_impl(token_ids, id, &injection);
+}
+ForwardResult FullForwardPlan::execute_impl(std::span<const std::uint32_t> token_ids, ExecutionId id,
+                                            const EmbeddingOverride *injection) {
     auto &plan = *impl_;
     if (plan.failed) {
         throw std::runtime_error("forward plan unusable after execution failure");
@@ -429,6 +497,9 @@ ForwardResult FullForwardPlan::execute(std::span<const std::uint32_t> token_ids,
         if (token >= plan.checkpoint->model().vocabulary_size()) {
             throw std::invalid_argument("token outside vocabulary");
         }
+    }
+    if (injection) {
+        validate_injection(plan.recipe, *injection, plan.length.value, plan.mode);
     }
     auto result = std::make_unique<ForwardResult::Impl>();
     result->id = id;
@@ -459,10 +530,21 @@ ForwardResult FullForwardPlan::execute(std::span<const std::uint32_t> token_ids,
         present(plan.queue)
             .upload({plan.buffer(tokens.arena), tokens.offset, tokens.bytes},
                     {&present(plan.staging), 0, tokens.bytes});
-        for (const auto &step : plan.steps) {
+        for (std::size_t step_index = 0; step_index < plan.steps.size(); ++step_index) {
+            const auto &step = plan.steps.at(step_index);
             const auto bytes = step.operation.workspace().bytes;
             step.operation.submit(present(plan.queue), step.bindings,
                                   {bytes ? &present(plan.workspace) : nullptr, 0, bytes});
+            if (injection && plan.injection_step && step_index == *plan.injection_step) {
+                const auto &slot = plan.slots.at(present(plan.recipe.embedding_boundary).tensor.value);
+                const auto row_bytes = injection->bytes.size();
+                std::memcpy(present(plan.staging).bytes().subspan(plan.injection_staging_offset).data(),
+                            injection->bytes.data(), row_bytes);
+                present(plan.queue)
+                    .upload({plan.buffer(slot.arena), slot.offset + injection->position.value * row_bytes,
+                             row_bytes},
+                            {&present(plan.staging), plan.injection_staging_offset, row_bytes});
+            }
         }
         if (plan.output_bytes) {
             present(plan.queue)
@@ -496,12 +578,129 @@ ForwardResult FullForwardPlan::execute(std::span<const std::uint32_t> token_ids,
     return ForwardResult(std::move(result));
 }
 
+namespace {
+constexpr std::size_t resident_alignment = 256;
+struct ResidentState {
+    gpu::Device *device{};
+    std::unique_ptr<models::BoundCheckpoint> checkpoint;
+    tensors::ComputationMode mode{};
+    std::vector<std::size_t> offsets;
+    std::size_t bytes{};
+    bool leased = false, failed = false;
+    std::optional<gpu::Queue> queue;
+    std::optional<gpu::DeviceBuffer> weights;
+    ResidentState() = default;
+    ResidentState(const ResidentState &) = delete;
+    ResidentState &operator=(const ResidentState &) = delete;
+    ResidentState(ResidentState &&) = delete;
+    ResidentState &operator=(ResidentState &&) = delete;
+    ~ResidentState() {
+        if (queue) {
+            try {
+                present(queue).drain();
+            } catch (...) { // NOLINT(bugprone-empty-catch)
+                // No-throw teardown preserves an active device exception.
+            }
+        }
+    }
+};
+void validate_injection(const models::ForwardRecipe &recipe, const EmbeddingOverride &row,
+                        std::size_t capacity, tensors::ComputationMode mode) {
+    if (!recipe.embedding_boundary || row.position.value >= capacity || !row.width ||
+        row.storage_type != mode.activation_storage ||
+        row.bytes.size() != multiply(row.width, tensors::element_bytes(row.storage_type))) {
+        throw std::invalid_argument("invalid embedding replacement");
+    }
+    const auto &layout = recipe.tensors.at(recipe.embedding_boundary->tensor.value);
+    if (layout.shape.size() != 2 || layout.shape.at(1) != row.width) {
+        throw std::invalid_argument("replacement width differs from embedding boundary");
+    }
+    for (std::size_t i = 0; i < row.width; ++i) {
+        float value{};
+        if (row.storage_type == tensors::ElementType::float32) {
+            std::memcpy(&value, std::span(row.bytes).subspan(i * sizeof(float)).data(), sizeof(float));
+        } else {
+            value = tensors::to_float(tensors::read_le(
+                std::span<const std::byte, 2>(std::span(row.bytes).subspan(i * 2).data(), 2)));
+        }
+        if (!std::isfinite(value)) {
+            throw std::invalid_argument("nonfinite embedding replacement");
+        }
+    }
+}
+} // namespace
+struct ResidentModel::Impl {
+    std::shared_ptr<ResidentState> state;
+};
+ResidentModel::ResidentModel(std::unique_ptr<Impl> p) : impl_(std::move(p)) {
+}
+ResidentModel::~ResidentModel() = default;
+std::string_view ResidentModel::checkpoint_identity() const noexcept {
+    return impl_->state->checkpoint->identity();
+}
+std::size_t ResidentModel::resident_device_bytes() const noexcept {
+    return impl_->state->bytes;
+}
+bool ResidentModel::usable() const noexcept {
+    return !impl_->state->failed;
+}
+std::unique_ptr<ResidentModel> load_resident_model(gpu::Device &device,
+                                                   std::unique_ptr<models::BoundCheckpoint> checkpoint,
+                                                   const ResidentOptions &options) {
+    if (!checkpoint || !options.max_host_staging_bytes) {
+        throw std::invalid_argument("invalid resident inputs");
+    }
+    const auto recipe = checkpoint->model().incremental_forward({1}, options.numerical_mode);
+    models::validate_incremental_recipe(checkpoint->model(), recipe, {1}, options.numerical_mode);
+    auto state = std::make_shared<ResidentState>();
+    state->device = &device;
+    state->mode = options.numerical_mode;
+    state->checkpoint = std::move(checkpoint);
+    const auto parameters = state->checkpoint->model().parameters();
+    state->offsets.reserve(parameters.size());
+    for (std::size_t i = 0; i < parameters.size(); ++i) {
+        state->bytes = align_up(state->bytes, resident_alignment);
+        state->offsets.push_back(state->bytes);
+        state->bytes = add(state->bytes, tensors::required_bytes(dolittle::at(parameters, i).layout));
+    }
+    if (state->bytes > options.max_device_bytes) {
+        throw std::length_error("resident weights exceed budget");
+    }
+    const auto staging_bytes =
+        std::min({state->bytes, options.max_host_staging_bytes, std::size_t{16} * 1024 * 1024});
+    state->queue.emplace(device.create_queue());
+    state->weights.emplace(device.allocate({state->bytes, resident_alignment}));
+    auto staging = device.allocate_staging({staging_bytes, 4});
+    for (std::size_t i = 0; i < parameters.size(); ++i) {
+        const auto view = state->checkpoint->parameter({i});
+        tensors::validate_view(view);
+        for (std::size_t offset = 0; offset < view.bytes.size();) {
+            const auto bytes = std::min(staging_bytes, view.bytes.size() - offset);
+            std::memcpy(staging.bytes().data(), view.bytes.subspan(offset).data(), bytes);
+            present(state->queue)
+                .upload({&present(state->weights), state->offsets.at(i) + offset, bytes},
+                        {&staging, 0, bytes});
+            present(state->queue).wait(present(state->queue).mark());
+            offset += bytes;
+        }
+    }
+    auto impl = std::make_unique<ResidentModel::Impl>();
+    impl->state = std::move(state);
+    return std::unique_ptr<ResidentModel>(new ResidentModel(std::move(impl)));
+}
 struct CachedForwardPlan::Impl {
     struct Capture {
         models::ObservationSite site;
         kernels::TensorId source;
         std::size_t offset, row_bytes;
     };
+    std::shared_ptr<ResidentState> resident;
+    std::optional<EmbeddingOverride> injection;
+    std::optional<gpu::HostBuffer> injection_staging;
+    bool injected = false;
+    gpu::Queue &work_queue() {
+        return resident ? present(resident->queue) : present(queue);
+    }
     const models::BoundCheckpoint *checkpoint;
     CachedForwardOptions options;
     models::IncrementalRecipe recipe;
@@ -512,32 +711,36 @@ struct CachedForwardPlan::Impl {
     std::vector<std::vector<std::size_t>> copies_after;
     std::vector<std::optional<std::size_t>> cache_at;
     std::vector<std::uint32_t> history;
-    std::size_t committed = 0, peak = 0, output_bytes = 0, logit_bytes = 0;
+    std::size_t committed = 0, peak = 0, host_bytes = 0, output_bytes = 0, logit_bytes = 0;
     bool failed = false, finished = false;
     std::optional<gpu::Queue> queue;
     std::optional<gpu::DeviceBuffer> weights, scratch, output;
     std::optional<gpu::HostBuffer> upload, readback;
     std::unique_ptr<cache::Contiguous> cache;
     Impl(const models::BoundCheckpoint &c, CachedForwardOptions o, models::IncrementalRecipe r)
-        : checkpoint(&c), options(std::move(o)), recipe(std::move(r)) {}
+        : checkpoint(&c), options(std::move(o)), recipe(std::move(r)) {
+    }
     Impl(const Impl &) = delete;
     Impl &operator=(const Impl &) = delete;
     Impl(Impl &&) = delete;
     Impl &operator=(Impl &&) = delete;
     ~Impl() {
-        if (queue) {
+        if (queue || resident) {
             try {
-                present(queue).drain();
+                work_queue().drain();
 
             } catch (...) { // NOLINT(bugprone-empty-catch)
                 // Preserve the active exception; buffer owners perform a final no-throw drain.
             }
         }
+        if (resident) {
+            resident->leased = false;
+        }
     }
     gpu::DeviceBuffer *buffer(Arena arena) {
         switch (arena) {
         case Arena::weight:
-            return &present(weights);
+            return resident ? &present(resident->weights) : &present(weights);
         case Arena::scratch:
             return &present(scratch);
         case Arena::output:
@@ -550,30 +753,48 @@ struct CachedForwardPlan::Impl {
         return {buffer(slot.arena), slot.offset, bytes};
     }
 };
-CachedForwardPlan::CachedForwardPlan(std::unique_ptr<Impl> p) : impl_(std::move(p)) {}
+CachedForwardPlan::CachedForwardPlan(std::unique_ptr<Impl> p) : impl_(std::move(p)) {
+}
 CachedForwardPlan::~CachedForwardPlan() = default;
 CachedForwardPlan::CachedForwardPlan(CachedForwardPlan &&) noexcept = default;
 CachedForwardPlan &CachedForwardPlan::operator=(CachedForwardPlan &&) noexcept = default;
 std::string_view CachedForwardPlan::checkpoint_identity() const noexcept {
     return impl_->checkpoint->identity();
 }
-cache::SequenceId CachedForwardPlan::sequence_id() const noexcept { return impl_->options.sequence; }
+cache::SequenceId CachedForwardPlan::sequence_id() const noexcept {
+    return impl_->options.sequence;
+}
 tensors::ComputationMode CachedForwardPlan::numerical_mode() const noexcept {
     return impl_->options.numerical_mode;
 }
 cache::Prefix CachedForwardPlan::prefix() const noexcept {
     return {impl_->committed, !impl_->failed && !impl_->finished};
 }
-std::size_t CachedForwardPlan::capacity() const noexcept { return impl_->options.capacity; }
-std::size_t CachedForwardPlan::max_prefill_chunk() const noexcept { return impl_->options.max_prefill_chunk; }
-std::size_t CachedForwardPlan::estimated_peak_device_bytes() const noexcept { return impl_->peak; }
+std::size_t CachedForwardPlan::capacity() const noexcept {
+    return impl_->options.capacity;
+}
+std::size_t CachedForwardPlan::max_prefill_chunk() const noexcept {
+    return impl_->options.max_prefill_chunk;
+}
+std::size_t CachedForwardPlan::estimated_peak_device_bytes() const noexcept {
+    return impl_->peak;
+}
+std::size_t CachedForwardPlan::estimated_peak_host_bytes() const noexcept {
+    return impl_->host_bytes;
+}
 std::size_t CachedForwardPlan::vocabulary_size() const noexcept {
     return impl_->checkpoint->model().vocabulary_size();
 }
 std::span<const models::ObservationSite> CachedForwardPlan::capture_sites() const noexcept {
     return impl_->sites;
 }
+std::optional<models::TokenPosition> CachedForwardPlan::embedding_override_position() const noexcept {
+    return impl_->injection ? std::optional(impl_->injection->position) : std::nullopt;
+}
 void CachedForwardPlan::finish() {
+    if (impl_->injection && !impl_->injected) {
+        throw std::logic_error("replacement not consumed");
+    }
     if (impl_->failed) {
         throw std::runtime_error("failed cached execution plan");
     }
@@ -581,6 +802,24 @@ void CachedForwardPlan::finish() {
 }
 CachedForwardPlan prepare_cached_forward(gpu::Device &device, const models::BoundCheckpoint &checkpoint,
                                          const CachedForwardOptions &options) {
+    return CachedForwardPlan::prepare_impl(device, checkpoint, options, nullptr, std::nullopt);
+}
+CachedForwardPlan prepare_cached_forward(ResidentModel &resident, const CachedForwardOptions &options,
+                                         std::optional<EmbeddingOverride> injection) {
+    auto &state = *resident.impl_->state;
+    if (state.failed || state.leased ||
+        state.mode.activation_storage != options.numerical_mode.activation_storage ||
+        state.mode.reduction_accumulation != options.numerical_mode.reduction_accumulation) {
+        throw std::invalid_argument("resident owner unavailable or mode mismatch");
+    }
+    return CachedForwardPlan::prepare_impl(*state.device, *state.checkpoint, options, &resident,
+                                           std::move(injection));
+}
+CachedForwardPlan CachedForwardPlan::prepare_impl(gpu::Device &device,
+                                                  const models::BoundCheckpoint &checkpoint,
+                                                  const CachedForwardOptions &options,
+                                                  ResidentModel *resident,
+                                                  std::optional<EmbeddingOverride> injection) {
     const auto &model = checkpoint.model();
     const auto count = options.max_prefill_chunk;
     if (!count || !options.capacity || count > options.capacity ||
@@ -598,6 +837,14 @@ CachedForwardPlan prepare_cached_forward(gpu::Device &device, const models::Boun
                                                    {options.capacity}, requests, options.observation_limits);
     auto p = std::make_unique<CachedForwardPlan::Impl>(checkpoint, options, std::move(recipe));
     auto &forward = p->recipe.forward;
+    if (injection) {
+        validate_injection(forward, *injection, options.capacity, options.numerical_mode);
+    }
+    if (resident) {
+        p->resident = resident->impl_->state;
+        p->resident->leased = true;
+    }
+    p->injection = std::move(injection);
     cache::Specification spec{
         std::string(checkpoint.identity()), options.sequence, options.numerical_mode, options.capacity, {}};
     p->cache_at.resize(forward.operations.size());
@@ -684,9 +931,17 @@ CachedForwardPlan prepare_cached_forward(gpu::Device &device, const models::Boun
                 throw std::invalid_argument("cached parameter strides mismatch");
             }
         }
-        weight_bytes = align_up(weight_bytes, slot.alignment);
-        slot.offset = weight_bytes;
-        weight_bytes = add(weight_bytes, slot.bytes);
+        if (p->resident) {
+            slot.offset = p->resident->offsets.at(input.parameter.value);
+            if (slot.offset % slot.alignment) {
+                throw std::invalid_argument("resident weight alignment mismatch");
+            }
+            weight_bytes = p->resident->bytes;
+        } else {
+            weight_bytes = align_up(weight_bytes, slot.alignment);
+            slot.offset = weight_bytes;
+            weight_bytes = add(weight_bytes, slot.bytes);
+        }
     }
     first.at(forward.token_input.value) = 0;
     std::vector<ResourceLifetime> lifetimes;
@@ -708,8 +963,9 @@ CachedForwardPlan prepare_cached_forward(gpu::Device &device, const models::Boun
     for (const auto &placement : storage.placements) {
         p->slots.at(placement.id.value).offset = placement.offset;
     }
-    const auto upload_bytes = std::max(multiply(count, sizeof(std::uint32_t)),
-                                       std::min(weight_bytes, std::size_t{16} * 1024 * 1024));
+    const auto upload_bytes =
+        std::max(multiply(count, sizeof(std::uint32_t)),
+                 p->resident ? 0 : std::min(weight_bytes, std::size_t{16} * 1024 * 1024));
     auto host_bytes = add(upload_bytes, multiply(2, p->output_bytes));
     host_bytes = add(host_bytes, observations.payload_bytes());
     host_bytes = add(host_bytes, multiply(options.capacity, 2 * sizeof(std::uint32_t)));
@@ -720,27 +976,40 @@ CachedForwardPlan prepare_cached_forward(gpu::Device &device, const models::Boun
                      multiply(multiply(options.capacity, p->captures.size()), sizeof(models::TokenPosition)));
     host_bytes = add(host_bytes, multiply(model.vocabulary_size(),
                                           sizeof(float) + sizeof(double) + 2 * sizeof(std::uint32_t)));
+    if (p->injection) {
+        host_bytes = add(host_bytes, multiply(2, p->injection->bytes.size()));
+    }
     if (host_bytes > options.max_host_bytes) {
         throw std::length_error("cached host outputs exceed budget");
     }
+    p->host_bytes = host_bytes;
     p->history.reserve(options.capacity);
-    p->queue.emplace(device.create_queue());
-    p->weights.emplace(device.allocate({weight_bytes, 4}));
+    if (!p->resident) {
+        p->queue.emplace(device.create_queue());
+        p->weights.emplace(device.allocate({weight_bytes, 4}));
+    }
+    if (p->injection) {
+        p->injection_staging.emplace(device.allocate_staging({p->injection->bytes.size(), 4}));
+        std::memcpy(present(p->injection_staging).bytes().data(), p->injection->bytes.data(),
+                    p->injection->bytes.size());
+    }
     p->scratch.emplace(device.allocate({storage.arena_bytes, storage.arena_alignment}));
     p->output.emplace(device.allocate({p->output_bytes, 4}));
     p->upload.emplace(device.allocate_staging({upload_bytes, 4}));
     p->readback.emplace(device.allocate_staging({p->output_bytes, 4}));
-    p->cache = cache::allocate_contiguous(device, present(p->queue), spec, cache_bytes);
-    for (const auto &input : forward.parameters) {
-        const auto view = checkpoint.parameter(input.parameter);
-        const auto &slot = p->slots.at(input.tensor.value);
-        for (std::size_t offset = 0; offset < slot.bytes;) {
-            const auto bytes = std::min(upload_bytes, slot.bytes - offset);
-            std::memcpy(present(p->upload).bytes().data(), view.bytes.subspan(offset).data(), bytes);
-            present(p->queue).upload({&present(p->weights), slot.offset + offset, bytes},
-                                     {&present(p->upload), 0, bytes});
-            present(p->queue).wait(present(p->queue).mark());
-            offset += bytes;
+    p->cache = cache::allocate_contiguous(device, p->work_queue(), spec, cache_bytes);
+    if (!p->resident) {
+        for (const auto &input : forward.parameters) {
+            const auto view = checkpoint.parameter(input.parameter);
+            const auto &slot = p->slots.at(input.tensor.value);
+            for (std::size_t offset = 0; offset < slot.bytes;) {
+                const auto bytes = std::min(upload_bytes, slot.bytes - offset);
+                std::memcpy(present(p->upload).bytes().data(), view.bytes.subspan(offset).data(), bytes);
+                p->work_queue().upload({&present(p->weights), slot.offset + offset, bytes},
+                                       {&present(p->upload), 0, bytes});
+                p->work_queue().wait(p->work_queue().mark());
+                offset += bytes;
+            }
         }
     }
     for (auto &step : p->steps) {
@@ -794,7 +1063,7 @@ ConsumedChunk CachedForwardPlan::consume(std::span<const std::uint32_t> ids, boo
         const auto &tokens = p.slots.at(p.recipe.forward.token_input.value);
         const auto bytes = ids.size_bytes();
         std::memcpy(present(p.upload).bytes().data(), ids.data(), bytes);
-        present(p.queue).upload({&present(p.scratch), tokens.offset, bytes}, {&present(p.upload), 0, bytes});
+        p.work_queue().upload({&present(p.scratch), tokens.offset, bytes}, {&present(p.upload), 0, bytes});
         for (std::size_t i = 0; i < p.steps.size(); ++i) {
             if (!need_logits && i == p.recipe.logits_begin) {
                 break;
@@ -807,30 +1076,39 @@ ConsumedChunk CachedForwardPlan::consume(std::span<const std::uint32_t> ids, boo
                 const auto bytes_per_row =
                     multiply(multiply(view->shape.kv_heads, view->shape.head_width),
                              tensors::element_bytes(p.options.numerical_mode.activation_storage));
-                p.cache->append(present(p.queue), block, p.committed, ids.size(),
+                p.cache->append(p.work_queue(), block, p.committed, ids.size(),
                                 p.source(append.rotated_key, multiply(ids.size(), bytes_per_row)),
                                 p.source(append.value, multiply(ids.size(), bytes_per_row)));
             }
             auto &step = p.steps.at(i);
-            step.operation.submit(present(p.queue), step.bindings, {},
+            step.operation.submit(p.work_queue(), step.bindings, {},
                                   i <= p.recipe.logits_begin ? &extent : nullptr, view ? &*view : nullptr);
+            if (p.injection && !p.injected && i == p.recipe.forward.embedding_boundary->producer_step &&
+                p.injection->position.value >= p.committed &&
+                p.injection->position.value < p.committed + ids.size()) {
+                const auto &slot = p.slots.at(p.recipe.forward.embedding_boundary->tensor.value);
+                const auto row_bytes = p.injection->bytes.size();
+                const auto offset = slot.offset + (p.injection->position.value - p.committed) * row_bytes;
+                p.work_queue().upload({p.buffer(slot.arena), offset, row_bytes},
+                                      {&present(p.injection_staging), 0, row_bytes});
+            }
             for (auto c : p.copies_after.at(i)) {
                 const auto &capture = p.captures.at(c);
                 const auto bytes = multiply(ids.size(), capture.row_bytes);
-                present(p.queue).copy({&present(p.output), capture.offset, bytes},
-                                      p.source(capture.source, bytes));
+                p.work_queue().copy({&present(p.output), capture.offset, bytes},
+                                    p.source(capture.source, bytes));
             }
         }
         if (need_logits) {
-            present(p.queue).download({&present(p.readback), 0, p.logit_bytes},
-                                      {&present(p.output), 0, p.logit_bytes});
+            p.work_queue().download({&present(p.readback), 0, p.logit_bytes},
+                                    {&present(p.output), 0, p.logit_bytes});
         }
         for (const auto &capture : p.captures) {
             const auto bytes = multiply(ids.size(), capture.row_bytes);
-            present(p.queue).download({&present(p.readback), capture.offset, bytes},
-                                      {&present(p.output), capture.offset, bytes});
+            p.work_queue().download({&present(p.readback), capture.offset, bytes},
+                                    {&present(p.output), capture.offset, bytes});
         }
-        present(p.queue).wait(present(p.queue).mark());
+        p.work_queue().wait(p.work_queue().mark());
         if (need_logits) {
             std::memcpy(result.next_logits->bytes.data(), present(p.readback).bytes().data(), p.logit_bytes);
         }
@@ -841,10 +1119,16 @@ ConsumedChunk CachedForwardPlan::consume(std::span<const std::uint32_t> ids, boo
         }
         p.history.insert(p.history.end(), ids.begin(), ids.end());
         p.committed += ids.size();
+        if (p.injection && p.injection->position.value < p.committed) {
+            p.injected = true;
+        }
     } catch (...) {
         p.failed = true;
+        if (p.resident) {
+            p.resident->failed = true;
+        }
         try {
-            present(p.queue).drain();
+            p.work_queue().drain();
         } catch (...) { // NOLINT(bugprone-empty-catch)
             // Preserve the active exception; buffer owners perform a final no-throw drain.
         }

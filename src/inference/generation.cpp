@@ -62,6 +62,18 @@
  * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
  * cpp-perf-guidelines GPU.9: admit/reserve persistent, transient and output arenas.
  * Source: guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
+ *
+ * The loop also runs AV prompts. Before any consume, an optional replacement
+ * position must be inside the prompt; executor applies it once in the containing
+ * prefill chunk. AV IDs, stop/failure and final consumed-token semantics are the
+ * same as target generation, with role/alignment owned by the experiment record.
+ * Corpus consultation, implementation (both servers queried, full rules read),
+ * 2026-10-19: cpp-guidelines R.1 (#rr-raii) ties resources to their owning phase;
+ * I.7 (#ri-post) makes completion, provenance and failure effects explicit.
+ * cpp-perf-guidelines GPU.1 keeps intermediate embeddings on device and budgets
+ * required transfers; source guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * cpp-perf-guidelines GPU.9 separates persistent weights from sequence storage;
+ * source guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
  */
 #include "inference/generation.h"
 #include "tensors/tensor.h"
@@ -95,6 +107,9 @@ GenerationResult generate(CachedForwardPlan &plan, const text::PreparedPrompt &p
     }
     if (prompt.thinking != text::ThinkingMode::enabled && prompt.thinking != text::ThinkingMode::disabled) {
         throw std::invalid_argument("invalid generation thinking mode");
+    }
+    if (const auto position = plan.embedding_override_position(); position && position->value >= prompt.ids.size()) {
+        throw std::invalid_argument("embedding replacement must belong to prompt");
     }
     GenerationResult result{};
     result.execution_id = id;

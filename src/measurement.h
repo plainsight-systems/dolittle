@@ -1,11 +1,13 @@
 /*
- * Header design only; experiment phase measurement payloads.
+ * Experiment phase measurement payloads.
  * Axis D4: distinguish elapsed phase time from admitted allocation estimates.
  * Contract: seconds are nonnegative elapsed wall time from a monotonic clock;
  * an absent value means the phase did not complete a measurement, not zero cost.
  * GPU-related phase timing ends only after its dependent queue work completes.
- * Byte estimates count planned owned allocations, excluding driver reservations,
- * OS page cache and allocator/process overhead. They are not measured peaks.
+ * Device estimates count planned arenas, excluding driver reservations. Host
+ * estimates cover payload/staging plus supplied loader/text metadata allowances;
+ * recipe/kernel metadata, OS page cache and allocator/process overhead are excluded.
+ * They are not measured peaks or process RAM limits.
  * Values own no resources and carry no backend handles. Run/Record supplies the
  * associated backend, model revision, precision, token counts and settings.
  *
@@ -20,7 +22,7 @@
  *    failure status remains in the record and is not inferred from a time value.
  * Cost: O(1) counters per phase/variant. Optimization: use coarse existing phase
  * boundaries, not instrumentation or synchronization inside each transformer block.
- * Corpus consultation, header design, 2026-10-19 (full rules read):
+ * Corpus consultation, header design and implementation, 2026-10-19 (full rules read):
  * cpp-guidelines I.7 (#ri-post): absent, elapsed and estimated values are distinct.
  * cpp-perf-guidelines GPU.1: include queue completion in transfer/compute costs;
  * source guidelines/gpu/GPU.1-keep-data-on-device.md.

@@ -25,10 +25,23 @@
  * cpp-guidelines I.7 (#ri-post): successful binding guarantees required weights.
  * cpp-perf-guidelines CDSA.32: immutable binding follows consumer slot order.
  * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
+ *
+ * Source provenance extension: source_identity() borrows the archive's verified
+ * repository/revision/artifact digest for this owner's lifetime. Pair validation
+ * compares that structured identity with the requested source; it never parses
+ * a display string or trusts a provider's label alone. O(1), no payload copy.
+ * Corpus consultation, implementation (both servers queried, full rules read),
+ * 2026-10-19: cpp-guidelines R.1 (#rr-raii) ties resources to their owning phase;
+ * I.7 (#ri-post) makes completion, provenance and failure effects explicit.
+ * cpp-perf-guidelines GPU.1 keeps intermediate embeddings on device and budgets
+ * required transfers; source guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * cpp-perf-guidelines GPU.9 separates persistent weights from sequence storage;
+ * source guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
  */
 #pragma once
 
 #include "models/model.h"
+#include "tensors/formats/format.h"
 #include "tensors/tensor.h"
 #include <cstddef>
 #include <string_view>
@@ -40,6 +53,7 @@ class BoundCheckpoint {
     BoundCheckpoint(BoundCheckpoint &&) = delete;
     BoundCheckpoint &operator=(BoundCheckpoint &&) = delete;
     virtual ~BoundCheckpoint();
+    [[nodiscard]] virtual const tensors::formats::SourceIdentity &source_identity() const noexcept = 0;
     [[nodiscard]] virtual const Model &model() const noexcept = 0;
     [[nodiscard]] virtual std::string_view identity() const noexcept = 0;
     [[nodiscard]] virtual tensors::HostView parameter(ParameterId id) const = 0;

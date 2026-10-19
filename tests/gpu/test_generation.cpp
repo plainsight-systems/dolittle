@@ -1,5 +1,5 @@
 /*
- * Axis D3: real checkpoint-to-CUDA generation integration driver.
+ * Axis D3: real target-to-AV CUDA experiment integration driver.
  * Contract: one fixture bundle produced by the independent reference generator;
  * artifacts must pass the production size/hash loader before binding. A run
  * succeeds only if every provenance, shape, finite-value and fixed numerical
@@ -26,7 +26,15 @@
  * hide a bad row. Report row metrics as well as the aggregate. The uncached
  * trace also checks every logit row, including rows not returned by chunked
  * prefill. These checks reuse completed host readbacks, outside compute timing.
- * The tiny and 8B generation scenarios replace the two forward scenarios.
+ * AV continuation: after releasing target execution, check the frozen capture's
+ * FP32 normalization and stored replacement bytes. Compare injected full/cached
+ * AV logits and captures on those identical inputs, then run two interpretations
+ * of an engine-retained row with fresh caches and one resident AV weight owner.
+ * Capture bytes must survive model switching and close. AV fixture expectations
+ * are independent; target acceptance limits and reference arithmetic stay fixed.
+ * The tiny and 8B experiment scenarios replace the two generation scenarios.
+ * Implementation consultation, 2026-10-19: R.1 and I.7 below govern retained
+ * ownership and fixed acceptance gates; GPU.1 keeps comparisons off the GPU path.
  * Cost: fixture parsing/comparison excluded from execution timing; wall times
  * distinguish loading, preparation/upload and host-ready execution. Optimization:
  * one resident plan at a time, reuse a plan for equal-shaped alternate tokens;
@@ -47,6 +55,7 @@
  * GDSA.2 keeps exact cache/full-trace equality distinct from oracle accuracy.
  */
 #include "bounds.h"
+#include "tests/gpu/interpretation.h"
 #include "gpu/cuda/device.h"
 #include "inference/generation.h"
 #include "inference/sampling/categorical.h"
@@ -639,6 +648,9 @@ Json run(const std::filesystem::path &fixture) {
     report.emplace("generation", Json(check_generation(*device, *checkpoint, bundle, text_pair, passed)));
     // All comparisons below deliberately run after the execution owners die.
     checkpoint.reset();
+    auto interpretation=tests::check_interpretation(*device,fixture);
+    passed=passed && interpretation.at("passed").get<bool>();
+    report.emplace("interpretation",std::move(interpretation));
     device.reset();
     for (std::size_t i = 0; i < results.size(); ++i) {
         report.at("cases").at(i).emplace(

@@ -1,5 +1,5 @@
 /*
- * Header design only; sequential target/AV orchestration is not implemented.
+ * Sequential target/AV orchestration contract.
  * Axis R3: admission, one active experiment, model residency and cancellation.
  * Contract: Run owns its pair, model providers, text helpers and retained record;
  * it borrows one device that must outlive it. Public calls are synchronous and
@@ -65,12 +65,14 @@
  * weight upload staging, injection staging, readback and driver headroom.
  * Host peak includes retained captures 8192*(P+G), record/index/text allowances,
  * one pending variant, active loader, tokenizers, normalized row and staging.
- * Estimates are checked requested allocations, not measured process/device peaks.
+ * Host estimates cover admitted payload/staging and supplied loader/text metadata;
+ * recipe/kernel metadata, allocator overhead and mapped address space are excluded.
+ * These are allocation estimates, not measured process/device peaks.
  * Optimization: retain AV weights once; fresh contiguous KV per variant keeps
  * isolation simple. Allocation pooling remains deferred, as in target generation.
  * Timings separate loading, target generation, release/switch, AV generation and
  * decoding; GPU completion bounds compute time. No performance claim is made.
- * Corpus consultation, header design, 2026-10-19 (full rules read):
+ * Corpus consultation, header design and implementation, 2026-10-19 (full rules read):
  * cpp-guidelines R.1 (#rr-raii): sequence dies before resident owner/device.
  * cpp-guidelines I.7 (#ri-post): retained state means target GPU resources released.
  * cpp-perf-guidelines GPU.9: separate persistent weights from transient sequence
@@ -102,6 +104,7 @@ struct RunInputs {
     std::unique_ptr<text::Protocol> target_protocol;
     inference::sampling::TokenSelector selector;
     std::string backend_identity;
+    std::size_t metadata_host_bytes{}; // Admitted owned tokenizers, pair and provider metadata.
 };
 struct RunLimits {
     std::size_t max_device_bytes;

@@ -4,9 +4,9 @@
 
 - **Project:** Dolittle, named after Doctor Dolittle.
 - **Parent entity:** Plainsight Systems LLC; no separate operating brand.
-- **Status:** project site, verified first forward slice and implemented target
-  generation. Independent numerical acceptance passes on the pinned 3090 Ti
-  workload. NLA execution and the live application remain later slices.
+- **Status:** project site, CUDA forward/generation and target-to-AV interpretation
+  are implemented. Bounded independent numerical checks run on the 3090 Ti.
+  Reconstruction and the live browser/API remain later slices.
 - **Remote:** `origin` is https://github.com/plainsight-systems/dolittle.git.
   The site’s Code link points to this repository. Andrew authorized the first
   push and Pages deployment on 2026-10-16.
@@ -164,8 +164,9 @@ The engine implements verified Qwen3 checkpoint loading, full-forward CUDA
 execution and target generation: byte BPE, Qwen3 single-turn protocol,
 categorical/greedy sampling, contiguous persistent KV, chunked prefill/decode,
 stop handling and final consumed-token captures. Observation sites remain
-configurable; shared execution does not hardcode block 24. NLA execution and
-the application remain future work.
+configurable; shared execution does not hardcode block 24. The AV continuation
+adds one-row injection, retained records and sequential model scheduling.
+Reconstruction and the application remain future work.
 
 The first forward slice is accepted and pushed as `77f038c`. Target generation
 and subsequent kernel corrections are verified and pushed as `20d8740`.
@@ -236,17 +237,32 @@ remain fixed. Diagnostics and detailed validation evidence stay ignored.
 See [QUEUE.md](QUEUE.md), [architecture](../architecture/README.md) and
 [build and verification commands](../../tests/README.md).
 
-## Target-to-AV header design
+## Target-to-AV interpretation
 
-The next complete slice is target generation through selectable AV interpretations.
-Andrew approved its header design and authorized committing it and proceeding
-with implementation. The design
-separates persistent model weights from each sequence's cache so AV variants reuse
-weights while receiving fresh contiguous KV. Target GPU resources are released
-before AV loading; owned raw captures and exact tokens survive in the record.
-The model recipe declares its embedding boundary explicitly, and the executor
-replaces one row in the prompt chunk containing its absolute position. Pair-specific
-block selection, trained prompt, scale and output tags remain in the NLA pair.
-Both local C++ corpora were consulted for this phase. The selected AV's config and
-chat-template hashes match the target's; existing Qwen3 implementations can be
-reused with the AV's own provenance. Reconstruction and browser work remain later.
+The approved header design was committed as `996aac1`. Its complete implementation
+covers target generation through selectable AV interpretations. Persistent model
+weights are separate from each sequence cache: repeated AV requests reuse weights
+while receiving fresh contiguous KV. Target GPU resources are released before AV
+loading; owned raw captures and exact token IDs survive in the record. An explicit
+embedding boundary places a one-row replacement after lookup and before consumers,
+including when the marker falls in a later prefill chunk. The pairing owns block
+24, scale 150, pinned sources, trained prompt and explanation delimiters.
+
+Both C++ corpora were consulted for implementation; opening comments cite the
+retrieved rules and describe numerical steps, ownership, failures and costs.
+`BoundCheckpoint::source_identity` supplies verified structured provenance to
+pair validation. Run owns bounded attempts and phase measurements; estimated
+allocations remain distinct from measured process/device peaks. Record preserves
+raw AV output even when explanation tags are missing or malformed. Cancellation,
+load failure and execution failure do not silently regenerate the target.
+
+The AV reference was frozen before implementation and imports the unchanged
+independent operator policy. Norm, divide and scale remain FP32, followed by one
+BF16 cast. Engine normalization uses eight interleaved FP32 sums with separate
+multiply/add rounding; reference arithmetic, original target fixtures and limits
+remain unchanged. Comparison uses identical frozen injection inputs, per-row
+activation/logit bounds, exact cached/full final logits and bounded greedy IDs.
+The workflow also checks retained captures and repeated fresh-cache variants.
+These short numerical fixtures do not establish semantic fidelity or long-context
+behavior. Reconstruction and the browser/API remain subsequent work. Verification
+status is recorded in the queue; detailed reports remain ignored.

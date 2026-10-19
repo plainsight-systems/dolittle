@@ -30,6 +30,9 @@ FetchContent_Declare(oniguruma
 FetchContent_MakeAvailable(utf8proc oniguruma)
 
 add_library(dolittle_host STATIC
+    src/nla/protocol.cpp
+    src/nla/pairs/qwen3_8b.cpp
+    src/experiment/record.cpp
     src/tokenizers/byte_bpe.cpp
     src/text/qwen3_chat.cpp
     src/inference/sampling/categorical.cpp
@@ -46,6 +49,10 @@ add_library(dolittle_host STATIC
     src/models/checkpoint.cpp
     src/models/qwen3/checkpoint.cpp
 )
+# Match the explicit FP32 multiply/add boundaries in the frozen AV normalization.
+if(NOT MSVC)
+    set_source_files_properties(src/nla/protocol.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+endif()
 target_include_directories(dolittle_host PUBLIC "${PROJECT_SOURCE_DIR}/src")
 target_compile_features(dolittle_host PUBLIC cxx_std_20)
 target_link_libraries(dolittle_host PUBLIC nlohmann_json::nlohmann_json OpenSSL::Crypto utf8proc onig)
@@ -68,7 +75,7 @@ if(BUILD_TESTING)
     set_target_properties(dolittle_numerical PROPERTIES CXX_EXTENSIONS OFF)
     dolittle_warnings(dolittle_numerical)
 
-    foreach(unit IN ITEMS bounds sampling progression byte_bpe qwen3_chat tensor bf16 observations storage_plan numerical
+    foreach(unit IN ITEMS nla record bounds sampling progression byte_bpe qwen3_chat tensor bf16 observations storage_plan numerical
                           operations model_recipe qwen3_model safetensors qwen3_checkpoint)
         add_executable(test_${unit} tests/core/test_${unit}.cpp)
         target_include_directories(test_${unit} PRIVATE "${PROJECT_SOURCE_DIR}")
@@ -113,7 +120,8 @@ if(DOLITTLE_CUDA)
         src/kernels/cuda/elementwise.cu
         src/inference/executor.cpp
         src/inference/cache/contiguous.cpp
-        src/inference/generation.cpp)
+        src/inference/generation.cpp
+        src/experiment/run.cpp)
     target_link_libraries(dolittle_cuda PUBLIC dolittle_host CUDA::cudart)
     target_compile_features(dolittle_cuda PUBLIC cxx_std_20)
     set_target_properties(dolittle_cuda PROPERTIES
@@ -132,7 +140,7 @@ if(DOLITTLE_CUDA)
         dolittle_warnings(test_device)
         add_test(NAME integration.device COMMAND test_device)
         set_tests_properties(integration.device PROPERTIES LABELS integration RUN_SERIAL TRUE)
-        add_executable(test_generation tests/gpu/test_generation.cpp tests/gpu/forward_reference.cpp)
+        add_executable(test_generation tests/gpu/test_generation.cpp tests/gpu/forward_reference.cpp tests/gpu/interpretation.cpp)
         target_include_directories(test_generation PRIVATE "${PROJECT_SOURCE_DIR}")
         target_link_libraries(test_generation PRIVATE dolittle_cuda dolittle_numerical)
         dolittle_warnings(test_generation)
@@ -144,7 +152,7 @@ if(DOLITTLE_CUDA)
             add_test(NAME integration.generation_8b COMMAND test_generation
                 "${DOLITTLE_GENERATION_FIXTURES}/qwen3-8b-bf16/fixture.json")
             set_tests_properties(integration.generation_tiny integration.generation_8b
-                PROPERTIES LABELS integration RUN_SERIAL TRUE)
+                PROPERTIES LABELS integration RUN_SERIAL TRUE WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
         endif()
     endif()
 endif()

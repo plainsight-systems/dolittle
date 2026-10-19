@@ -6,11 +6,11 @@ they do not launch systems or depend on private implementation details.
 Integration tests cover real component interactions and are capped at five
 across the repository. A test runner's name does not determine test scope.
 
-The full-forward and cached target-generation paths are implemented. Builds and
+The full-forward, cached generation and target-to-AV interpretation paths are implemented. Builds and
 unit checks alone do not establish transformer equivalence: use the independent
-GPU scenarios below. NLA computation and the browser/API remain later work.
+GPU scenarios below. Reconstruction and the browser/API remain later work.
 
-The suite contains **sixteen C++ unit executables, sixteen Python unit tests and
+The suite contains **eighteen C++ unit executables, sixteen Python unit tests and
 five integration scenarios**. Fixtures and full weights stay in ignored caches
 with recorded revisions, hashes and reference environment details.
 
@@ -92,6 +92,8 @@ workflows hidden behind a unit label.
 
 | Unit | Contracts exercised |
 | --- | --- |
+| NLA conversion | FP32 normalization, immutable input, BF16 rounding and explanation delimiter ranges |
+| Experiment record | Retained row ownership, stable variants, atomic rejection and count/byte budgets |
 | Categorical sampling | Greedy ties, top-k/top-p boundaries, masked inputs, one-draw RNG semantics and independent streams |
 | Sequence progression | Emitted versus consumed counts, stop precedence and final-token consumption |
 | Byte BPE | Ranked merges, normalization, literal added tokens, raw-byte provenance and bounds |
@@ -137,8 +139,8 @@ The repository uses **all five integration slots**:
 | Site publication | Real Hugo build and publication boundary under a deployment subpath |
 | `integration.checkpoint_archive` | Real file integrity, root containment, mapped storage and Qwen3 binding |
 | `integration.device` | CUDA resource ownership, queue completion and buffer transfers |
-| `integration.generation_tiny` | Tiny FP32/BF16 full/cached computation, generation and stop/capture completion |
-| `integration.generation_8b` | Pinned tokenizer/protocol and Qwen3-8B full/cached generation comparison |
+| `integration.generation_tiny` | Tiny FP32/BF16 target generation, retained captures, AV replacement and fresh-cache interpretations |
+| `integration.generation_8b` | Pinned tokenizer/protocol, Qwen3-8B target generation and matched AV interpretation |
 
 The device scenario requires a CUDA build and NVIDIA GPU. The two generation
 scenarios additionally require generated fixtures; CTest registers them when
@@ -160,7 +162,7 @@ ctest --test-dir build/host --output-on-failure -R integration.checkpoint_archiv
 
 ## CUDA build and numerical verification
 
-### Target-generation verification
+### Target-to-AV verification
 
 The two generation scenarios retain independent full-forward comparisons and
 extend them through uneven cached prefill and one-token decode. The generator
@@ -202,6 +204,19 @@ and actual capture/logit readback byte counts. A host-ready call includes host
 allocation, submission, transfer and completion wait; it is not isolated kernel
 time. Isolating transfer/wait costs and representative long-context profiling
 remain performance work. Reports and measurements stay in ignored storage.
+
+The same two workflows continue through the AV. A separate frozen reference
+supplies independently normalized target rows, exact injection bytes, AV logits
+and selected block inputs/outputs. Full replay and cached prefill/decode receive
+identical reference inputs; the injection occurs in a later prefill chunk.
+The production Run also generates the target, retains its capture, releases
+target GPU resources, and produces two greedy AV variants with fresh caches
+and retained AV weights. It checks cancellation before execution, rejected
+capture keys and closed-run calls. Raw captures survive model release.
+
+These are four-token numerical fixtures, not tests of explanation quality.
+Incomplete explanation tags remain explicit in the record. Reference prose
+agreement is not an accuracy gate. See the [AV fixture setup](../scripts/validation/README.md#independent-av-fixtures).
 
 ### Building and running the scenarios
 

@@ -38,18 +38,19 @@
   Analysis is clean on macOS and Linux/CUDA. Accepted and pushed as `b2be166`.
   Diagnostic inventories and detailed reports remain in ignored storage.
 
-- Andrew approved the complete target-to-AV interpretation header design: pairing,
-  explicit embedding replacement, resident weights/fresh sequence caches,
-  retained records, scheduling and measurement contracts. Both C++ corpora were
-  queried and applicable full rules read for this design phase. The pinned AV
-  metadata/config/template hashes were checked. New APIs are declarations only;
-  individual header syntax checks, the strict host build, all 16 existing host
-  units and host clang-tidy (including isolated new-header checks) pass.
-  Implementation and AV numerical acceptance remain pending. See the
+- The approved target-to-AV header design is committed as `996aac1`. The complete
+  implementation now covers pinned pairing/normalization, explicit embedding
+  replacement, resident weights with fresh sequence caches, retained records,
+  scheduling and phase measurements. Both C++ corpora were queried and cited.
+  Strict host/CUDA builds, 18 host units, Linux ASan/UBSan, archive/site checks
+  and host/CUDA clang-tidy pass. Native and forced-PTX tiny/8B target-to-AV
+  numerical workflows pass with unchanged target oracle and separately frozen
+  AV fixtures/limits; CUDA memcheck reports zero errors. Normalization/injection
+  bytes and final cached/full AV logits match exactly. Independent AV output
+  comparisons pass the fixed per-row limits, without a bit-exactness claim.
+  The integration inventory remains five; former generation workflows include AV.
+  Implementation is accepted for commit; publication remains pending. See the
   [slice mapping](../architecture/file-mapping.md#target-to-av-interpretation-header-design).
-  Preserve the frozen target oracle; establish a separate frozen AV baseline
-  before implementing. Replace the two generation integration scenarios with
-  complete target-to-AV workflows so the repository remains at five.
 
 - The project site is deployed at `dolittle.plainsight-systems.com`. The first
   build and deployment passed; HTTP content, Code link, and share metadata are
@@ -62,8 +63,7 @@
 1. Configure host NVIDIA Container Toolkit access before claiming Docker GPU
    execution. The digest-pinned source build and native Linux execution work;
    this setup limitation does not invalidate the recorded native checks.
-2. Continue toward selected target/NLA phase scheduling and the synchronized
-   browser interface, with complete slice boundaries and at most five integration
+2. Continue toward the server and synchronized browser interface, with complete slice boundaries and at most five integration
    scenarios across the repository. Long-context and additional GPU validation
    remain explicit future evidence rather than inferred compatibility.
 

@@ -156,3 +156,40 @@ bundle. Keep that output on the checkpoint's filesystem and keep linked artifact
 immutable. Fixture outputs stay in the ignored cache; the actual JSON is about
 100 MiB including complete generation rows. GPU execution and comparison belong to the generation integration
 scenario, not to this generator or the isolated unit tests.
+
+
+## Independent AV fixtures
+
+`av_reference.py` freezes the next stage of each existing numerical workflow.
+It imports the unchanged forward reference (checking its source SHA-256), never
+Dolittle. The captured target row is immutable input: CPU FP32 norm, divide,
+scale, then one cast to AV storage and replacement of the stock embedding row.
+Ordinary causal inference uses the existing independent operator policy. It
+records full replay at each of four greedy output steps, selected intermediate
+activations, exact prompt/marker alignment and environment/source hashes.
+The normalized-vector limits are fixed before execution; AV output limits come
+from the unchanged forward policy. Existing output files are rejected.
+
+After generating the target fixtures above, run from the repository root:
+
+```sh
+.venv-validation/bin/python scripts/validation/av_reference.py --target-fixture .cache/generation-fixtures/tiny-fp32/fixture.json --output .cache/av-fixtures/tiny-fp32.json
+.venv-validation/bin/python scripts/validation/av_reference.py --target-fixture .cache/generation-fixtures/tiny-bf16/fixture.json --output .cache/av-fixtures/tiny-bf16.json
+.venv-validation/bin/python scripts/validation/av_reference.py --target-fixture .cache/generation-fixtures/qwen3-8b-bf16/fixture.json --av .cache/validation-8b/models/marco-bazzani--Qwen3-8B-nla --output .cache/av-fixtures/qwen3-8b-bf16.json
+```
+
+The production pair verifies the full target manifest, so its fixture directory
+also needs `LICENSE`, `README.md`, `merges.txt` and `vocab.json` from the same pinned
+target download. Copy or hardlink these additional immutable artifacts into
+`.cache/generation-fixtures/qwen3-8b-bf16/`; do not replace existing files or the
+frozen target fixture. AV verification includes all pinned repository artifacts
+outside `ar/`; the reconstructor is not loaded. Each AV fixture records its model
+root as an absolute path, so generate it where the engine checks will run.
+
+Then run `python3 scripts/check.py gpu --fixtures .cache/generation-fixtures`
+and repeat with `--force-ptx`. CTest uses the same sibling `av-fixtures` layout
+when `DOLITTLE_GENERATION_FIXTURES` is configured; its working directory is the
+repository root so the pinned model manifest can be located. Direct executable
+runs also require that working directory. Keep fixture hashes and reports in
+ignored storage. The generated four-token output is numerical coverage, not an
+interpretation-quality benchmark or proof for arbitrary contexts.

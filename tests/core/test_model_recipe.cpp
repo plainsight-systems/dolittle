@@ -4,6 +4,11 @@
  * never call a concrete model's recipe generator or execute a forward pass.
  * Test valid schedules, unique sources, immutable externals, exact metadata,
  * selected-logit dimensions and rejection boundaries, not internal slot counts.
+ * Embedding replacement contract: the declared boundary must name the actual
+ * lookup output and producer, never an unrelated tensor or operation.
+ * Implementation consultation, 2026-10-19: cpp-guidelines I.7 (#ri-post) checks
+ * the public boundary invariant; cpp-perf-guidelines GPU.9 keeps replacement
+ * lifetime metadata explicit (guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md).
  * Algorithm: docs/architecture/transformer-execution.md, "Preparing the first
  * execution recipe": describe a small schedule, validate it, then independently
  * violate one public structural invariant per case. No mathematical equivalence
@@ -139,6 +144,16 @@ void valid_schedules() {
     models::validate_recipe(model, recipe, length, mode, selected);
 }
 
+void embedding_contracts() {
+    const DeclaredModel model;
+    auto recipe = declared_recipe(model);
+    recipe.embedding_boundary = models::EmbeddingBoundary{embedded, 0};
+    models::validate_recipe(model, recipe, length, mode, selected);
+    reject_recipe([](auto &r) { r.embedding_boundary = models::EmbeddingBoundary{embedded, r.operations.size()}; });
+    reject_recipe([](auto &r) { r.embedding_boundary = models::EmbeddingBoundary{residual, 0}; });
+    reject_recipe([](auto &r) { r.embedding_boundary = models::EmbeddingBoundary{embedded, 1}; });
+}
+
 void source_and_layout_contracts() {
     reject_recipe([](auto &r) { std::swap(r.operations.at(0), r.operations.at(1)); });
     reject_recipe([](auto &r) { r.operations.push_back(r.operations.at(0)); });
@@ -233,6 +248,7 @@ void request_contracts() {
 
 int main() try {
     valid_schedules();
+    embedding_contracts();
     source_and_layout_contracts();
     parameter_contracts();
     observation_contracts();

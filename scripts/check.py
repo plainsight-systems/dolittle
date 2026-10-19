@@ -8,6 +8,8 @@ when the NVIDIA Container Toolkit is configured. Models/fixtures stay outside
 the image. No downloads or administrator changes are performed by GPU checks.
 """
 import argparse
+import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -21,13 +23,16 @@ def command(args, **kwargs):
     subprocess.run([str(arg) for arg in args], cwd=ROOT, check=True, **kwargs)
 
 
-def container_command(args, gpu=False, fixtures=None, force_ptx=False, image=IMAGE):
+def container_command(args, gpu=False, fixtures=None, force_ptx=False, image=IMAGE, read_roots=()):
     result = ["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
               "--volume", f"{ROOT}:{ROOT}", "--workdir", ROOT]
     if gpu:
         result += ["--gpus", "all"]
     if fixtures and not fixtures.is_relative_to(ROOT):
         result += ["--volume", f"{fixtures}:{fixtures}:ro"]
+    for root in sorted(set(read_roots)):
+        if not root.is_relative_to(ROOT) and root != fixtures:
+            result += ["--volume", f"{root}:{root}:ro"]
     if force_ptx:
         result += ["--env", "CUDA_FORCE_PTX_JIT=1"]
     return result + [image] + list(args)
@@ -42,7 +47,7 @@ def main():
     build = sub.add_parser("cuda-build", help="build CUDA engine and integration drivers")
     build.add_argument("--native", action="store_true", help="use installed CUDA 13.2+ and build dependencies")
     build.add_argument("--build-dir", type=Path, default=ROOT / "build/cuda")
-    gpu = sub.add_parser("gpu", help="run device, tiny generation and pinned 8B integration scenarios")
+    gpu = sub.add_parser("gpu", help="run device, tiny and pinned 8B target-to-AV scenarios")
     gpu.add_argument("--fixtures", type=Path, required=True)
     gpu.add_argument("--build-dir", type=Path, default=ROOT / "build/cuda")
     gpu.add_argument("--container", action="store_true", help="requires working Docker GPU access")
@@ -85,6 +90,20 @@ def main():
         command([build_dir / "test_checkpoint_archive"])
     else:
         fixtures = args.fixtures.resolve(strict=True)
+        av_fixtures = fixtures.parent / "av-fixtures"
+        read_roots = [av_fixtures]
+        for kind in ("tiny-fp32", "tiny-bf16", "qwen3-8b-bf16"):
+            reference = json.loads((av_fixtures / f"{kind}.json").read_text())
+            for source, expected in (
+                (fixtures / kind / "fixture.json", reference["target_fixture_sha256"]),
+                (ROOT / "scripts/validation/av_reference.py", reference["generator_sha256"]),
+                (ROOT / "scripts/validation/forward_reference.py", reference["oracle_sha256"]),
+            ):
+                with source.open("rb") as stream:
+                    digest = hashlib.file_digest(stream, "sha256").hexdigest()
+                if digest != expected:
+                    parser.error(f"frozen AV provenance mismatch: {source}")
+            read_roots.append(Path(reference["root"]).resolve(strict=True))
         args.report_dir.mkdir(parents=True, exist_ok=True)
         environment = os.environ.copy()
         if args.force_ptx:
@@ -100,7 +119,8 @@ def main():
         }
         for name, invocation in scenarios.items():
             if args.container:
-                invocation = container_command(invocation, gpu=True, fixtures=fixtures, force_ptx=args.force_ptx)
+                invocation = container_command(invocation, gpu=True, fixtures=fixtures, force_ptx=args.force_ptx,
+                                               read_roots=read_roots)
             report = args.report_dir / f"{name}-{suffix}.json"
             print(f"Running {name} ({suffix}); report: {report}", flush=True)
             with report.open("w") as output:

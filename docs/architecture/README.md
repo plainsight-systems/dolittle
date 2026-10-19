@@ -22,7 +22,7 @@ model as the entire architecture. The first forward-pass file-header designs
 are complete. The first full forward-pass sources now implement loading and
 binding, host preparation, CUDA resources and kernels, execution and completed-
 result comparison. See [build commands](../../tests/README.md) for the separate
-host, archive, device and forward scenarios; build success alone does not
+host, archive, device and target-to-AV scenarios; build success alone does not
 establish equivalence.
 
 CUDA 13.2 compilation uses a digest-pinned Docker environment, with nlohmann/json
@@ -39,14 +39,14 @@ contracts and measurements are in the
 [comparison](../research/2026-10-16-nla-comparison/README.md).
 
 The selected pairing requires zero-based block-24 output, but shared observation
-planning accepts any model-advertised block input/output. The separate full AV,
-28-block AR and AR value head remain later implementation work. Sequential BF16
-execution fits the 24 GB 3090 Ti in the historical reference workload.
+planning accepts any model-advertised block input/output. The full AV runs after
+target GPU resources are released; the 28-block AR and its value head remain later
+work. Short sequential BF16 target/AV workflows fit the tested 24 GB 3090 Ti.
 
-The implemented scope includes full target forward execution and cached target
-generation, with tokenizer/text protocols, sampling and completed raw captures.
-The next complete target-to-AV slice has
-[header designs for review](file-mapping.md#target-to-av-interpretation-header-design):
-pairing and injection, resident weights with fresh sequence caches, retained
-records and phase scheduling. Those new declarations are not an implemented NLA
-path. Reconstruction, serving and the browser application remain subsequent work.
+The implemented scope includes full target forward execution, cached generation
+and [target-to-AV interpretation](file-mapping.md#target-to-av-interpretation-header-design).
+The pinned pair owns its source checks, trained prompt, normalization and output
+tags. Shared execution owns resident weights, fresh sequence caches and explicit
+embedding replacement. Run coordinates target release before AV loading; Record
+owns exact tokens, raw captures and separately retained interpretation attempts.
+Reconstruction, serving and the browser application remain subsequent work.

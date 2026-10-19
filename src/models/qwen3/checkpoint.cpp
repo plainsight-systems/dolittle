@@ -22,6 +22,18 @@
  * cpp-guidelines R.1 (#rr-raii): resource ownership survives exceptions and teardown.
  * cpp-perf-guidelines GPU.1: keep transfers/conversions explicit and bounded.
  * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
+ *
+ * bind_causal_lm shares the strict schema with bind_target, which delegates to it.
+ * Full AV weights use the same verified config/schema. Source identity remains
+ * available directly from the owned archive; target binding identities are stable.
+ * AR shards/value heads remain outside this causal-LM binding contract.
+ * Corpus consultation, implementation (both servers queried, full rules read),
+ * 2026-10-19: cpp-guidelines R.1 (#rr-raii) ties resources to their owning phase;
+ * I.7 (#ri-post) makes completion, provenance and failure effects explicit.
+ * cpp-perf-guidelines GPU.1 keeps intermediate embeddings on device and budgets
+ * required transfers; source guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * cpp-perf-guidelines GPU.9 separates persistent weights from sequence storage;
+ * source guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
  */
 #include "bounds.h"
 #include "models/qwen3/checkpoint.h"
@@ -162,6 +174,7 @@ class TargetCheckpoint final : public BoundCheckpoint {
         }
     }
     const Model &model() const noexcept override { return *model_; }
+    const tensors::formats::SourceIdentity &source_identity() const noexcept override { return archive_->identity(); }
     std::string_view identity() const noexcept override { return identity_; }
     tensors::HostView parameter(ParameterId id) const override {
         if (id.value >= parameters_.size()) {
@@ -302,7 +315,7 @@ std::vector<ParameterBinding> bind_parameters(const Config &config,
     return bindings;
 }
 
-std::unique_ptr<BoundCheckpoint> bind_target(std::unique_ptr<tensors::formats::TensorArchive> archive,
+std::unique_ptr<BoundCheckpoint> bind_causal_lm(std::unique_ptr<tensors::formats::TensorArchive> archive,
                                              std::string_view configuration_artifact) {
     if (!archive || archive->tensors().empty()) {
         throw std::invalid_argument("empty checkpoint archive");
@@ -315,5 +328,9 @@ std::unique_ptr<BoundCheckpoint> bind_target(std::unique_ptr<tensors::formats::T
     auto model = make_model(config);
     return std::make_unique<TargetCheckpoint>(std::move(archive), std::move(model), std::move(bindings),
                                               configuration_artifact);
+}
+std::unique_ptr<BoundCheckpoint> bind_target(std::unique_ptr<tensors::formats::TensorArchive> archive,
+                                             std::string_view configuration_artifact) {
+    return bind_causal_lm(std::move(archive), configuration_artifact);
 }
 } // namespace dolittle::models::qwen3

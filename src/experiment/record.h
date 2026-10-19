@@ -1,5 +1,5 @@
 /*
- * Header design only; durable in-memory experiment records are not implemented.
+ * Durable in-memory experiment record contract.
  * Axis R4: owned target transcript/captures and append-only interpretation variants.
  * Contract: one Record owns one completed or interrupted target result, its exact
  * formatted prompt, decoded byte mapping and segmentation, plus bounded variants.
@@ -44,12 +44,12 @@
  * Limits include owned vector/string capacities and index/entry storage; allocator
  * and process overhead are excluded explicitly, never represented as a RAM cap.
  *
- * Cost: O(N + captured rows + output bytes) metadata/index construction; payload
+ * Cost: O(N + output bytes + R log R) construction for R indexed capture rows; payload
  * N*D*b for one site. Selected BF16 pair costs 8192*N capture bytes, plus metadata,
  * decoded text, pending candidate and generation staging admitted by Run.
  * Optimization: move payload owners and index their rows; no whole-trace copy on
  * model switch or variant append. Growth is bounded by count and byte budgets.
- * Corpus consultation, header design, 2026-10-19 (full rules read):
+ * Corpus consultation, header design and implementation, 2026-10-19 (full rules read):
  * cpp-guidelines R.1 (#rr-raii): records, not GPU plans, own retained payloads.
  * cpp-guidelines I.7 (#ri-post): atomic append and unavailable-row semantics.
  * cpp-perf-guidelines GPU.1: retain the existing completed readback; no replay
@@ -96,7 +96,7 @@ struct InjectionProvenance {
     std::string conversion_identity;
 };
 enum class AttemptOutcome : std::uint8_t { completed, cancelled, failed };
-enum class AttemptStage : std::uint8_t { conversion, loading, preparation, generation, complete };
+enum class AttemptStage : std::uint8_t { conversion, loading, preparation, generation, decoding, complete };
 struct Interpretation {
     CaptureKey capture;
     inference::GenerationSettings requested_settings;

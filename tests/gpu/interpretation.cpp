@@ -1,0 +1,466 @@
+/*
+ * Verification axis D3: AV continuation of the existing tiny/8B experiment
+ * scenarios. Input is a frozen target fixture; the sibling AV fixture supplies
+ * independently frozen injection/logit/capture expectations. Returns owned metrics.
+ * No sixth scenario is registered. The implementation owns temporary checkpoints
+ * and releases each plan before switching model roles; caller's device outlives it.
+ * Algorithm: docs/architecture/logical-overview.md, sections 2 through 4:
+ * 1. Read pinned fixtures and verify model artifacts. Normalize the independent
+ *    target row; compare FP32 values and exact stored replacement bytes.
+ * 2. Generate through Run, release target execution and retain the selected row.
+ *    Compare it with the unchanged target limits, then snapshot its owned bytes.
+ * 3. Feed identical reference injection bytes to AV full and cached execution.
+ *    Compare selected activations and logits against both fixed error bounds for
+ *    every row. Require exact final cached/full logits on the same consumed IDs.
+ * 4. Interpret the retained engine row twice. Require expected greedy IDs and
+ *    fresh sequence state with retained AV weights, then check pre-request
+ *    cancellation, rejected calls and capture lifetime after model close.
+ * Cost: bounded fixture passes; comparison work and reference copies stay outside
+ * inference timing. Provider callbacks borrow immutable requests that outlive Run.
+ * Optimization: compare completed host bytes without additional diagnostic waits.
+ * Corpus implementation consultation, 2026-10-19: cpp-guidelines R.1 (#rr-raii),
+ * I.7 (#ri-post) enforce ownership and numerical postconditions. Performance GPU.1
+ * separates fixture/readback work from compute; source
+ * guidelines/gpu/GPU.1-keep-data-on-device.md.
+ */
+#include "tests/gpu/interpretation.h"
+#include "bounds.h"
+#include <array>
+#include "experiment/run.h"
+#include "inference/sampling/categorical.h"
+#include "models/qwen3/checkpoint.h"
+#include "nla/pairs/qwen3_8b.h"
+#include "tensors/formats/safetensors.h"
+#include "tensors/representations/bf16.h"
+#include "tensors/tensor.h"
+#include "text/qwen3_chat.h"
+#include "tokenizers/byte_bpe.h"
+#include "tests/support/check.h"
+#include "tests/support/numerical.h"
+#include <algorithm>
+#include <cstring>
+#include <fstream>
+
+namespace dolittle::tests {
+namespace {
+using Json = nlohmann::json;
+constexpr std::size_t mib = std::size_t{1024} * 1024, gib = 1024 * mib;
+Json read(const std::filesystem::path &p) {
+    std::ifstream f(p);
+    if (!f) {
+        throw std::runtime_error("missing interpretation fixture: " + p.string());
+    }
+    return Json::parse(f);
+}
+tensors::ElementType type(const Json &j) {
+    return j == "float32" ? tensors::ElementType::float32 : tensors::ElementType::bfloat16;
+}
+std::string source_text(const tensors::formats::SourceIdentity &s) {
+    return s.repository + "/" + s.revision + "/" + s.artifact_digest;
+}
+tensors::formats::safetensors::OpenRequest request(const Json &j, const std::filesystem::path &root) {
+    tensors::formats::safetensors::OpenRequest r{
+        root, j.at("repository"), j.at("revision"), {},    j.at("shards").get<std::vector<std::string>>(),
+        {},   16 * mib,           128 * mib,        100000};
+    if (!j.at("index").is_null()) {
+        r.index = j.at("index").get<std::string>();
+    }
+    for (const auto &f : j.at("artifacts")) {
+        r.artifacts.push_back({f.at("relative_path"), f.at("byte_size"), f.at("sha256")});
+    }
+    return r;
+}
+std::string artifact(const tensors::formats::TensorArchive &a, std::string_view name) {
+    const auto bytes = a.artifact(name);
+    std::string s(bytes.size(), '\0');
+    std::memcpy(s.data(), bytes.data(), bytes.size());
+    return s;
+}
+struct Text {
+    std::unique_ptr<tokenizers::Tokenizer> tokenizer;
+    std::unique_ptr<text::Protocol> protocol;
+};
+Text text_helpers(const tensors::formats::TensorArchive &archive) {
+    const auto tokenizer = artifact(archive, "tokenizer.json"),
+               config = artifact(archive, "tokenizer_config.json"),
+               generation = artifact(archive, "generation_config.json"),
+               identity = source_text(archive.identity());
+    return {tokenizers::make_byte_bpe({tokenizer, config, identity}, {128 * mib, mib, mib, mib}),
+            text::make_qwen3_chat({config, generation, identity}, mib)};
+}
+struct FixtureTokenizer final : tokenizers::Tokenizer {
+    std::string source;
+    explicit FixtureTokenizer(std::string s) : source(std::move(s)) {
+    }
+    std::string_view identity() const noexcept override {
+        return source;
+    }
+    std::vector<std::uint32_t> encode(std::string_view) const override {
+        throw std::logic_error("fixture protocol supplies IDs");
+    }
+    tokenizers::DecodedBytes decode(std::span<const std::uint32_t> ids) const override {
+        tokenizers::DecodedBytes out;
+        out.tokens.reserve(ids.size());
+        for (auto id : ids) {
+            const auto begin = out.bytes.size();
+            out.bytes += 'x';
+            out.tokens.push_back({id, begin, out.bytes.size(), true});
+        }
+        return out;
+    }
+    bool contains(std::uint32_t) const noexcept override {
+        return true;
+    }
+};
+struct FixtureProtocol final : text::Protocol {
+    text::PreparedPrompt prompt;
+    text::PreparedPrompt prepare(const text::Prompt &, const tokenizers::Tokenizer &) const override {
+        return prompt;
+    }
+    std::vector<text::TokenSegment> segment(std::span<const std::uint32_t> ids, std::size_t start,
+                                            text::ThinkingMode) const override {
+        std::vector<text::TokenSegment> result;
+        result.reserve(ids.size());
+        for (std::size_t i = 0; i < ids.size(); ++i) {
+            result.push_back({start + i, text::SegmentKind::unclassified});
+        }
+        return result;
+    }
+};
+struct FixturePair final : nla::Pair {
+    nla::PairIdentity provenance;
+    models::ObservationSite site{};
+    text::PreparedPrompt prompt;
+    models::TokenPosition injection_position{};
+    float scale{};
+    const nla::PairIdentity &identity() const noexcept override {
+        return provenance;
+    }
+    models::ObservationSite target_site() const noexcept override {
+        return site;
+    }
+    const text::PreparedPrompt &verbalizer_prompt() const noexcept override {
+        return prompt;
+    }
+    void validate_model(nla::ModelRole role, const tensors::formats::SourceIdentity &s,
+                        const models::BoundCheckpoint &c, tensors::ComputationMode mode) const override {
+        const auto &expected = role == nla::ModelRole::target ? provenance.target : provenance.verbalizer;
+        check(s.artifact_digest == expected.artifact_digest &&
+                  c.source_identity().artifact_digest == s.artifact_digest &&
+                  mode.activation_storage == site.storage_type,
+              "tiny pairing identity");
+    }
+    nla::Injection prepare_injection(nla::CaptureRow row) const override {
+        return nla::normalize_activation(row, injection_position, scale, site.storage_type);
+    }
+    nla::ExplanationRange explanation(std::string_view raw) const override {
+        return nla::explanation_tags(raw);
+    }
+};
+std::vector<std::byte> encode(std::span<const float> values, tensors::ElementType storage) {
+    std::vector<std::byte> bytes(values.size() * tensors::element_bytes(storage));
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (storage == tensors::ElementType::float32) {
+            std::memcpy(std::span(bytes).subspan(i * sizeof(float)).data(), &dolittle::at(values, i),
+                        sizeof(float));
+        } else {
+            tensors::write_le(tensors::from_float(dolittle::at(values, i)),
+                              std::span<std::byte, 2>(std::span(bytes).subspan(i * 2).data(), 2));
+        }
+    }
+    return bytes;
+}
+std::vector<float> decode(std::span<const std::byte> bytes, tensors::ElementType storage) {
+    std::vector<float> values(bytes.size() / tensors::element_bytes(storage));
+    if (storage == tensors::ElementType::float32) {
+        std::memcpy(values.data(), bytes.data(), bytes.size());
+    } else {
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            values.at(i) = tensors::to_float(
+                tensors::read_le(std::span<const std::byte, 2>(bytes.subspan(i * 2).data(), 2)));
+        }
+    }
+    return values;
+}
+Json compare(const Json &expected, std::span<const std::byte> bytes, tensors::ElementType storage) {
+    const auto values = expected.at("values").get<std::vector<float>>();
+    const auto actual = decode(bytes, storage);
+    const auto &limit = expected.at("tolerance");
+    const auto m =
+        compare_values(values, actual, {limit.at("max_absolute_error"), limit.at("max_relative_l2")});
+    bool passed = m.passed;
+    Json rows = Json::array();
+    const auto width = expected.at("width").get<std::size_t>();
+    for (std::size_t row = 0; row < expected.at("positions").size(); ++row) {
+        const auto metric = compare_values(std::span(values).subspan(row * width, width),
+                                           std::span(actual).subspan(row * width, width),
+                                           {limit.at("max_absolute_error"), limit.at("max_relative_l2")});
+        passed = passed && metric.passed;
+        rows.push_back({{"position", expected.at("positions").at(row)},
+                        {"passed", metric.passed},
+                        {"max_absolute", metric.maximum_absolute_error},
+                        {"relative_l2", metric.relative_l2 ? Json(*metric.relative_l2) : Json(nullptr)}});
+    }
+    return {{"passed", passed},
+            {"kind", expected.contains("block") ? "capture" : "logits"},
+            {"block", expected.value("block", Json(nullptr))},
+            {"boundary", expected.value("boundary", Json(nullptr))},
+            {"rows", rows},
+            {"max_absolute", m.maximum_absolute_error},
+            {"relative_l2", m.relative_l2 ? Json(*m.relative_l2) : Json(nullptr)}};
+}
+// Requests are immutable locals and outlive Run and every provider call.
+experiment::ModelProvider provider(const tensors::formats::safetensors::OpenRequest &r) {
+    return [&r](std::size_t allowance) {
+        if (allowance < r.max_metadata_bytes) {
+            throw std::length_error("loader metadata allowance");
+        }
+        auto archive = tensors::formats::safetensors::open(r);
+        auto source = archive->identity();
+        return experiment::LoadedModel{std::move(source),
+                                       models::qwen3::bind_causal_lm(std::move(archive), "config.json"),
+                                       r.max_metadata_bytes};
+    };
+}
+} // namespace
+Json check_interpretation(gpu::Device &device, const std::filesystem::path &target_fixture) {
+    const auto target = read(target_fixture);
+    const auto av_path = target_fixture.parent_path().parent_path().parent_path() / "av-fixtures" /
+                         (target_fixture.parent_path().filename().string() + ".json");
+    const auto av = read(av_path);
+    const bool actual = av.at("repository") == "marco-bazzani/Qwen3-8B-nla";
+    const auto storage = type(av.at("dtype"));
+    const tensors::ComputationMode mode{storage, tensors::ElementType::float32};
+    auto target_request = request(target, target_fixture.parent_path());
+    auto av_request = request(av, av.at("root").get<std::string>());
+    if (actual) {
+        const auto manifest = read("scripts/validation/models-8b.json");
+        const auto &entry = manifest.at("models").at(0);
+        target_request.artifacts.clear();
+        for (const auto &f : entry.at("files")) {
+            target_request.artifacts.push_back({f.at("path"), f.at("bytes"), f.at("sha256")});
+        }
+    }
+    auto target_archive = tensors::formats::safetensors::open(target_request);
+    auto av_archive = tensors::formats::safetensors::open(av_request);
+    const auto target_source = target_archive->identity(), av_source = av_archive->identity();
+    Text target_text, av_text;
+    std::unique_ptr<nla::Pair> pair;
+    const auto target_tokens =
+        target.at("generation").at("reference").at("token_ids").get<std::vector<std::uint32_t>>();
+    const auto target_prompt_count = target.at("generation").at("prompt_tokens").get<std::size_t>();
+    if (actual) {
+        target_text = text_helpers(*target_archive);
+        av_text = text_helpers(*av_archive);
+        pair = nla::pairs::make_qwen3_8b({target_source, av_source, av_archive->artifact("nla_meta.yaml"),
+                                          *av_text.tokenizer, *av_text.protocol},
+                                         {mib, mib, 4096});
+    } else {
+        target_text.tokenizer =
+            std::make_unique<FixtureTokenizer>(source_text(target_source) + "/fixture-tokenizer");
+        av_text.tokenizer = std::make_unique<FixtureTokenizer>(source_text(av_source) + "/fixture-tokenizer");
+        auto protocol = std::make_unique<FixtureProtocol>();
+        protocol->prompt = {"fixture-protocol",
+                            std::string(target_text.tokenizer->identity()),
+                            "fixture",
+                            std::vector<std::uint32_t>(target_tokens.begin(),
+                                                       target_tokens.begin() +
+                                                           static_cast<std::ptrdiff_t>(target_prompt_count)),
+                            {36},
+                            text::ThinkingMode::enabled};
+        target_text.protocol = std::move(protocol);
+        auto fixture_pair = std::make_unique<FixturePair>();
+        fixture_pair->provenance = {"fixture-l2", target_source, av_source, "fixture"};
+        fixture_pair->site = {{models::ObservationBoundary::block_output, {av.at("capture_block")}},
+                              av.at("capture_values").size(),
+                              storage};
+        fixture_pair->prompt = {"fixture-av",
+                                std::string(av_text.tokenizer->identity()),
+                                "fixture",
+                                av.at("prompt_ids").get<std::vector<std::uint32_t>>(),
+                                av.at("stop_ids").get<std::vector<std::uint32_t>>(),
+                                text::ThinkingMode::enabled};
+        fixture_pair->injection_position = {av.at("injection_position")};
+        fixture_pair->scale = av.at("scale");
+        pair = std::move(fixture_pair);
+    }
+    check(pair->verbalizer_prompt().ids == av.at("prompt_ids").get<std::vector<std::uint32_t>>(),
+          "trained AV prompt IDs");
+    if (actual) {
+        check(pair->verbalizer_prompt().formatted_utf8 == av.at("formatted_prompt").get<std::string>(),
+              "trained AV prompt bytes");
+    }
+    const auto site = pair->target_site();
+    const auto capture_values = av.at("capture_values").get<std::vector<float>>();
+    const auto capture_bytes = encode(capture_values, storage);
+    const nla::CaptureRow reference_row{site, {av.at("capture_position")}, capture_bytes};
+    const auto injection = pair->prepare_injection(reference_row);
+    const auto fp32 = nla::normalize_activation(reference_row, injection.embedding.position, injection.scale,
+                                                tensors::ElementType::float32);
+    const auto &normalization_limit = av.at("normalization_tolerance");
+    const auto normalization = compare_values(
+        av.at("normalized_fp32").get<std::vector<float>>(),
+        decode(fp32.embedding.bytes, tensors::ElementType::float32),
+        {normalization_limit.at("max_absolute_error"), normalization_limit.at("max_relative_l2")});
+    check(normalization.passed, "normalized FP32 vector disagrees with frozen reference");
+    check(injection.embedding.bytes == encode(av.at("injection_values").get<std::vector<float>>(), storage),
+          "injected stored bytes disagree with frozen reference");
+    target_archive.reset();
+    av_archive.reset();
+    auto sampler = std::make_shared<inference::sampling::Categorical>(actual ? 151936 : 37);
+    experiment::RunInputs inputs{
+        std::move(pair),
+        provider(target_request),
+        provider(av_request),
+        mode,
+        mode,
+        std::move(target_text.tokenizer),
+        std::move(av_text.tokenizer),
+        std::move(target_text.protocol),
+        [sampler](auto logits, auto settings, auto &rng) { return sampler->select(logits, settings, rng); },
+        device.info().backend,
+        256 * mib};
+    experiment::Run run(device, {1}, std::move(inputs), {23 * gib, gib, 16, 4096, 4096, mib, {256 * mib, 4}});
+    const inference::GenerationSettings target_settings{{inference::sampling::SelectionMode::greedy, 1, 0, 1},
+                                                        123,
+                                                        target.at("generation").at("max_new_tokens")};
+    run.generate({{}, "What is 2 + 2?", text::ThinkingMode::enabled}, target_settings);
+    check(run.phase() == experiment::Phase::retained && run.record(),
+          "target weights released and result retained");
+    check(run.record()->target().generation.tokens == target_tokens,
+          "target output changed in experiment orchestration");
+    const experiment::CaptureKey key{site.point, {av.at("capture_position")}};
+    const auto retained = run.record()->capture(key);
+    if (!retained) {
+        throw std::runtime_error("target capture was not retained");
+    }
+    const auto retained_snapshot = std::vector<std::byte>(retained->bytes.begin(), retained->bytes.end());
+    const auto &target_captures = target.at("generation").at("reference").at("captures");
+    const auto target_capture =
+        std::find_if(target_captures.begin(), target_captures.end(), [&](const auto &c) {
+            return c.at("block") == av.at("capture_block") && c.at("boundary") == "block_output";
+        });
+    check(target_capture != target_captures.end(), "target oracle capture site");
+    const auto &target_limit = target_capture->at("tolerance");
+    const auto target_metric =
+        compare_values(capture_values, decode(retained->bytes, storage),
+                       {target_limit.at("max_absolute_error"), target_limit.at("max_relative_l2")});
+    // The target keeps its original frozen numerical limits; byte identity here
+    // checks retention against the engine's own completed snapshot, not a new
+    // zero-error requirement for the preexisting FP32 reference comparison.
+    Json numerical = Json::array();
+    bool passed = target_metric.passed;
+    std::vector<std::byte> full_av_logits;
+    // Inspect AV math on identical frozen injection bytes before variants. All
+    // these device owners die before Run loads its persistent verbalizer.
+    {
+        auto loaded = provider(av_request)(256 * mib);
+        const auto &reference = av.at("reference");
+        const auto ids = reference.at("token_ids").get<std::vector<std::uint32_t>>();
+        inference::ForwardOptions options{
+            mode, std::vector<models::TokenPosition>{{ids.size() - 1}}, {}, {64 * mib, mib}, 23 * gib};
+        for (const auto &c : reference.at("captures")) {
+            std::vector<models::TokenPosition> positions;
+            for (const auto &p : c.at("positions")) {
+                positions.push_back({p});
+            }
+            options.observations.push_back(
+                {{c.at("boundary") == "block_input" ? models::ObservationBoundary::block_input
+                                                    : models::ObservationBoundary::block_output,
+                  {c.at("block")}},
+                 positions});
+        }
+        auto full = inference::prepare_full_forward(device, *loaded.checkpoint, {ids.size()}, options);
+        const auto result = full.execute(ids, {1000}, injection.embedding);
+        full_av_logits.assign(result.logits().bytes.begin(), result.logits().bytes.end());
+        auto metric = compare(reference.at("logits"), result.logits().bytes, storage);
+        passed = passed && metric.at("passed").get<bool>();
+        numerical.push_back(metric);
+        for (std::size_t i = 0; i < result.captures().size(); ++i) {
+            metric =
+                compare(reference.at("captures").at(i), dolittle::at(result.captures(), i).bytes, storage);
+            passed = passed && metric.at("passed").get<bool>();
+            numerical.push_back(metric);
+        }
+    }
+    {
+        auto loaded = provider(av_request)(256 * mib);
+        auto resident =
+            inference::load_resident_model(device, std::move(loaded.checkpoint), {mode, 23 * gib, 16 * mib});
+        const auto prompt = av.at("prompt_ids").get<std::vector<std::uint32_t>>();
+        const auto &steps = av.at("steps");
+        inference::CachedForwardOptions options{
+            mode,     {1001},   prompt.size() + av.at("max_new_tokens").get<std::size_t>(), 2, {}, {0, 0},
+            23 * gib, 512 * mib};
+        auto cached = inference::prepare_cached_forward(*resident, options, injection.embedding);
+        for (std::size_t pos = 0; pos < prompt.size();) {
+            const auto n = std::min(options.max_prefill_chunk, prompt.size() - pos);
+            const auto result = cached.consume(std::span(prompt).subspan(pos, n), pos + n == prompt.size());
+            pos += n;
+            if (result.next_logits) {
+                auto m = compare(steps.at(0).at("logits"), result.next_logits->bytes, storage);
+                passed = passed && m.at("passed").get<bool>();
+                numerical.push_back(m);
+            }
+        }
+        const auto emitted = av.at("expected_generated_ids").get<std::vector<std::uint32_t>>();
+        for (std::size_t i = 0; i < emitted.size(); ++i) {
+            const std::array token{emitted.at(i)};
+            const auto result = cached.consume(token, true);
+            const auto &expected = i + 1 < steps.size() ? steps.at(i + 1) : av.at("reference");
+            if (!result.next_logits) {
+                throw std::runtime_error("AV decode omitted logits");
+            }
+            if (i + 1 == emitted.size()) {
+                check(result.next_logits->bytes == full_av_logits,
+                      "AV cached and full final logits differ on identical input");
+            }
+            auto m = compare(expected.at("logits"), result.next_logits->bytes, storage);
+            passed = passed && m.at("passed").get<bool>();
+            numerical.push_back(m);
+        }
+        cached.finish();
+    }
+    const inference::GenerationSettings av_settings{
+        {inference::sampling::SelectionMode::greedy, 1, 0, 1}, 42, av.at("max_new_tokens")};
+    const auto first = run.interpret(key, av_settings), second = run.interpret(key, av_settings);
+    check(first.value != second.value && run.phase() == experiment::Phase::verbalizer_ready,
+          "separate variants reuse resident AV");
+    for (auto id : {first, second}) {
+        const auto &v = run.record()->variant(id).interpretation;
+        check(v.generation && v.outcome == experiment::AttemptOutcome::completed,
+              "AV generation failed: " + v.failure_message);
+        if (!v.generation) {
+            throw std::runtime_error("AV variant omitted generation");
+        }
+        const auto &g = *v.generation;
+        const auto expected = av.at("expected_generated_ids").get<std::vector<std::uint32_t>>();
+        check(std::ranges::equal(std::span(g.tokens).subspan(g.prompt_tokens), expected),
+              "AV output IDs disagree with frozen reference");
+    }
+    check(!run.record()->variant(second).interpretation.cost.load_seconds,
+          "second variant reloaded AV weights");
+    expect_throws<std::invalid_argument>([&] { (void)run.interpret({site.point, {4096}}, av_settings); });
+    std::stop_source cancelled;
+    cancelled.request_stop();
+    const auto cancelled_id = run.interpret(key, av_settings, cancelled.get_token());
+    const auto &cancelled_attempt = run.record()->variant(cancelled_id).interpretation;
+    check(cancelled_attempt.outcome == experiment::AttemptOutcome::cancelled &&
+              !cancelled_attempt.generation && !cancelled_attempt.cost.load_seconds,
+          "pre-request cancellation retains an attempt without execution");
+    const auto phase_cost = run.measurements();
+    run.close();
+    expect_throws<std::logic_error>([&] { (void)run.interpret(key, av_settings); });
+    check(run.record()->variant_count() == 3 && std::ranges::equal(retained->bytes, retained_snapshot),
+          "record survives closing model resources");
+    return {{"passed", passed},
+            {"numerical", numerical},
+            {"completed_variants", 2},
+            {"cancelled_variants", 1},
+            {"estimated_peak_device_bytes", phase_cost.estimated_peak_device_bytes},
+            {"estimated_peak_host_bytes", phase_cost.estimated_peak_host_bytes},
+            {"generated_ids", av.at("expected_generated_ids")},
+            {"normalization_max_absolute", normalization.maximum_absolute_error},
+            {"target_capture_max_absolute", target_metric.maximum_absolute_error}};
+}
+} // namespace dolittle::tests

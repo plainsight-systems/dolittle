@@ -36,7 +36,8 @@ dolittle/
 │   ├── tidy.py                      # Pinned analysis of CMake host/CUDA commands
 │   ├── site.py                      # Existing independent site tooling
 │   └── validation/
-│       ├── forward_reference.py     # Independent tiny/8B forward fixture generation
+│       ├── forward_reference.py     # Independent tiny/8B target fixtures
+│       ├── av_reference.py          # Frozen target-row-to-AV numerical fixtures
 │       └── ...                      # Existing checkpoint-selection reference tools
 ├── src/
 │   ├── bounds.h                     # Checked host span access shared across metadata families
@@ -122,6 +123,8 @@ dolittle/
 │   │   ├── test_observations.cpp
 │   │   ├── test_storage_plan.cpp
 │   │   ├── test_numerical.cpp
+│   │   ├── test_nla.cpp             # Pure conversion and output delimiter contracts
+│   │   ├── test_record.cpp          # In-memory ownership and append contracts
 │   │   ├── test_operations.cpp
 │   │   ├── test_model_recipe.cpp
 │   │   ├── test_qwen3_model.cpp
@@ -132,7 +135,8 @@ dolittle/
 │   │   └── test_checkpoint_archive.cpp # Real file integrity and binding workflow
 │   ├── gpu/                         # Numerical checks through production paths
 │   │   ├── forward_reference.{h,cpp} # Completed-result comparison contract
-│   │   ├── test_generation.cpp       # Tiny and pinned 8B generation scenarios
+│   │   ├── test_generation.cpp       # Tiny and pinned 8B target-to-AV scenarios
+│   │   ├── interpretation.{h,cpp}    # AV continuation of those same workflows
 │   │   └── test_device.cpp           # CUDA resources/transfers/completion scenario
 │   ├── app/
 │   ├── fixtures/
@@ -334,8 +338,8 @@ not have to launch a loader. Numerical array comparison is likewise separate
 from the integration harness that obtains completed model outputs.
 
 The forward-pass boundary covers loading through complete forward-result
-comparison. Target generation extends it as described below. AV/AR conventions,
-experiment scheduling, serving and application behavior remain subsequent slices.
+comparison. Target generation and AV interpretation extend it as described below.
+AR conventions, serving and application behavior remain subsequent slices.
 Do not generate those files ahead of their design.
 
 The first forward-pass source scope is now implemented: tensor/BF16 handling,
@@ -344,8 +348,8 @@ checkpoint binding, verified safetensors loading, CUDA resources and kernels,
 execution, and completed-result comparison. See the
 [verification commands](../../tests/README.md) for scenario coverage.
 
-The forward and target-generation source families have implementation bodies;
-NLA and application destinations remain planned, with no generated stubs.
+The forward, generation, AV pairing and experiment source families have implementation
+bodies; reconstruction and application destinations remain planned, with no generated stubs.
 The concrete additions stay within their existing axes:
 
 - `tensors/formats/json_metadata.h` shares bounded metadata parsing between
@@ -512,14 +516,14 @@ selection; its tie and RNG semantics are independent of reference-library RNGs.
 loop so contract tests can link it without CUDA. This is an implementation split
 within the same generation responsibility, not another architectural axis.
 Verification requirements and commands are in `tests/README.md`; current
-verification state is in the work queue. NLA execution and the browser
-application remain subsequent complete slices.
+verification state is in the work queue. AV execution continues below;
+reconstruction and the browser application remain subsequent complete slices.
 
 ### Target-to-AV interpretation header design
 
-This next complete slice covers target generation through retained, selectable
-AV interpretations. The declarations and opening contracts are designed for
-review; they do not implement NLA execution yet.
+This complete slice implements target generation through retained, selectable
+AV interpretations. Its approved header contracts are now backed by implementation
+in the existing owner families below.
 
 | Owner | Responsibility in this slice |
 |---|---|
@@ -545,20 +549,20 @@ Each interpretation starts a new contiguous KV cache while the AV weights stay
 resident. Cache pooling remains deferred. Target tokens and raw captures live in
 the record across both phases; interpretation never regenerates the target.
 Reconstruction, server and browser work remain subsequent slices. No placeholder
-AR/backend/application files are added for this header pass.
+AR/backend/application files are added for this slice.
 
-Implementation acceptance will replace the tiny and pinned-8B generation
+Implementation acceptance replaces the tiny and pinned-8B generation
 integration scenarios with their corresponding **target → retained capture → AV**
 workflows, rather than adding a sixth scenario. They retain their existing target
 acceptance gates as the first phase of that same experiment. Archive, device and
-site scenarios remain; the total stays five. Pure units cover pair rejection,
+site scenarios remain; the total stays five. Pure units cover embedding boundaries,
 normalization, delimiter extraction, record alignment/append invariants and
 record count/byte limits without filesystem, subprocess or GPU work. Phase
 switching and cache isolation belong to the complete integration workflows.
 
-Before implementation, establish and freeze a separate AV reference fixture
-generator and its precision, source hashes, input vectors and numerical limits.
-Reuse the established independent operator policy without editing the existing
+A separate AV reference fixture generator, precision, source hashes, input
+vectors and numerical limits were frozen before implementation.
+It reuses the established independent operator policy without editing the existing
 oracle, target fixtures or limits. The AV reference adds only the independently
 specified input transformation: FP32 norm, divide, scale, BF16 cast, replacement
 of the embedding lookup row, then ordinary causal inference. Reference fixture

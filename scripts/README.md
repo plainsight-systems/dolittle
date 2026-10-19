@@ -26,7 +26,7 @@ mounted for compilation, while weights remain outside the image. CMake, Ninja
 and OpenSSL development package versions are explicit in the image. Native
 CUDA 13.2+ builds are also available with `cuda-build --native`.
 
-`gpu` executes the device, tiny generation and pinned 8B generation scenarios on a
+`gpu` executes the device, tiny target-to-AV and pinned 8B target-to-AV scenarios on a
 compatible Linux NVIDIA host. It writes per-scenario JSON reports under
 `.cache/checks` by default. `--force-ptx` sets `CUDA_FORCE_PTX_JIT=1`; reports from
 that run are separate from native-code reports. Use `--container` only with
@@ -123,11 +123,20 @@ stored-byte invariance across prefixes and peer batches. Keep this acceptance
 reference and its error-budget rules fixed while correcting the engine.
 FP64 is not an acceptance oracle. See `validation/README.md`.
 
+The two model workflows now also require sibling `.cache/av-fixtures` files
+created by [av_reference.py](validation/av_reference.py). Follow the
+[AV fixture commands](validation/README.md#independent-av-fixtures), including
+the supplemental pinned target metadata. The runner verifies the target fixture,
+AV generator and original oracle hashes recorded by each AV fixture before GPU
+execution. It never regenerates or replaces a reference to clear a failure.
+Container mode mounts the AV fixture/model roots read-only in addition to the
+target fixtures; native and container paths must resolve to the recorded files.
+
 ## Later application launch
 
 The planned `run.py` entry point will check Docker/GPU prerequisites, acquire
 and verify declared model files in a persistent cache, and launch the application.
-It is not implemented in this target-generation slice. Keep downloads out of image
+It is not implemented in this interpretation slice. Keep downloads out of image
 builds and never reset a user's checkout or existing model cache.
 
 ## Project site

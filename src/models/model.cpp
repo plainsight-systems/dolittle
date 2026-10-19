@@ -29,6 +29,18 @@
  * cpp-guidelines I.4 (#ri-typed): distinct IDs and operation access roles.
  * cpp-perf-guidelines CDSA.32: validate indexed metadata once before execution.
  * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
+ *
+ * Embedding capability validation: if declared, the boundary must identify the
+ * token lookup operation's dense [N,D] activation output. Existing producer/read
+ * validation proves all consumers follow it. Runtime replacement occurs after
+ * that producer, before its consumers; validation does not perform injection.
+ * Corpus consultation, implementation (both servers queried, full rules read),
+ * 2026-10-19: cpp-guidelines R.1 (#rr-raii) ties resources to their owning phase;
+ * I.7 (#ri-post) makes completion, provenance and failure effects explicit.
+ * cpp-perf-guidelines GPU.1 keeps intermediate embeddings on device and budgets
+ * required transfers; source guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * cpp-perf-guidelines GPU.9 separates persistent weights from sequence storage;
+ * source guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
  */
 #include "bounds.h"
 #include "models/model.h"
@@ -130,6 +142,23 @@ void validate_recipe(const Model &model, const ForwardRecipe &recipe, SequenceLe
         tensors::contiguous_layout(tensors::ElementType::uint32, std::array{length.value});
     if (!same_layout(layout_at(recipe.token_input), expected_tokens)) {
         throw std::invalid_argument("token input must be dense uint32 sequence");
+    }
+    if (recipe.embedding_boundary) {
+        const auto boundary = *recipe.embedding_boundary;
+        if (boundary.producer_step >= recipe.operations.size()) {
+            throw std::invalid_argument("embedding producer out of range");
+        }
+        const auto *embedding = std::get_if<kernels::Embedding>(&recipe.operations.at(boundary.producer_step));
+        if (!embedding || embedding->output.value != boundary.tensor.value ||
+            embedding->tokens.value != recipe.token_input.value) {
+            throw std::invalid_argument("embedding boundary must name token lookup output");
+        }
+        const auto &layout = layout_at(boundary.tensor);
+        if (layout.shape.size() != 2 || layout.shape.at(0) != length.value ||
+            layout.element_type != mode.activation_storage ||
+            !same_layout(layout, tensors::contiguous_layout(layout.element_type, layout.shape))) {
+            throw std::invalid_argument("embedding boundary must be dense activation rows");
+        }
     }
     std::vector<Source> sources(recipe.tensors.size(), Source::absent);
     sources.at(recipe.token_input.value) = Source::external;

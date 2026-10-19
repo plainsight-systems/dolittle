@@ -61,6 +61,17 @@
  * Source: guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
  * cpp-perf-guidelines CDSA.32: resolve semantic roles into ordered recipe inputs.
  * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
+ *
+ * The lookup in step 1 now declares its output and producer as EmbeddingBoundary
+ * in full and incremental recipes. Executor replacement precedes block-0 input
+ * observations and RMSNorm; all block equations and absolute positions are shared.
+ * Corpus consultation, implementation (both servers queried, full rules read),
+ * 2026-10-19: cpp-guidelines R.1 (#rr-raii) ties resources to their owning phase;
+ * I.7 (#ri-post) makes completion, provenance and failure effects explicit.
+ * cpp-perf-guidelines GPU.1 keeps intermediate embeddings on device and budgets
+ * required transfers; source guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * cpp-perf-guidelines GPU.9 separates persistent weights from sequence storage;
+ * source guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
  */
 #include "bounds.h"
 #include "models/qwen3/model.h"
@@ -268,6 +279,7 @@ class Qwen3Model final : public Model {
         const auto d = config_.residual_width;
         const auto h = config_.head_width;
         auto residual = activation({n, d});
+        recipe.embedding_boundary = EmbeddingBoundary{residual, recipe.operations.size()};
         recipe.operations.emplace_back(
             kernels::Embedding{recipe.token_input, weights.at(embedding_.value), residual});
         for (std::size_t i = 0; i < blocks_.size(); ++i) {

@@ -71,7 +71,7 @@
  * cpp-perf-guidelines CDSA.32: resolve producer/cache bindings into execution order.
  * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
  *
- * Planned embedding-input extension (header design only, 2026-10-19):
+ * Embedding-input extension (implemented, 2026-10-19):
  * An optional EmbeddingBoundary names the embedding lookup's output tensor and
  * producer step explicitly. The tensor is contiguous [rows,D] in activation
  * storage; the named operation is its sole producer. Every consumer and any
@@ -79,15 +79,15 @@
  * executor input applied after lookup and before those consumers, not another
  * model equation or an inferred "first operation" convention. Recipe validation
  * will reject an inconsistent boundary before allocation. Absence means this
- * recipe does not support embedding replacement. Current recipes do not yet
- * publish this capability; implementation will populate and validate it together.
+ * recipe does not support embedding replacement. Qwen3 full and incremental recipes
+ * publish and validate this capability.
  * For chunk prefix S and active rows B, a replacement at absolute position p
  * affects local row p-S exactly when S <= p < S+B. RoPE still uses absolute
  * positions. Observation and cache dependencies see the replaced residual.
  * Cost is one O(1) descriptor per recipe. Optimization: resolve its consumer
  * boundary once, with no model-name checks during execution.
  * Overlay: transformer-execution.md, "NLA entry and exit paths".
- * Corpus consultation, header design (full rules read), 2026-10-19:
+ * Corpus consultation, header design and implementation (full rules read), 2026-10-19:
  * cpp-guidelines I.7 (#ri-post): explicit producer/consumer ordering contract.
  * cpp-perf-guidelines GPU.1: keep the embedding matrix device-resident and
  * replace only a row; source guidelines/gpu/GPU.1-keep-data-on-device.md.
@@ -131,7 +131,7 @@ struct ForwardRecipe {
     std::vector<kernels::Operation> operations;
     std::vector<ObservationValue> observations;
     std::optional<kernels::TensorId> logits;
-    std::optional<EmbeddingBoundary> embedding_boundary{}; // Planned capability.
+    std::optional<EmbeddingBoundary> embedding_boundary{};
 };
 
 struct CacheAppend {
