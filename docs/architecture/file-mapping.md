@@ -14,8 +14,8 @@ they work already.
 
 ## Planned layout
 
-The tree covers the full planned engine/application layout. The first-slice
-design files now exist; later-slice files remain planned. Existing site,
+The tree covers the full planned engine/application layout. The first forward-
+pass sources are implemented; later-slice files remain planned. Existing site,
 documentation and reference files remain in place. `{h,cpp}` means a
 header/implementation pair; a contract-only header does not require an empty
 implementation file.
@@ -23,6 +23,8 @@ implementation file.
 ```text
 dolittle/
 ├── CMakeLists.txt
+├── CMakePresets.json                # Portable host/CUDA build and editor configuration
+├── .vscode/                        # CMake-backed IntelliSense and extension recommendations
 ├── Dockerfile
 ├── compose.yaml
 ├── config/
@@ -30,9 +32,11 @@ dolittle/
 ├── scripts/
 │   ├── run.py                       # Source-build and launch entry point
 │   ├── models.py                    # Acquire and verify declared artifacts
-│   ├── check.py                     # Separate build/non-GPU and GPU checks
+│   ├── check.py                     # Host/archive/CUDA-build/GPU verification commands
 │   ├── site.py                      # Existing independent site tooling
-│   └── validation/                  # Existing independent reference experiments
+│   └── validation/
+│       ├── forward_reference.py     # Independent tiny/8B forward fixture generation
+│       └── ...                      # Existing checkpoint-selection reference tools
 ├── src/
 │   ├── main.cpp                     # Composition of selected implementations
 │   ├── measurement.{h,cpp}
@@ -40,7 +44,8 @@ dolittle/
 │   │   ├── tensor.{h,cpp}           # Shape, strides, extent and borrowed views
 │   │   ├── formats/
 │   │   │   ├── format.{h,cpp}       # Named tensor payload/lifetime contract
-│   │   │   └── safetensors.{h,cpp}   # Initial serialized format
+│   │   │   ├── safetensors.{h,cpp}   # Initial serialized format
+│   │   │   └── json_metadata.h      # Internal bounded duplicate-key-safe metadata parser
 │   │   └── representations/
 │   │       ├── representation.h     # Encoding and computation-mode declarations
 │   │       └── bf16.{h,cpp}         # Initial storage representation and conversion
@@ -81,10 +86,14 @@ dolittle/
 │   ├── gpu/
 │   │   ├── device.h                 # Device resources and completion contract
 │   │   └── cuda/
-│   │       └── device.{h,cpp}       # CUDA composition entry and device backend
+│   │       ├── device.{h,cpp}       # CUDA composition entry and device backend
+│   │       └── backend.h            # Private resource/stream bridge for dispatch
 │   ├── kernels/
 │   │   ├── operations.{h,cpp}       # Pure validation and operation preparation
 │   │   └── cuda/
+│   │       ├── operations.cpp        # Prepared CUDA bindings and dispatch
+│   │       ├── launch.h              # Private validated kernel-launch boundary
+│   │       ├── common.cuh            # Private conversion/reduction helpers
 │   │       ├── projection.cu
 │   │       ├── normalization.cu
 │   │       ├── rotary.cu
@@ -100,12 +109,28 @@ dolittle/
 │   ├── controller.js                # Selection, requests and interaction state
 │   └── view.js                      # Presentation
 ├── tests/
-│   ├── core/                        # Format/model/tokenizer/cache/sampling/state checks
+│   ├── core/                        # Isolated in-memory contract tests
+│   │   ├── test_tensor.cpp
+│   │   ├── test_bf16.cpp
+│   │   ├── test_observations.cpp
+│   │   ├── test_storage_plan.cpp
+│   │   ├── test_numerical.cpp
+│   │   ├── test_operations.cpp
+│   │   ├── test_model_recipe.cpp
+│   │   ├── test_qwen3_model.cpp
+│   │   ├── test_safetensors.cpp
+│   │   ├── test_qwen3_checkpoint.cpp
+│   │   └── test_forward_reference.cpp
+│   ├── integration/
+│   │   └── test_checkpoint_archive.cpp # Real file integrity and binding workflow
 │   ├── gpu/                         # Numerical checks through production paths
-│   │   └── forward_reference.{h,cpp} # Completed-result comparison contract
+│   │   ├── forward_reference.{h,cpp} # Completed-result comparison contract
+│   │   ├── test_forward.cpp          # Tiny and pinned 8B numerical scenarios
+│   │   └── test_device.cpp           # CUDA resources/transfers/completion scenario
 │   ├── app/
 │   ├── fixtures/
 │   ├── support/
+│   │   ├── check.h                  # Minimal in-process assertion helpers
 │   │   └── numerical.{h,cpp}        # Pure array error metrics; launches nothing
 │   └── test_site.py                 # Existing
 ├── web/                             # Existing public explanatory site
@@ -264,19 +289,19 @@ specific to block 24. First-slice header design starts with these boundaries,
 numerical representation, forward execution and the numerical harness; it does
 not create every file in the planned tree.
 
-The next header-design group adds tensor extents and verified safetensors
+The second header-design group added tensor extents and verified safetensors
 loading, model recipes and checkpoint ownership, Qwen3 mathematics/binding,
 device resources and the operation catalog. The model produces an ordered
 recipe using a bounded set of operations; the executor chooses implementations
 and storage. `gpu/cuda/device.h` is the explicit CUDA factory used at composition.
-These remain declarations/contracts, without kernel bodies or a runtime build.
+That group established declarations/contracts before implementation.
 
-The final first-slice design pass adds BF16 conversion, pure scratch placement
+The final first-slice design pass added BF16 conversion, pure scratch placement
 and numerical comparison helpers, plus in-memory parsing and validation entry
-points in the existing owners. The `.cpp` and six CUDA `.cu` files now contain
-their opening contract/algorithm/cost/corpus comments and includes only. These
-are file-header designs for this slice, not stub implementations that return
-success, completed kernels or a runnable build.
+points in the existing owners. At that checkpoint, the `.cpp` and six CUDA
+`.cu` files contained their opening contract/algorithm/cost/corpus comments
+and includes only. They did not return placeholder success or claim completed
+kernels. Current implementation status follows the checkpoint audit below.
 
 `storage_plan.*` is an X1 helper, not a new cache strategy or change axis. It
 places resources whose last uses include capture copies. Mathematical operation
@@ -290,11 +315,35 @@ comparison. Tokenizers/text protocols, generation/sampling, persistent cache,
 AV/AR conventions, experiment scheduling, serving and application behavior
 remain subsequent slices. Do not generate those files ahead of their design.
 
-Checkpoint audit, 2026-10-18: all 39 C++/CUDA design files are individually
-represented in this tree (18 headers, 15 C++ sources, six CUDA sources). Include
-paths resolve, and model/format dependencies respect the boundaries below.
-The source files contain opening designs and includes only; this audit does
-not establish linked execution or GPU correctness.
+The first forward-pass source scope is now implemented: tensor/BF16 handling,
+observation and scratch planning, operation/recipe validation, Qwen3 recipes and
+checkpoint binding, verified safetensors loading, CUDA resources and kernels,
+execution, and completed-result comparison. See the
+[verification commands](../../tests/README.md) for scenario coverage.
+
+The current inventory contains 40 C++/CUDA source files under `src/` (19 `.h`,
+14 `.cpp`, six `.cu` and one `.cuh`) and 19 C++ support/test files under `tests/`
+(three `.h` and 16 `.cpp`). Every implementation file in that scope has working
+bodies; later tokenizer/cache/NLA/application destinations have no generated
+stubs. The concrete additions stay within their existing axes:
+
+- `tensors/formats/json_metadata.h` shares bounded metadata parsing between
+  the format reader and model binder; it introduces no model dependency into
+  the safetensors implementation.
+- `gpu/cuda/backend.h` exposes native resources only within CUDA preparation.
+- `kernels/cuda/operations.cpp`, `launch.h` and `common.cuh` keep prepared
+  dispatch and shared kernel primitives within the CUDA operation family.
+- Eleven isolated C++ unit executables cover preparation and comparison;
+  archive/device/forward drivers remain distinct integration workflows.
+
+The host build requires C++20, CMake 3.24+ and OpenSSL 3. nlohmann/json 3.12.0 is
+hash-pinned for metadata; OpenSSL supplies SHA-256. CUDA 13.2 builds use a
+manifest-digest-pinned Docker image with explicit support package versions.
+The image builds successfully, while current GPU execution uses the native
+Linux host because NVIDIA Container Toolkit access is not configured. Native
+and forced-PTX checks pass for the recorded short-sequence workloads and explicit
+reference policy. Newer GPUs, long contexts and container GPU execution remain
+unverified. These changes introduce no alternative backend or new architecture axis.
 
 ## Composition and dependency direction
 
@@ -395,8 +444,9 @@ not expand the first release to multiple models, tokenizers, cache strategies
 or platforms. Add only the files needed by the current working slice, with
 reviewed headers and relevant checks; do not generate the tree as empty stubs.
 
-Before implementation, select toolchain and support dependencies explicitly,
+For each subsequent slice, select toolchain and support dependencies explicitly,
 define numerical comparison workloads/tolerances and derive resource costs.
+The current first-slice toolchain and helpers are implemented as described above.
 Preserve the independent reference experiments and separate build/non-GPU
 checks from device execution. The existing public site remains independent
 of model downloads and the live inference application.

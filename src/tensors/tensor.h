@@ -1,5 +1,4 @@
 /*
- * Header design; layout validation is not implemented.
  * Axis X3: shared tensor addressing, independent of model and device backend.
  * Contract: Layout owns shape and byte strides of equal rank. Scalars have
  * rank zero and one element; any zero dimension denotes an empty tensor.
@@ -13,6 +12,9 @@
  * mutate or be destroyed while used. validate_view checks the byte extent;
  * it does not reinterpret possibly unaligned bytes as native float pointers.
  * Invalid layout/type -> invalid_argument; overflow -> length_error.
+ * contiguous_layout returns row-major strides for nonempty shapes; strides of
+ * empty shapes are zero, avoiding products for addresses that cannot be used.
+ * Owned metadata allocation can propagate bad_alloc.
  *
  * Algorithm: docs/architecture/transformer-execution.md, "Model dimensions and
  * notation" and "Cost model": carry explicit shape/type/strides, derive the
@@ -20,9 +22,10 @@
  * Cost: O(rank) validation, no tensor data copies. Optimization: resolve layout
  * checks in preparation; do not repeat dimension products per element.
  *
- * Corpus consultation, header design, 2026-10-18:
+ * Corpus consultation, implementation, 2026-10-18:
  * cpp-guidelines I.4 (#ri-typed): byte strides and stored dtype are explicit.
  * cpp-guidelines I.7 (#ri-post): checked extent does not promise dense layout.
+ * cpp-guidelines ES.103 (#res-overflow): check products and sums before use.
  * cpp-perf-guidelines CDSA.32: consumer layouts are validated during setup.
  * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
  */

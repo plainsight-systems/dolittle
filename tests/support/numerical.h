@@ -1,5 +1,5 @@
 /*
- * Header design only; pure numerical comparison helper, no test runner.
+ * Pure numerical comparison helper, no test runner.
  * Axis D3: error metrics independent of inference, files or hardware.
  * Contract: equal-length FP32 spans and finite nonnegative tolerance limits;
  * reference values must be finite. Invalid inputs throw invalid_argument.
@@ -20,7 +20,7 @@
  * separately from model compute. Unit tests check metric identities, limits
  * and invalid inputs; no snapshots of accumulation order or diagnostics.
  *
- * Corpus consultation, header design, 2026-10-18:
+ * Corpus consultation, header design and implementation, 2026-10-18:
  * cpp-guidelines I.1 (#ri-explicit): thresholds are explicit inputs.
  * cpp-guidelines I.7 (#ri-post): zero-norm and nonfinite outcomes are defined.
  * cpp-perf-guidelines GPU.1: diagnostic comparisons are outside GPU timing.

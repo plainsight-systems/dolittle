@@ -1,5 +1,5 @@
 /*
- * Header design; safetensors parsing and hash verification are pending.
+ * Safetensors decoding and verified mapped archive loading.
  * Axis M2, safetensors kind. Own file/mapping resources behind TensorArchive.
  * Contract: OpenRequest names an explicit shard set, optional index, and
  * expected artifacts including model configuration. Paths must be relative,
@@ -17,8 +17,8 @@
  * alone, not the eight-byte file prefix or tensor payload. data_bytes is the
  * declared payload-region size. It validates duplicate names/keys, dtypes,
  * shapes and a complete, non-overlapping payload partition (empty tensors
- * occupy no bytes). Offsets are relative to that payload region. Limits apply
- * before allocation; results own names/layouts and retain no span. It opens
+ * occupy no bytes). Offsets are relative to that payload region. Input, decoded
+ * node/string accounting and output sizes are bounded before their growth; results own names/layouts and retain no span. It opens
  * nothing and verifies no file/hash. open performs framing/integrity checks
  * before calling this same parser. Unit tests use small in-memory headers.
  *
@@ -26,11 +26,15 @@
  * and binding": verify declared files, parse bounded headers/index, validate
  * named extents, and expose immutable source bytes to model binding.
  * Cost: O(artifact bytes) hashing plus O(tensor count) metadata; max_header_bytes
- * is per file, max_metadata_bytes bounds aggregate decoded metadata, and
+ * is per file. max_metadata_bytes bounds aggregate source/node/string/catalog
+ * accounting (not exact allocator RSS); JSON nesting is capped at 64, and
  * max_tensor_count bounds catalog growth. Optimization: map weight payloads
  * without eagerly converting/copying them; pin only bounded transfer staging.
+ * Range/catalog ordering takes O(T log T) setup work for T tensors.
+ * Artifact digest v1 hashes "dolittle-artifacts-v1", then sorted paths encoded
+ * as u64-LE byte length, UTF-8 path bytes, u64-LE size and 64 lowercase hex bytes.
  *
- * Corpus consultation, header design, 2026-10-18:
+ * Corpus consultation, implementation (full rules read), 2026-10-18:
  * cpp-guidelines R.1 (#rr-raii): partial mappings are reclaimed on exceptions.
  * cpp-guidelines I.7 (#ri-post): only fully checked archives escape loading.
  * cpp-perf-guidelines GPU.1: mapped input and bounded upload staging avoid

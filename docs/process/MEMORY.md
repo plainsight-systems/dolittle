@@ -4,8 +4,9 @@
 
 - **Project:** Dolittle, named after Doctor Dolittle.
 - **Parent entity:** Plainsight Systems LLC; no separate operating brand.
-- **Status:** local project site with explanatory writing, original artwork,
-  and reference GPU feasibility checks. No engine or live application yet.
+- **Status:** project site and complete first no-cache C++/CUDA forward slice.
+  Native and forced-PTX numerical checks pass on the 3090 Ti; generation, NLA
+  execution and live application remain later slices.
 - **Remote:** `origin` is https://github.com/plainsight-systems/dolittle.git.
   The site’s Code link points to this repository. Andrew authorized the first
   push and Pages deployment on 2026-10-16.
@@ -157,144 +158,21 @@ planning are next. Cache and sampling baseline choices still require the
 cost/verification work stated in the mapping; layout acceptance is not a
 runtime or performance result.
 
-## Current work
+## Current implementation
 
-Andrew approved a commit point for the first-slice designs on 2026-10-18.
-The layout audit accounts for all 39 C++/CUDA design files in the documented
-tree. The forward-reference pair was present under the right folder but was
-not individually listed; the tree now names it explicitly. Axis ownership
-also names observation vocabulary, observation preparation and scratch planning.
-Include paths and model/format dependency boundaries check out. Only surplus
-EOF blank lines changed in source files during staging; declarations/contracts
-are unchanged, so the prior 18-header C++20 checks still apply.
-The private brief and cache remain ignored. This checkpoint is committed
-locally; no push or runtime/GPU validation was requested for this step.
+The engine implements verified Qwen3 checkpoint loading and a complete CUDA
+forward pass with current-sequence K/V, configurable observation sites and owned
+results. Tokenization, persistent caching, generation, NLA execution and the
+application remain future work. Shared execution must not hardcode block 24.
 
-The remaining first-slice header-design pass requested on 2026-10-18 is ready.
-It adds BF16 host conversion, pure scratch-lifetime placement and array error
-metrics; existing owners now expose in-memory safetensors/config parsing and
-operation/recipe validation. These are contract-focused unit boundaries without
-file access, builds, processes or device launches. Completed-result comparison
-records reference provenance and delegates numerical metrics to the pure helper.
+Implementation records and validation reports belong in gitignored `.local/`.
+Keep this file for settled project decisions and the queue for concise work
+state; do not publish the development cycle as research or articles.
 
-Fifteen C++ and six CUDA source files now contain their opening local contract,
-algorithm, cost and corpus comments plus includes only. There are no function
-bodies, kernel bodies or test cases in those files. CUDA designs cover tiled
-projection, row/head RMSNorm, split-half RoPE, streaming causal GQA, embedding/
-row copies and elementwise residual/SiLU work. BF16 rounding boundaries were
-checked against the pinned Transformers v4.57.3 Qwen3 source; no numerical
-agreement or GPU performance is claimed. The original reference probe uses
-SDPA, so future fixtures must record its actual backend and numerical policy.
+C++ builds use C++20 without GNU extensions and warnings as errors. CUDA builds
+also promote NVCC diagnostics to errors. CMake owns editor include paths and
+compiler settings through the shared presets and VS Code configuration provider.
+Local machine overrides belong in ignored `CMakeUserPresets.json`.
 
-Both local corpora were queried for this phase. Full rules read/applied: Core
-I.1, I.7, C.183, R.1; performance GPU.1, GPU.2, GPU.7, GPU.9 and GDSA.16.
-All 18 headers pass standalone repeated-inclusion checks and two combined
-include orders under Apple Clang 17/C++20 with strict warnings as errors.
-These are declaration checks, not unit tests or CUDA compilation. No integration
-scenarios were added; the five site tests still occupy the integration budget.
-The first-slice file-design scope is complete through result comparison;
-toolchain/support-library pinning, independent fixtures/tolerances and actual
-implementation remain next. Later cache/generation/NLA/app files stay deferred.
-
-Andrew accepted the remaining first-slice headers on 2026-10-18 and required
-a strict testing policy. Unit tests execute isolated code directly, test stable
-contracts and invariants, and do not launch builds, processes or system flows.
-Behavior-preserving refactors and unrelated features should not force assertion
-changes. Integration tests must remain a small handful; the workflow records
-that as at most five repository-wide, without bundling or relabeling loopholes.
-The existing five site tests are integration tests, despite using unittest;
-rebalance that coverage before adding engine integration tests. This change
-documents the policy and classification; it does not refactor the test suite.
-
-On 2026-10-18 Andrew accepted the initial five interface headers and authorized
-continuing. The remaining first-slice boundary designs now cover tensor layouts,
-verified safetensors loading, model recipes and bound checkpoints, the Qwen3
-target recipe/binder, device resources with a CUDA factory, and kernel operations.
-There are 15 headers total; all passed standalone repeated-inclusion checks and
-two combined include orders with Apple Clang 17, C++20 and strict warnings.
-These are header designs only; no runtime implementations or GPU checks ran.
-
-The model owns an ordered recipe of a bounded operation catalog. Executor
-planning validates dependencies, chooses kernels and reuses storage after last
-use, including capture copies. Checkpoints own verified host backing and model
-bindings; forward plans own resident weights, one ordered queue, scratch and
-bounded staging. Operations report workspace and operand alignment before
-allocation. Qwen3 equations and checkpoint names stay in their concrete family;
-the initial binder supports target-style output, not AV injection or AR output.
-Artifact loading checks supplied hashes and extents and retains backing files;
-files must remain unchanged while open. Device completion establishes readback
-readiness. A uint32 representation was added for index buffers only.
-
-Both corpora were queried again for this header-design phase. Full Core I.4,
-I.7 and R.1 and performance GPU.1, GPU.7, GPU.9, COPY.5 and CDSA.32 were read;
-headers cite the rules applied. No implementation-phase consultation is implied.
-Next: review the remaining boundary designs, select/pin build dependencies,
-establish independent fixtures and numerical bounds, then implement the slice
-with fresh consultation of both corpora. Header checks do not validate those
-runtime contracts. This stage preceded the local design checkpoint above.
-
-Andrew confirmed sliced implementation and configurable observation hooks on
-2026-10-17. The first numerical slice is a complete causal forward pass without
-persistent KV caching; current-pass K/V are still computed. Model kinds
-advertise semantic sites, callers select sites/positions before execution,
-and the planner validates and resolves requests. Block 24 belongs to the NLA
-pair's compatibility contract, never a shared-executor default. Initial sites
-are block input and output; no arbitrary activation-mutating callbacks.
-
-Initial header designs now exist for representation, observation vocabulary,
-observation preparation, forward execution and the reference-comparison
-boundary. Both local corpora were queried and full applicable rules read:
-Core I.4, I.7, R.1, E.5; performance GPU.1, GPU.7, CDSA.32, COPY.5. Opening
-comments cite the rules applied to each header and specify contracts and
-algorithm steps. Forward results own host-ready outputs, exact token IDs and
-checkpoint/execution/numerical provenance. Five standalone header-inclusion
-checks passed with Apple Clang 17, C++20, strict warnings treated as errors.
-These are declaration checks only: no linked engine, CUDA kernels, independent
-fixtures or numerical GPU comparisons exist yet. Review these interfaces,
-then design the remaining first-slice model/loading/device/kernel boundaries
-before their implementation; requery both corpora in the implementation phase.
-
-Workflow requirement strengthened by Andrew on 2026-10-17: both C++ header
-design and implementation must query the locally running C++ best-practices
-and performance-corpus MCP servers. Opening file comments must include the
-contract and the specific algorithm responsibility/steps, and cite retrieved
-rules with their application. Both corpora are mandatory in both phases;
-implementation consultation is not satisfied by earlier header citations.
-The detailed process and unavailable-server handling are in
-[workflow.md](workflow.md). This documentation update introduces no C++ code.
-
-Andrew authorized committing and pushing this architecture/workflow checkpoint
-on 2026-10-17. Pre-push validation passed: local documentation links and
-structure, axis/contract coverage, derived storage calculations, whitespace,
-and all five site publication tests. The private brief and research cache
-remain ignored. These are documentation/publication checks, not engine or GPU
-validation.
-
-The requested [4B/8B comparison](../research/2026-10-16-nla-comparison/README.md)
-is complete. Qwen3 8B plus `marco-bazzani/Qwen3-8B-nla` runs sequentially in
-BF16 on the 3090 Ti: peak allocated memory 15.378 GiB; median AV time 4.73 s
-versus 10.28 s in the 4B reference run. All eight thinking descriptions
-completed within the cap, but they still substituted unsupported transcript
-details. Neither pair has established semantic faithfulness. The 8B pair
-uses about 45 GB of downloads, separate weights and one capture layer (24);
-4B remains smaller and supports multiple depths. Andrew selected 8B after
-reviewing these tradeoffs. Andrew then prioritized standing up the explanatory
-project site. No product inference code exists. Raw reconstruction scores across models are not a common accuracy
-scale.
-
-The project site is built and running locally: Home, Writing, About, two
-opening articles, RSS, and 404. Its architecture and publication rules are in
-[project-site.md](../architecture/project-site.md) and
-[web/README.md](../../web/README.md). Five publication tests pass, including a
-real subpath build, draft/future exclusion, milestone rendering, and rejection
-of broken assets/anchors, stale share metadata, missing share images, or
-unintended documents. The GitHub Pages workflow now validates PRs and deploys
-main with a pinned Hugo installer. The first push (`47f560a`) and deployment succeeded on 2026-10-16:
-https://github.com/plainsight-systems/dolittle/actions/runs/38967736528.
-The custom domain returned HTTP 200 with the correct GitHub menu link and
-production share metadata. HTTPS certificate provisioning was still pending;
-the default github.io project URL redirects to the custom domain.
-
-See [QUEUE.md](QUEUE.md). Architecture starts at
-[`../architecture/README.md`](../architecture/README.md). Investigations are
-indexed in [`../research/README.md`](../research/README.md).
+See [QUEUE.md](QUEUE.md), [architecture](../architecture/README.md) and
+[build and verification commands](../../tests/README.md).

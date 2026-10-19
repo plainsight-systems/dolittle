@@ -1,5 +1,4 @@
 /*
- * Header design only; no conversion implementation yet.
  * Axis X3, BF16 kind: portable host storage and conversion, not GPU execution.
  * Contract: BFloat16 holds exactly the supplied 16 bits. to_float widens the
  * encoding into IEEE binary32 without rounding; from_float rounds finite
@@ -20,7 +19,7 @@
  * Unit contracts: exact widening/byte round trips, ties, signed zero and NaNs;
  * do not assert the bit-manipulation instruction sequence.
  *
- * Corpus consultation, header design, 2026-10-18:
+ * Corpus consultation, implementation, 2026-10-18:
  * cpp-guidelines C.183 (#ru-pun): use bit_cast, not union type punning.
  * cpp-guidelines I.1 (#ri-explicit): explicit rounding and byte order.
  * cpp-perf-guidelines GPU.1: avoid hidden conversion/readback in capture paths.

@@ -1,5 +1,5 @@
 /*
- * Header design; archive loading is not implemented.
+ * Verified tensor archive ownership interface.
  * Axis M2: named tensor payloads and verified source artifacts, with no model
  * parameter roles. Acquisition/network access remains M1.
  * Contract: an archive owns the backing storage for its immutable entries and
@@ -20,7 +20,7 @@
  * all weights in a second host buffer. Optimization: index metadata once and
  * retain immutable byte views; packing belongs to its kernel consumer.
  *
- * Corpus consultation, header design, 2026-10-18:
+ * Corpus consultation, implementation (full rules read), 2026-10-18:
  * cpp-guidelines R.1 (#rr-raii): archive owns files/mappings on failure too.
  * cpp-guidelines I.7 (#ri-post): verified identity and borrowed lifetime stated.
  * cpp-perf-guidelines CDSA.32: resolve stable named metadata once at load.

@@ -70,11 +70,19 @@ Include:
    ownership and lifetime, failure behavior, and relevant numerical or
    synchronization requirements.
 3. **Algorithm:** the part of the accepted algorithmic overlay performed by
-   this file, with a reference to its document and section. Describe the local
-   steps and data/state transitions, including what must happen before and
-   after them. A label such as “implements attention” is insufficient.
+   this file, with a reference to its document and section. Name the inputs
+   and outputs, define dimensions and symbols, then give ordered steps showing
+   how inputs become outputs. State numerical rounding boundaries where they
+   affect the result. For orchestration, explain what each step produces and
+   what consumes it next. An engineer should be able to follow the algorithm
+   without reconstructing it from the code or opening the linked document.
+   Operation-name lists and compressed implementation summaries are insufficient.
 4. **Design and cost:** consequential choices, allocations/copies, work
    scaling and ordering requirements. Identify planned versus measured costs.
+   Keep backend implementation strategy separate from the algorithm: thread
+   mapping, tiles, reductions, barriers and storage reuse explain how this
+   implementation performs the steps. Describe the code that exists; label
+   future alternatives explicitly instead of mixing them into its algorithm.
 5. **Corpus guidance:** applicable rules retrieved from both local MCP
    corpora, with exact IDs and a short explanation of each rule's application,
    or the explicit no-applicable-rule result described above.
@@ -134,11 +142,15 @@ or rename integration tests as smoke checks or validation to bypass the limit.
 Build-only compilation checks and measurements are distinct activities, but
 renaming a correctness workflow does not change its integration-test scope.
 
-The existing five site publication tests are integration tests because their
-setup builds a real site, even though their runner is Python's `unittest`.
-They currently occupy the full integration budget. Rebalance that coverage
-before adding engine integration scenarios; isolate publication validation
-units where practical while retaining essential publication-flow coverage.
+Site coverage uses one integration scenario for a real Hugo build and its
+publication boundary under a deployment subpath. Negative publication guards
+run separately as in-memory unit tests against `check_site_snapshot`; they do
+not touch files or launch Hugo. The site therefore occupies one of the five
+repository-wide integration slots. The current five-scenario inventory is site
+publication, checkpoint archive integrity, CUDA device resources, tiny CUDA
+forward comparison and pinned 8B CUDA forward comparison; see `tests/README.md`
+for registration and execution requirements. The budget is full. Update the
+inventory and replace or remove existing coverage before adding a scenario.
 
 ### Numerical and device verification
 
@@ -157,12 +169,18 @@ resolutions should be recorded with the work they concern.
 
 ## Milestones and durable records
 
-Close a milestone with the relevant correctness and performance checks, a
-documentation pass, and a write-up in `docs/writeups/`. Integrate completed work
-into `main` by fast-forward. Publication follows the user's instructions.
+Close a milestone with the relevant correctness and performance checks and
+updated usage/architecture documentation. Keep implementation reports and
+development-cycle notes in gitignored `.local/`. A completed implementation
+does not automatically call for a public article. Write in `docs/writeups/`
+only when requested for publication. Integrate completed work into `main` by
+fast-forward. Publication follows the user's instructions.
 
-Record settled decisions in `MEMORY.md`, current and completed work in
-`QUEUE.md`, and investigations in dated files under `docs/research/`. Preserve
+Record settled decisions in `MEMORY.md` and concise current work in `QUEUE.md`.
+Reserve `docs/research/` for research and model investigations; implementation
+notes, validation logs, source snapshots and development chronology stay in
+gitignored `.local/`. Tracked documents must not link to those private files.
+Keep reproducible test commands and contracts in the repository, and preserve
 the distinction between planned and implemented behavior in public documents.
 
 Reduce scope instead of weakening quality within the chosen scope. Explain

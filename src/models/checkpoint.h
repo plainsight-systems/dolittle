@@ -1,5 +1,5 @@
 /*
- * Header design; checkpoint binding is not implemented.
+ * Bound checkpoint ownership interface.
  * Axis M3: verified parameters bound to a selected model's semantic slots.
  * Contract: a concrete BoundCheckpoint exclusively owns its Model and source
  * archive. parameter(id) returns a validated immutable HostView exactly matching
@@ -20,7 +20,7 @@
  * Cost: O(parameter count) binding metadata, borrowed payloads. Optimization:
  * resolve serialized names once; execution indexes slots, not string maps.
  *
- * Corpus consultation, header design, 2026-10-18:
+ * Corpus consultation, implementation (full rules read), 2026-10-18:
  * cpp-guidelines R.1 (#rr-raii): checkpoint owns model and backing archive.
  * cpp-guidelines I.7 (#ri-post): successful binding guarantees required weights.
  * cpp-perf-guidelines CDSA.32: immutable binding follows consumer slot order.

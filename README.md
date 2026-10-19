@@ -9,20 +9,42 @@ generated reasoning beside natural language interpretations of its internal
 activations. One prompt, one generation, two views of the model working
 through it.
 
-The first engine will run on Linux with CUDA, built from source and run through
-Docker. Metal on macOS is planned next; AMD support is undecided. A browser interface will let you follow the thinking text and inspect
-activations captured at selected positions. The first hardware target is a
+The first engine targets Linux with CUDA and source builds in a pinned Docker
+environment. Metal on macOS is planned next; AMD support is undecided. A future
+browser interface will let you follow the thinking text and inspect activations
+captured at selected positions. The first hardware target is a
 24 GB Ampere GPU, with reference measurements on an RTX 3090 Ti. The selected
 pairing is **Qwen3 8B with marco-bazzani's natural language autoencoder**,
 interpreting activations at block 24 (zero-based).
 
-**Status: project site and reference feasibility checks.** The local project
-site, explanatory writing, and artwork are in place. Pinned checkpoint validation is recorded in the
-[4B/8B comparison](docs/research/2026-10-16-nla-comparison/README.md).
-The selected 8B pair ran in separate BF16 phases on the 3090 Ti, with
-15.4 GiB peak PyTorch allocation and about 45 GB of checkpoint downloads.
-The engine, live application interface, and Docker build are not yet
-implemented. The project site can be previewed independently:
+**Status: the first full forward-pass implementation passes native and forced-PTX
+checks on the RTX 3090 Ti.** C++20/CUDA sources now cover verified checkpoint
+loading and Qwen3 binding, device resources, kernels, execution, configurable
+observations and reference comparison. A pass computes current-sequence K/V
+without a persistent KV cache. Tokenization, generation, the NLA paths and the
+live browser application remain later slices.
+
+CUDA 13.2 builds retain native Ampere code and PTX. Use the
+[build and verification commands](tests/README.md) to check your environment.
+Container GPU execution requires the NVIDIA Container Toolkit. The current
+numerical scenarios cover short sequences; they do not establish full-context
+behavior or performance on other NVIDIA hardware.
+
+```sh
+python3 scripts/check.py host
+python3 scripts/check.py archive
+# On Linux: build CUDA sources in the pinned Docker environment.
+python3 scripts/check.py cuda-build
+```
+
+See [build and verification commands](tests/README.md) and
+[VS Code setup](tests/README.md#vs-code-and-compiler-settings). The historical
+[4B/8B reference comparison](docs/research/2026-10-16-nla-comparison/README.md)
+used PyTorch, with 15.4 GiB peak allocation for separate BF16 phases and about
+45 GB of checkpoint downloads. Those results describe feasibility of the
+selected model pair; they are separate from verification of this implementation.
+
+The project site can be previewed independently:
 
 ```sh
 python3 scripts/site.py serve

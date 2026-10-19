@@ -1,34 +1,95 @@
 /*
- * Implementation-file header design only; no CUDA bodies yet.
- * Axis X5, CUDA residual addition and SiLU gate-times-up.
- * Algorithm: transformer overlay, "One Qwen3 transformer block": map contiguous
- * elements to lanes. Add computes each residual sum and rounds to storage.
- * SiluMultiply evaluates SiLU in FP32; in BF16 mode round the activation to BF16
- * before multiplying up, then round the product to storage. Use a numerically
- * stable sigmoid form for large-magnitude finite inputs. Tail lanes never read or
- * write outside extents. No aliasing output with a live input in the initial path.
- * Design and cost: Add reads two arrays/writes one; SiluMultiply does the same
- * with extra scalar arithmetic. No global workspace or intermediate activation
- * array is required. Optimization: fuse activation and multiplication while
- * retaining the prescribed rounding boundary, rather than fusing through a
- * requested residual observation. Backend arithmetic differences remain subject
- * to the independent numerical bounds.
- * Unit tests cover pure shape/access contracts; device arithmetic and residual
- * captures are exercised within the numerical integration scenario.
- * Contract: implement the matching operation in kernels/operations.h for dense
- * BF16/FP32 storage and FP32 accumulation. Preparation rejects unsupported shapes,
- * overflowing launch extents or insufficient device resources before submission.
- * Operands/workspace are borrowed from the prepared plan through queue completion;
- * no allocation, host readback or host wait in a kernel launch. Submission errors
- * follow operations.h; deferred device faults surface at the explicit queue wait.
- * Every address and tail lane is bounded; no cross-block spin waits. Kernel
- * selection and arithmetic policy are recorded by the prepared implementation.
- * Bodies, launch geometry and GPU validation are pending; these are design choices,
- * not measured performance or evidence of numerical equivalence.
- * Overlay: docs/architecture/transformer-execution.md.
- * Corpus consultation, header design, 2026-10-18:
- * cpp-guidelines I.7 (#ri-post): equations, rounding and completion are explicit.
- * cpp-perf-guidelines GPU.2: map adjacent lanes to adjacent data.
+ * Axis X5: residual addition and the MLP's SiLU gate multiplication.
+ * Inputs: two equally shaped dense arrays, flattened to C elements.
+ * Output: an equally shaped array in the same BF16 or FP32 storage type.
+ *
+ * Algorithm for Add, used at each residual connection:
+ * 1. Read left[i] and right[i] as FP32, for each i in [0,C).
+ * 2. Add them, round the sum to storage and write output[i].
+ *
+ * Algorithm for SiluMultiply, used between the MLP's up and down projections:
+ * 1. Read a = gate[i] and b = up[i] as FP32.
+ * 2. Compute sigmoid(a). For a >= 0 use 1/(1+exp(-a)); otherwise use
+ *    exp(a)/(1+exp(a)). This avoids exponentiating a large positive value.
+ * 3. Compute activated = a * sigmoid(a), then round it to the storage type.
+ * 4. Multiply the rounded activation by b in FP32; round the product to
+ *    storage and write output[i].
+ * In BF16 mode the intermediate activation rounding is part of the result.
+ *
+ * CUDA implementation: each thread computes independent elements in a
+ * strided loop over the flat array. Add versus SiluMultiply is selected at
+ * compile time; neither path needs shared memory or synchronization.
+ * Cost: O(C) work, reading two arrays and writing one.
+ * Optimization: compute the SiLU activation and product in the same thread
+ * without storing an intermediate activation array; retain its rounding step.
+ * Adjacent threads access adjacent elements, with bounds checks at the tail.
+ *
+ * Overlay: docs/architecture/transformer-execution.md,
+ * "One Qwen3 transformer block".
+ *
+ * Contract: preparation validates shapes, byte/launch extents and device limits.
+ * Inputs and the separate output buffer are borrowed until queue completion;
+ * output must not overlap an input. Launches allocate no buffers and perform
+ * no host readback or host wait. The caller checks immediate launch status;
+ * asynchronous device errors surface at the explicit queue wait. See
+ * kernels/operations.h for the public operation and failure contracts.
+ *
+ * Corpus consultation, comment design, 2026-10-18:
+ * cpp-guidelines I.7 (#ri-post): state the output and rounding guarantees.
+ * cpp-perf-guidelines GPU.2: contiguous features map to adjacent threads.
  * Source: guidelines/gpu/GPU.2-shape-data-for-coalesced-lane-access.md.
  */
-#include "kernels/operations.h"
+#include "kernels/cuda/common.cuh"
+
+namespace dolittle::kernels::cuda {
+namespace {
+template <class T, bool Silu>
+__global__ void elementwise(const T* left, const T* right, T* output, std::size_t count) {
+    const auto stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
+    for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         index < count;) {
+        const auto a = detail::widen(left[index]);
+        const auto b = detail::widen(right[index]);
+        float result;
+        if constexpr (Silu) {
+            const auto exponential = expf(a >= 0.0F ? -a : a);
+            const auto sigmoid = a >= 0.0F ? 1.0F / (1.0F + exponential)
+                                           : exponential / (1.0F + exponential);
+            const auto activated = detail::storage_round<T>(__fmul_rn(a, sigmoid));
+            result = __fmul_rn(activated, b);
+        } else {
+            result = __fadd_rn(a, b);
+        }
+        output[index] = detail::narrow<T>(result);
+        if (count - index <= stride) break;
+        index += stride;
+    }
+}
+
+template <class T, bool Silu>
+void submit(const void* left, const void* right, void* output,
+            std::size_t count, cudaStream_t stream) {
+    elementwise<T, Silu><<<detail::grid_blocks(detail::ceil_div(count, detail::threads)),
+                           detail::threads, 0, stream>>>(
+        static_cast<const T*>(left), static_cast<const T*>(right), static_cast<T*>(output), count);
+}
+}  // namespace
+
+void launch_add(tensors::ElementType type, const void* left, const void* right,
+                void* output, std::size_t count, cudaStream_t stream) {
+    if (detail::is_bfloat16(type)) {
+        submit<__nv_bfloat16, false>(left, right, output, count, stream);
+    } else {
+        submit<float, false>(left, right, output, count, stream);
+    }
+}
+
+void launch_silu_multiply(tensors::ElementType type, const void* gate, const void* up,
+                          void* output, std::size_t count, cudaStream_t stream) {
+    if (detail::is_bfloat16(type)) {
+        submit<__nv_bfloat16, true>(gate, up, output, count, stream);
+    } else {
+        submit<float, true>(gate, up, output, count, stream);
+    }
+}
+}  // namespace dolittle::kernels::cuda

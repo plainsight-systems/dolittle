@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""Build/check entry point; inference application launch remains a later slice.
+
+Host units need CMake, a C++20 compiler and OpenSSL 3 development files.
+CUDA source builds default to the digest-pinned Docker environment. GPU checks
+can execute those binaries on a compatible Linux host, or inside that environment
+when the NVIDIA Container Toolkit is configured. Models/fixtures stay outside
+the image. No downloads or administrator changes are performed by GPU checks.
+"""
+import argparse
+import os
+from pathlib import Path
+import subprocess
+
+ROOT = Path(__file__).resolve().parents[1]
+IMAGE = "dolittle-build:cuda13.2"
+
+
+def command(args, **kwargs):
+    subprocess.run([str(arg) for arg in args], cwd=ROOT, check=True, **kwargs)
+
+
+def container_command(args, gpu=False, fixtures=None, force_ptx=False):
+    result = ["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
+              "--volume", f"{ROOT}:{ROOT}", "--workdir", ROOT]
+    if gpu:
+        result += ["--gpus", "all"]
+    if fixtures and not fixtures.is_relative_to(ROOT):
+        result += ["--volume", f"{fixtures}:{fixtures}:ro"]
+    if force_ptx:
+        result += ["--env", "CUDA_FORCE_PTX_JIT=1"]
+    return result + [IMAGE] + list(args)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="action", required=True)
+    host = sub.add_parser("host", help="build and run isolated C++ units")
+    host.add_argument("--build-dir", type=Path, default=ROOT / "build/host")
+    build = sub.add_parser("cuda-build", help="build CUDA engine and integration drivers")
+    build.add_argument("--native", action="store_true", help="use installed CUDA 13.2+ and build dependencies")
+    build.add_argument("--build-dir", type=Path, default=ROOT / "build/cuda")
+    gpu = sub.add_parser("gpu", help="run device, tiny forward and pinned 8B integration scenarios")
+    gpu.add_argument("--fixtures", type=Path, required=True)
+    gpu.add_argument("--build-dir", type=Path, default=ROOT / "build/cuda")
+    gpu.add_argument("--container", action="store_true", help="requires working Docker GPU access")
+    gpu.add_argument("--force-ptx", action="store_true")
+    gpu.add_argument("--report-dir", type=Path, default=ROOT / ".cache/checks")
+    archive = sub.add_parser("archive", help="run real checkpoint file integrity integration")
+    archive.add_argument("--build-dir", type=Path, default=ROOT / "build/host")
+    args = parser.parse_args()
+    build_dir = args.build_dir.resolve()
+    if args.action in {"host", "cuda-build"}:
+        configure = ["cmake", "-S", ROOT, "-B", build_dir,
+                     f"-DDOLITTLE_CUDA={'ON' if args.action == 'cuda-build' else 'OFF'}",
+                     f"-DCMAKE_BUILD_TYPE={'Release' if args.action == 'cuda-build' else 'Debug'}"]
+        compile_command = ["cmake", "--build", build_dir, "--parallel"]
+        if args.action == "cuda-build" and not args.native:
+            command(["docker", "build", "--tag", IMAGE, ROOT])
+            command(container_command(configure))
+            command(container_command(compile_command))
+        else:
+            command(configure)
+            command(compile_command)
+        if args.action == "host":
+            command(["ctest", "--test-dir", build_dir, "--label-regex", "^unit$", "--output-on-failure"])
+    elif args.action == "archive":
+        command([build_dir / "test_checkpoint_archive"])
+    else:
+        fixtures = args.fixtures.resolve(strict=True)
+        args.report_dir.mkdir(parents=True, exist_ok=True)
+        environment = os.environ.copy()
+        if args.force_ptx:
+            environment["CUDA_FORCE_PTX_JIT"] = "1"
+        else:
+            environment.pop("CUDA_FORCE_PTX_JIT", None)
+        suffix = "ptx" if args.force_ptx else "native"
+        scenarios = {
+            "device": [build_dir / "test_device"],
+            "forward-tiny": [build_dir / "test_forward", fixtures / "tiny-fp32/fixture.json",
+                             fixtures / "tiny-bf16/fixture.json"],
+            "forward-8b": [build_dir / "test_forward", fixtures / "qwen3-8b-bf16/fixture.json"],
+        }
+        for name, invocation in scenarios.items():
+            if args.container:
+                invocation = container_command(invocation, gpu=True, fixtures=fixtures, force_ptx=args.force_ptx)
+            report = args.report_dir / f"{name}-{suffix}.json"
+            print(f"Running {name} ({suffix}); report: {report}", flush=True)
+            with report.open("w") as output:
+                command(invocation, stdout=output, env=environment)
+
+
+if __name__ == "__main__":
+    main()

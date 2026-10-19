@@ -1,5 +1,4 @@
 /*
- * Header design only; scratch placement is not implemented.
  * Axis X1: pure scratch admission/placement within ordered forward execution.
  * Contract: each request has a unique ID, byte size, nonzero power-of-two
  * alignment and inclusive [first_step,last_step] with first<=last. All
@@ -23,11 +22,16 @@
  * or allocator choices. Allocation granularity/driver overhead is budgeted by
  * the executor in addition to these logical extents.
  *
- * Corpus consultation, header design, 2026-10-18:
+ * Corpus consultation, implementation, 2026-10-18:
  * cpp-guidelines I.1 (#ri-explicit): lifetimes, alignments and budget are inputs.
  * cpp-guidelines I.7 (#ri-post): non-overlap and containment are postconditions.
+ * cpp-guidelines ES.103 (#res-overflow): check offset and extent arithmetic.
  * cpp-perf-guidelines GPU.9: reuse bytes only after every last reader.
  * Source: guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
+ * cpp-perf-guidelines MEM.11: prepare offsets once from explicit lifetimes.
+ * Source: guidelines/memory/MEM.11-plan-arena-offsets-from-lifetimes.md.
+ * The accepted zero-byte identity contract takes precedence over that rule's
+ * example restriction to positive sizes; placement remains first-use ordered.
  */
 #pragma once
 

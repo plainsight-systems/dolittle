@@ -22,8 +22,10 @@ source. `CLAUDE.md` points to the same entry path.
   dispatch as performance-sensitive.
 - Implement the core computation directly. Reference implementations may
   supply verification evidence; dependency choices must remain explicit.
-- Keep decisions and work state in memory and the queue. Keep investigations
-  and measurements in `docs/research/`.
+- Keep settled decisions and concise work state in memory and the queue.
+  Implementation diaries, build logs, validation reports and development-cycle
+  notes belong in gitignored `.local/`, not `docs/research/` or public writing.
+  Reserve `docs/research/` for substantive research and model investigations.
 - A tech demo is a complete implementation of a narrow scope. Reduce scope
   rather than lowering correctness or quality within it.
 - Keep machine access details and local paths out of tracked project files.

@@ -1,5 +1,5 @@
 /*
- * Header design; recipes and model implementations are pending.
+ * Shared model contract and structural recipe validation; concrete equations are separate.
  * Axis M6: model equations, parameter schema and observable values. No backend
  * handles, filenames, tokenizer behavior or NLA-pair constants.
  * Contract: each Model owns immutable parameter specs indexed by ParameterId.
@@ -13,7 +13,9 @@
  * values or earlier outputs. All slots have valid layouts and checked extents.
  * Observation values cover exactly the advertised sites and identify their
  * completed tensors; output for block i equals input for i+1 where applicable.
- * These two site names may refer to the same tensor. If logits are unrequested,
+ * These two site names may refer to shared or distinct tensors; value equality
+ * requires numerical integration and is not checked by comparing tensor IDs.
+ * If logits are unrequested,
  * logits is absent, but every block still executes. Advertised sites vary with
  * the requested storage mode; the recipe/catalog must agree exactly.
  * Invalid configuration/request -> invalid_argument; size overflow ->
@@ -21,8 +23,12 @@
  * validate_recipe checks those structural contracts against the model and
  * requested shape/mode/rows without executing the recipe. It checks token
  * input type/length, parameter layouts, read-before-write, unique producers,
- * exact advertised observation sites and selected-logit shape. It cannot prove
- * the model equations: independent numerical integration provides that evidence.
+ * exact advertised observation sites and selected-logit shape.
+ * Singleton-axis strides may differ when comparing equivalent layouts; stride
+ * units and addressable extents are still validated. It cannot prove
+ * the model equations or the numerical contents/order of selected logit rows:
+ * independent numerical integration provides that evidence. Structural success
+ * establishes a well-formed schedule, not a correct transformer computation.
  *
  * Algorithm: docs/architecture/transformer-execution.md, "Full model flow" and
  * "Preparing the first execution recipe": emit embedding, the model's ordered
@@ -34,7 +40,7 @@
  * element; the Model virtual interface is used only during preparation.
  * This is not a general graph compiler.
  *
- * Corpus consultation, header design, 2026-10-18:
+ * Corpus consultation, implementation (full rules read), 2026-10-18:
  * cpp-guidelines I.4 (#ri-typed): parameter/tensor/observation IDs are distinct.
  * cpp-guidelines I.7 (#ri-post): single producers and complete sites explicit.
  * cpp-perf-guidelines CDSA.32: model metadata is resolved into execution order.

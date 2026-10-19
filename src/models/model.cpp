@@ -1,5 +1,5 @@
 /*
- * Implementation-file header design only; no function bodies yet.
+ * Shared model lifetime and structural recipe validation.
  * Axis M6: pure structural validation of a model-produced forward recipe.
  * Contract: implement validate_recipe and Model lifetime definitions. Validation
  * does not execute operations, load artifacts or query a device. It follows
@@ -8,16 +8,221 @@
  * validate token shape, parameter assignments and layouts; walk ordered operations
  * using validate_operation; reject read-before-produce, multiple producers and
  * writes to external input; validate catalog/site values and selected logit shape.
- * Observation names may alias one completed tensor at adjacent block boundaries.
+ * Adjacent block output/input sites may share a tensor or name distinct values;
+ * their semantic equality requires numerical integration, not tensor-ID equality.
+ * Check every slot, including unused slots, has exactly one source; no tensor
+ * values are examined and selected-logit numerical row order is not proved.
+ * Layout matching ignores singleton-axis stride differences: those strides
+ * address no additional elements. All stride units and extents remain checked.
  * Design and cost: O(tensors+operand uses+sites) expected work with indexed state,
  * plus model metadata creation. Optimization: validate once before resource planning.
  * Tests check producer, shape, site and ownership contracts using in-memory data;
  * they do not snapshot slot numbers, operation counts or a private recipe layout.
  * Mathematical equivalence still requires independent numerical integration.
  * Overlay: docs/architecture/transformer-execution.md.
- * Corpus consultation, header design, 2026-10-18:
+ * Corpus consultation, implementation (full rules read), 2026-10-18:
  * cpp-guidelines I.7 (#ri-post): enforce the stated results and failure boundaries.
- * cpp-perf-guidelines GPU.9: prepare storage once and preserve last-use lifetimes.
- * Source: guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
+ * cpp-guidelines I.4 (#ri-typed): distinct IDs and operation access roles.
+ * cpp-perf-guidelines CDSA.32: validate indexed metadata once before execution.
+ * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
  */
 #include "models/model.h"
+
+#include <array>
+#include <cstdint>
+#include <functional>
+#include <limits>
+#include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
+
+namespace dolittle::models {
+namespace {
+
+bool same_layout(const tensors::Layout& left, const tensors::Layout& right) {
+    if (left.element_type != right.element_type || left.shape != right.shape) {
+        return false;
+    }
+    // Both layouts have already passed extent/rank/stride-unit validation.
+    for (std::size_t axis = 0; axis < left.shape.size(); ++axis) {
+        if (left.shape[axis] > 1 && left.byte_strides[axis] != right.byte_strides[axis]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool same_point(ObservationPoint left, ObservationPoint right) {
+    return left.boundary == right.boundary && left.block.value == right.block.value;
+}
+
+struct PointHash {
+    std::size_t operator()(ObservationPoint point) const noexcept {
+        return std::hash<std::size_t>{}(point.block.value) ^
+               std::hash<int>{}(static_cast<int>(point.boundary));
+    }
+};
+
+struct PointEqual {
+    bool operator()(ObservationPoint left, ObservationPoint right) const noexcept {
+        return same_point(left, right);
+    }
+};
+
+struct SiteState {
+    ObservationSite site;
+    std::optional<kernels::TensorId> tensor;
+};
+
+enum class Source { absent, external, operation };
+
+void validate_site(const ObservationSite& site, tensors::ComputationMode mode) {
+    switch (site.point.boundary) {
+    case ObservationBoundary::block_input:
+    case ObservationBoundary::block_output:
+        break;
+    default:
+        throw std::invalid_argument("unknown observation boundary");
+    }
+    if (site.vector_width == 0 || site.storage_type != mode.activation_storage) {
+        throw std::invalid_argument("observation width or storage disagrees with mode");
+    }
+}
+
+}  // namespace
+
+Model::Model() = default;
+Model::~Model() = default;
+
+void validate_recipe(
+    const Model& model, const ForwardRecipe& recipe, SequenceLength length,
+    tensors::ComputationMode mode, std::span<const TokenPosition> logit_positions) {
+    if (length.value == 0 || length.value > model.context_limit().value ||
+        model.vocabulary_size() == 0 ||
+        model.vocabulary_size() - 1 > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::invalid_argument("invalid model or sequence dimensions");
+    }
+    if ((mode.activation_storage != tensors::ElementType::bfloat16 &&
+         mode.activation_storage != tensors::ElementType::float32) ||
+        mode.reduction_accumulation != tensors::ElementType::float32) {
+        throw std::invalid_argument("unsupported recipe computation mode");
+    }
+    for (std::size_t i = 0; i < logit_positions.size(); ++i) {
+        if (logit_positions[i].value >= length.value ||
+            (i != 0 && logit_positions[i - 1].value >= logit_positions[i].value)) {
+            throw std::invalid_argument("logit positions must increase in range");
+        }
+    }
+    for (const auto& layout : recipe.tensors) {
+        (void)tensors::required_bytes(layout);
+    }
+    const auto layout_at = [&](kernels::TensorId id) -> const tensors::Layout& {
+        if (id.value >= recipe.tensors.size()) {
+            throw std::invalid_argument("recipe tensor ID is out of range");
+        }
+        return recipe.tensors[id.value];
+    };
+    const auto expected_tokens = tensors::contiguous_layout(
+        tensors::ElementType::uint32, std::array{length.value});
+    if (!same_layout(layout_at(recipe.token_input), expected_tokens)) {
+        throw std::invalid_argument("token input must be dense uint32 sequence");
+    }
+    std::vector<Source> sources(recipe.tensors.size(), Source::absent);
+    sources[recipe.token_input.value] = Source::external;
+
+    const auto specs = model.parameters();
+    if (recipe.parameters.size() != specs.size()) {
+        throw std::invalid_argument("recipe parameter membership is incomplete");
+    }
+    std::unordered_set<std::string_view> roles;
+    for (const auto& spec : specs) {
+        (void)tensors::required_bytes(spec.layout);
+        if (spec.role.empty() || !roles.insert(spec.role).second) {
+            throw std::invalid_argument("parameter roles must be nonempty and unique");
+        }
+    }
+    std::vector<bool> bound_parameters(specs.size(), false);
+    for (const auto& parameter : recipe.parameters) {
+        if (parameter.parameter.value >= specs.size() ||
+            bound_parameters[parameter.parameter.value]) {
+            throw std::invalid_argument("invalid or duplicate parameter assignment");
+        }
+        const auto& layout = layout_at(parameter.tensor);
+        if (sources[parameter.tensor.value] != Source::absent ||
+            !same_layout(layout, specs[parameter.parameter.value].layout)) {
+            throw std::invalid_argument("parameter slot or layout mismatch");
+        }
+        bound_parameters[parameter.parameter.value] = true;
+        sources[parameter.tensor.value] = Source::external;
+    }
+
+    for (const auto& operation : recipe.operations) {
+        const auto uses = kernels::validate_operation(operation, recipe.tensors, mode);
+        for (const auto& use : uses) {
+            if (use.access == kernels::OperandAccess::read &&
+                sources[use.tensor.value] == Source::absent) {
+                throw std::invalid_argument("recipe reads an unproduced tensor");
+            }
+            if (use.access == kernels::OperandAccess::write &&
+                sources[use.tensor.value] != Source::absent) {
+                throw std::invalid_argument("recipe overwrites a tensor source");
+            }
+        }
+        for (const auto& use : uses) {
+            if (use.access == kernels::OperandAccess::write) {
+                sources[use.tensor.value] = Source::operation;
+            }
+        }
+    }
+    for (const auto source : sources) {
+        if (source == Source::absent) {
+            throw std::invalid_argument("recipe contains a tensor without a source");
+        }
+    }
+
+    std::unordered_map<ObservationPoint, SiteState, PointHash, PointEqual> sites;
+    const auto catalog = model.observation_sites(mode);
+    sites.reserve(catalog.size());
+    for (const auto& site : catalog) {
+        validate_site(site, mode);
+        if (!sites.emplace(site.point, SiteState{site, std::nullopt}).second) {
+            throw std::invalid_argument("duplicate observation catalog point");
+        }
+    }
+    if (recipe.observations.size() != catalog.size()) {
+        throw std::invalid_argument("recipe observation membership is incomplete");
+    }
+    for (const auto& value : recipe.observations) {
+        validate_site(value.site, mode);
+        const auto found = sites.find(value.site.point);
+        if (found == sites.end() || found->second.tensor.has_value() ||
+            found->second.site.vector_width != value.site.vector_width ||
+            found->second.site.storage_type != value.site.storage_type) {
+            throw std::invalid_argument("recipe observation differs from model catalog");
+        }
+        const auto& layout = layout_at(value.tensor);
+        const auto expected = tensors::contiguous_layout(
+            value.site.storage_type, std::array{length.value, value.site.vector_width});
+        if (sources[value.tensor.value] != Source::operation || !same_layout(layout, expected)) {
+            throw std::invalid_argument("observation must name a produced full-sequence value");
+        }
+        found->second.tensor = value.tensor;
+    }
+    if (logit_positions.empty()) {
+        if (recipe.logits) {
+            throw std::invalid_argument("unrequested logits must be absent");
+        }
+    } else {
+        if (!recipe.logits) {
+            throw std::invalid_argument("requested logits are absent");
+        }
+        const auto& layout = layout_at(*recipe.logits);
+        const auto expected = tensors::contiguous_layout(
+            mode.activation_storage, std::array{logit_positions.size(), model.vocabulary_size()});
+        if (sources[recipe.logits->value] != Source::operation || !same_layout(layout, expected)) {
+            throw std::invalid_argument("selected logits layout or producer mismatch");
+        }
+    }
+}
+
+}  // namespace dolittle::models

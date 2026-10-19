@@ -1,5 +1,5 @@
 /*
- * Header design; device resources, transfers and completion are not implemented.
+ * CUDA implements these resource, transfer and completion contracts.
  * Axis X4: byte storage and ordering only, not transformer mathematics.
  * Contract: Device is stable/noncopyable and outlives every resource and queue
  * it creates. Owning buffer/queue handles are move-only; moved-from objects
@@ -31,7 +31,7 @@
  * Optimization: forward plans reuse arenas and bounded staging, with no
  * allocation or CPU wait per observation. No overlap claim for one queue.
  *
- * Corpus consultation, header design, 2026-10-18:
+ * Corpus consultation, implementation, 2026-10-18:
  * cpp-guidelines R.1 (#rr-raii): release resources on normal and failure paths.
  * cpp-guidelines I.7 (#ri-post): host readiness follows explicit completion.
  * cpp-perf-guidelines GPU.7: queue-prefix dependencies replace global waits.
@@ -68,6 +68,7 @@ private:
     explicit DeviceBuffer(std::unique_ptr<Impl>);
     std::unique_ptr<Impl> impl_;
     friend struct detail::BackendAccess;
+    friend class Queue;
 };
 
 class HostBuffer {
@@ -84,6 +85,7 @@ private:
     explicit HostBuffer(std::unique_ptr<Impl>);
     std::unique_ptr<Impl> impl_;
     friend struct detail::BackendAccess;
+    friend class Queue;
 };
 
 struct DeviceRegion { DeviceBuffer* owner; std::size_t offset; std::size_t bytes; };

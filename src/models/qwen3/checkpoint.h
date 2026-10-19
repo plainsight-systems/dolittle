@@ -1,5 +1,5 @@
 /*
- * Header design; Qwen3 config parsing and parameter binding are pending.
+ * Qwen3 config decoding and target parameter binding.
  * Axis M3, Qwen3 kind. Only this binder knows serialized Qwen3 tensor names.
  * Contract: bind_target takes ownership of an already verified archive and
  * reads configuration from its named artifact, never an unverified side file.
@@ -8,7 +8,8 @@
  * scaling, windowed attention, biases, tied heads, quantized weights or other
  * computation-affecting config. Validate all required tensors and account for
  * every supplied tensor; unexpected tensors fail for this target-only binder.
- * Informational config keys may be ignored explicitly; unknown behavioral
+ * Informational provenance, initialization, token IDs and cache-preference keys
+ * are explicitly allowlisted; unknown behavioral
  * settings must not silently select an approximation. No tokenizer work here.
  *
  * Bind model.embed_tokens.weight and lm_head.weight as [V,D], model.norm.weight
@@ -23,6 +24,9 @@
  * the consumed archive. A failed call does not return ownership to the caller.
  * parse_config consumes bounded in-memory JSON plus the actual weight dtype;
  * a declared dtype must agree. It returns owned Config without files/GPU work.
+ * Core dimensions, head_dim, activation, epsilon and theta must be explicit;
+ * absent bias/tying/window flags mean false. bind_target uses a 16 MiB config
+ * metadata budget including bounded source/node/string and schema accounting.
  * bind_parameters consumes Config and named layouts, validates the complete
  * catalog, and returns owned names in the parameter slots of make_model(config).
  * These pure helpers are shared with bind_target, so unit checks do not need
@@ -31,12 +35,13 @@
  * Algorithm: docs/architecture/transformer-execution.md, "Checkpoint loading
  * and binding": read verified config, construct the Qwen3 model description,
  * match and validate each role's payload, then publish BoundCheckpoint.
- * Cost: O(L) name/shape validation and metadata, no payload copies or GPU work.
+ * Cost: O(L log L) indexed name validation and O(L) metadata; no payload copies
+ * or GPU work.
  * Optimization: store parameter bindings in model-slot order; never resolve
  * serialized names inside forward execution. Full parameter bytes are counted
  * before the executor admits a resident plan.
  *
- * Corpus consultation, header design, 2026-10-18:
+ * Corpus consultation, implementation (full rules read), 2026-10-18:
  * cpp-guidelines R.1 (#rr-raii): consumed archive released on binding failure.
  * cpp-guidelines I.7 (#ri-post): every required parameter is validated.
  * cpp-perf-guidelines CDSA.32: bind once in the model consumer's slot order.

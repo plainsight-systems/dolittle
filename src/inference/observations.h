@@ -1,5 +1,5 @@
 /*
- * Header design; request resolution and device copies are not implemented.
+ * Observation planning is implemented; device copies belong to the executor.
  * Axis: X1, observation preparation within forward execution planning.
  *
  * Contract: prepare_observations consumes a model-advertised catalog, a
@@ -7,7 +7,9 @@
  * are valid and produce zero capture payload. An empty explicit position list
  * selects no rows; AllPositions selects [0, sequence_length). Explicit lists
  * must be strictly increasing and in range. Requested points must be unique,
- * advertised, and have valid shape/type. Reject malformed/unsupported inputs
+ * advertised, and have positive widths and BF16 or FP32 storage. The catalog
+ * is validated even when requests are empty; uint32 is index-only storage.
+ * Reject malformed/unsupported inputs
  * with invalid_argument, overflow or exceeded limits with length_error, and
  * propagate allocation failure. Preparation never drops requests silently.
  *
@@ -35,7 +37,7 @@
  * Optimization: resolve/allocate once per prepared pass, batch row copies,
  * and issue no capture allocation/readback when R is zero. No cost is measured.
  *
- * Corpus guidance queried for header design, 2026-10-17:
+ * Corpus guidance searched and full rules reread for implementation, 2026-10-18:
  * cpp-guidelines I.7 (#ri-post): state ready/owned-plan and borrowed-view rules.
  * cpp-guidelines R.1 (#rr-raii): plan metadata has automatic resource lifetime.
  * cpp-perf-guidelines COPY.5: plans are move-only; noexcept moves transfer

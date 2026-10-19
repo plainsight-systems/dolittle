@@ -1,37 +1,77 @@
 /*
- * Implementation-file header design only; no CUDA bodies yet.
- * Axis X5, CUDA embedding lookup and bit-preserving selected-row copies.
- * Algorithm: transformer overlay, "Full model flow" and "Configurable observation
- * points": Embedding reads validated uint32 IDs and copies each selected weight
- * row to its output. GatherRows uses prepared, checked row selections; coalesce
- * consecutive rows into copy ranges, and enqueue those device copies in the
- * same ordered queue. The first gather path needs no device index array.
- * Design and cost: O(rows*width*element_bytes) transfer work; embedding reads IDs
- * once per row/cooperative group. Gather preparation is O(selected rows); per-call
- * submission cost is O(contiguous runs), an explicit cost to measure for sparse
- * selections. Empty output selections enqueue nothing.
- * Optimization: contiguous feature lanes and grouped copy ranges, preserving raw
- * bits without normalization or numeric conversion. Observation-copy readers
- * extend source lifetime through completion. Kernelized sparse gathers can follow
- * if measurements justify them without changing selection semantics.
- * IDs must be validated by the executor before upload; no per-element host checks
- * or embedding-specific reinterpretation of tokens as text.
- * Contract: implement the matching operation in kernels/operations.h for dense
- * BF16/FP32 storage and FP32 accumulation. Preparation rejects unsupported shapes,
- * overflowing launch extents or insufficient device resources before submission.
- * Operands/workspace are borrowed from the prepared plan through queue completion;
- * no allocation, host readback or host wait in a kernel launch. Submission errors
- * follow operations.h; deferred device faults surface at the explicit queue wait.
- * Every address and tail lane is bounded; no cross-block spin waits. Kernel
- * selection and arithmetic policy are recorded by the prepared implementation.
- * Bodies, launch geometry and GPU validation are pending; these are design choices,
- * not measured performance or evidence of numerical equivalence.
- * Overlay: docs/architecture/transformer-execution.md.
- * Corpus consultation, header design, 2026-10-18:
- * cpp-guidelines I.7 (#ri-post): equations, rounding and completion are explicit.
- * cpp-perf-guidelines GPU.2: map adjacent lanes to adjacent data.
+ * Axis X5: token embedding lookup.
+ * Role: turn token IDs into the residual vectors entering the first block.
+ *
+ * Inputs: tokens[N] contains validated uint32 vocabulary indices; W[V,D] is
+ * an embedding table with V vocabulary entries and D features per entry.
+ * Output: X[N,D], with the same storage type as W.
+ *
+ * Algorithm: for each token position p:
+ * 1. Read vocabulary index t = tokens[p].
+ * 2. Copy all D features of W[t,:] into X[p,:].
+ * The copy preserves every storage bit. It performs no floating-point
+ * arithmetic, normalization or text decoding.
+ *
+ * CUDA implementation: a 256-thread block processes one token position at a
+ * time. Thread zero loads the token index into shared memory; after a barrier,
+ * threads copy adjacent features. A second barrier protects the shared index
+ * before the block advances to another token position.
+ * Cost: O(N*D) copied elements and one shared uint32 per block.
+ * Optimization: read the token index once per position and copy contiguous
+ * features directly on device. Selected activation-row copies (GatherRows)
+ * are implemented by prepared dispatch in operations.cpp, not this kernel.
+ *
+ * Overlay: docs/architecture/transformer-execution.md, "Full model flow".
+ * Token indices must be below V; the executor validates them before upload.
+ *
+ * Contract: preparation validates shapes, byte/launch extents and device limits.
+ * Inputs and the separate output buffer are borrowed until queue completion;
+ * output must not overlap an input. Launches allocate no buffers and perform
+ * no host readback or host wait. The caller checks immediate launch status;
+ * asynchronous device errors surface at the explicit queue wait. See
+ * kernels/operations.h for the public operation and failure contracts.
+ *
+ * Corpus consultation, comment design, 2026-10-18:
+ * cpp-guidelines I.7 (#ri-post): state the output and rounding guarantees.
+ * cpp-perf-guidelines GPU.2: contiguous features map to adjacent threads.
  * Source: guidelines/gpu/GPU.2-shape-data-for-coalesced-lane-access.md.
- * cpp-perf-guidelines GPU.1: keep row copies on device.
- * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
  */
-#include "kernels/operations.h"
+#include "kernels/cuda/common.cuh"
+
+namespace dolittle::kernels::cuda {
+namespace {
+template <class Bits>
+__global__ void embedding(const std::uint32_t* tokens, const Bits* weight,
+                          Bits* output, std::size_t rows, std::size_t width) {
+    __shared__ std::uint32_t token;
+    for (std::size_t row = blockIdx.x; row < rows;) {
+        if (threadIdx.x == 0) token = tokens[row];
+        __syncthreads();
+        const auto source = static_cast<std::size_t>(token) * width;
+        for (std::size_t feature = threadIdx.x; feature < width; feature += blockDim.x) {
+            output[row * width + feature] = weight[source + feature];
+        }
+        __syncthreads();
+        if (rows - row <= gridDim.x) break;
+        row += gridDim.x;
+    }
+}
+
+template <class Bits>
+void submit(const std::uint32_t* tokens, const void* weight, void* output,
+            std::size_t rows, std::size_t width, cudaStream_t stream) {
+    embedding<<<detail::grid_blocks(rows), detail::threads, 0, stream>>>(
+        tokens, static_cast<const Bits*>(weight), static_cast<Bits*>(output), rows, width);
+}
+}  // namespace
+
+void launch_embedding(tensors::ElementType type, const std::uint32_t* tokens,
+                      const void* weight, void* output, std::size_t rows,
+                      std::size_t width, cudaStream_t stream) {
+    if (detail::is_bfloat16(type)) {
+        submit<std::uint16_t>(tokens, weight, output, rows, width, stream);
+    } else {
+        submit<std::uint32_t>(tokens, weight, output, rows, width, stream);
+    }
+}
+}  // namespace dolittle::kernels::cuda

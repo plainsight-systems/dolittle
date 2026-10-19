@@ -1,8 +1,8 @@
-"""Exercise publication isolation, URL integrity and a real subpath build.
+"""One publication-build integration and isolated in-memory site guard units.
 
-Use a disposable repository fixture; never mutate working articles or previews.
-The build verifies generated output, while injected failures check that those
-guards catch broken assets, anchors, share metadata and accidental publication.
+The integration uses a disposable repository and real Hugo build. Unit tests
+pass byte snapshots directly to the same validator and never create files or
+launch processes. Each negative case checks a publication contract.
 """
 import importlib.util
 import json
@@ -18,7 +18,7 @@ site = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(site)
 
 
-class PublicationTests(unittest.TestCase):
+class PublicationIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory()
@@ -59,55 +59,108 @@ class PublicationTests(unittest.TestCase):
         self.assertIn('Milestone 1', html)
         self.assertIn('/dolittle/writing/milestone-check/', html)
 
-    def test_broken_anchor_and_responsive_asset_are_rejected(self):
-        home = self.output / 'index.html'
-        original = home.read_text()
-        try:
-            for fragment, message in [
-                ('<a href="#missing-anchor">Broken</a>', 'missing fragment'),
-                ('<img alt="" srcset="missing.webp 800w">', 'Missing target'),
-            ]:
-                with self.subTest(fragment=fragment):
-                    home.write_text(original + fragment)
-                    with self.assertRaisesRegex(ValueError, message):
-                        site.check_site(self.output, self.base, self.published)
-        finally:
-            home.write_text(original)
 
-    def test_stale_share_identity_and_missing_image_are_rejected(self):
-        home = self.output / 'index.html'
-        original = home.read_text()
-        page = site.Page(original)
-        try:
-            home.write_text(original.replace(
-                'property="og:url" content="' + self.base,
-                'property="og:url" content="http://localhost:1315/'))
-            with self.assertRaisesRegex(ValueError, 'invalid social metadata'):
-                site.check_site(self.output, self.base, self.published)
-            home.write_text(original.replace(page.meta['og:image'], self.base + 'missing.jpg'))
-            with self.assertRaisesRegex(ValueError, 'Missing target'):
-                site.check_site(self.output, self.base, self.published)
-        finally:
-            home.write_text(original)
+class SiteValidationUnitTests(unittest.TestCase):
+    base = 'https://example.test/dolittle/'
+    published = {'example'}
+
+    def setUp(self):
+        self.files = {}
+        names = ('index.html', 'writing/index.html', 'about/index.html', '404.html',
+                 'writing/example/index.html')
+        for name in names:
+            page_url = self.base + name.removesuffix('index.html')
+            metadata = {
+                'og:title': 'Example', 'og:description': 'Description',
+                'og:type': 'website', 'og:site_name': 'Dolittle',
+                'og:url': page_url, 'og:image': self.base + 'share.jpg',
+                'og:image:alt': 'Artwork', 'og:image:type': 'image/jpeg',
+                'og:image:width': '1200', 'og:image:height': '400',
+                'twitter:card': 'summary_large_image', 'twitter:title': 'Example',
+                'twitter:description': 'Description', 'twitter:image': self.base + 'share.jpg',
+                'twitter:image:alt': 'Artwork',
+            }
+            html = '<title>Example</title><main><h1 id="title">Example</h1></main>'
+            html += f'<link rel="canonical" href="{page_url}">'
+            html += ''.join(f'<meta property="{key}" content="{value}">'
+                            for key, value in metadata.items())
+            html += '<a href="' + self.base + 'writing/example/#title">Example</a>'
+            html += '<link rel="stylesheet" href="' + self.base + 'style.css">'
+            self.files[name] = html.encode()
+        self.files['share.jpg'] = b'\xff\xd8fixture'
+        self.files['style.css'] = b'@font-face{src:url(font.woff2)}'
+        self.files['font.woff2'] = b'font fixture'
+        self.files['writing/index.xml'] = (
+            '<rss><channel><item><link>' + self.base + 'writing/example/'
+            '</link></item></channel></rss>').encode()
+
+    def validate(self):
+        site.check_site_snapshot(self.files, self.base, self.published)
+
+    def append_home(self, fragment):
+        self.files['index.html'] += fragment.encode()
+
+    def test_valid_snapshot_and_directory_links(self):
+        before = dict(self.files)
+        self.validate()
+        self.assertEqual(self.files, before)
+
+    def test_broken_anchor_is_rejected(self):
+        self.append_home('<a href="#missing-anchor">Broken</a>')
+        with self.assertRaises(ValueError):
+            self.validate()
+
+    def test_missing_responsive_asset_is_rejected(self):
+        self.append_home('<img alt="" srcset="missing.webp 800w">')
+        with self.assertRaises(ValueError):
+            self.validate()
+
+    def test_stale_share_identity_is_rejected(self):
+        self.files['index.html'] = self.files['index.html'].replace(
+            ('property="og:url" content="' + self.base).encode(),
+            b'property="og:url" content="http://localhost:1315/')
+        with self.assertRaises(ValueError):
+            self.validate()
+
+    def test_missing_share_image_is_rejected(self):
+        del self.files['share.jpg']
+        with self.assertRaises(ValueError):
+            self.validate()
+
+    def test_non_jpeg_share_image_is_rejected(self):
+        self.files['share.jpg'] = b'not a JPEG'
+        with self.assertRaises(ValueError):
+            self.validate()
 
     def test_unexpected_public_document_is_rejected(self):
-        leaked = self.output / 'brief.md'
-        try:
-            leaked.write_text('Unintended document')
-            with self.assertRaisesRegex(ValueError, 'Unexpected published file'):
-                site.check_site(self.output, self.base, self.published)
-        finally:
-            leaked.unlink()
+        self.files['brief.md'] = b'Unintended document'
+        with self.assertRaises(ValueError):
+            self.validate()
 
     def test_missing_font_is_rejected(self):
-        css = next(self.output.rglob('*.css'))
-        original = css.read_text()
-        try:
-            css.write_text(original + '@font-face{src:url(missing.woff2)}')
-            with self.assertRaisesRegex(ValueError, 'Missing target'):
-                site.check_site(self.output, self.base, self.published)
-        finally:
-            css.write_text(original)
+        self.files['style.css'] += b'@font-face{src:url(missing.woff2)}'
+        with self.assertRaises(ValueError):
+            self.validate()
+
+    def test_unexpected_page_is_rejected(self):
+        self.files['unexpected/index.html'] = self.files['index.html']
+        with self.assertRaises(ValueError):
+            self.validate()
+
+    def test_encoded_output_escape_is_rejected(self):
+        self.append_home('<a href="%2e%2e/private.txt">Escapes</a>')
+        with self.assertRaises(ValueError):
+            self.validate()
+
+    def test_site_base_escape_is_rejected(self):
+        self.append_home('<a href="/private.txt">Escapes</a>')
+        with self.assertRaises(ValueError):
+            self.validate()
+
+    def test_feed_membership_must_match_publication_set(self):
+        self.files['writing/index.xml'] = b'<rss><channel/></rss>'
+        with self.assertRaises(ValueError):
+            self.validate()
 
 
 if __name__ == '__main__':

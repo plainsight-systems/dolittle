@@ -1,5 +1,4 @@
 /*
- * Header design; Qwen3 recipe generation is not implemented.
  * Axis M6, Qwen3 kind: target-style full causal forward mathematics.
  * Contract: Config describes the supported dense, biasless, untied-vocabulary
  * output kind with Q/K head RMSNorm, SiLU MLP and unscaled split-half RoPE.
@@ -13,25 +12,57 @@
  * make_model owns copied config and model metadata; invalid config ->
  * invalid_argument, overflow -> length_error, allocation failure propagates.
  * Model::full_forward contracts apply, including empty selected logits.
+ * Parameter roles are token_embedding, final_norm, vocabulary_projection and
+ * blocks.<zero-based index>.{input_norm,query_projection,key_projection,
+ * value_projection,query_norm,key_norm,attention_projection,
+ * post_attention_norm,gate_projection,up_projection,down_projection}.
+ * These semantic roles are the binder contract; numeric slot IDs are not.
+ * Vocabulary count minus one must fit uint32, so every possible ID fits.
  *
- * Algorithm: docs/architecture/transformer-execution.md, "One Qwen3 transformer
- * block" and "First forward pass": lookup embeddings; for each block emit
- * input RMSNorm, Q/K/V projections, Q/K per-head RMSNorm, Q/K RoPE, causal GQA,
- * output projection/residual sum, post-attention RMSNorm once, gate/up
- * projections, SiLU*up, down projection and second residual sum. Advertise the
- * entering and final residual of every block. Gather selected final rows,
- * apply final RMSNorm and vocabulary projection; omit only that output branch
- * when no logits are requested. Never stop at an observation block.
+ * Algorithm: construct a recipe for the following forward computation.
+ * Inputs to recipe construction are the sequence length N, computation mode
+ * and requested logit positions. Output is owned tensor/parameter metadata,
+ * ordered operations and observation sites; this file does not execute them.
+ * At execution, token IDs and bound weights supply the recipe's values.
  *
- * Cost: O(L) operations/parameter slots plus selected-row metadata. Dense FLOPs
- * follow the overlay; no expanded KV heads or required N*N score tensor.
+ * Let D be the residual width, d the head width, Hq and Hkv the query and
+ * KV head counts, and F the MLP width. A projection P(X,W) means X * transpose(W);
+ * weights are stored [output_features,input_features]. RMSNorm normalizes
+ * the final feature dimension and applies its learned scale.
+ * 1. Look up each token's embedding to obtain residual X[N,D].
+ * 2. For every transformer block, record X as its block_input observation
+ *    and construct these operations in dependency order:
+ *    a. Normalize X with input_norm to obtain U[N,D].
+ *    b. Project U separately into Q[N,Hq,d], K[N,Hkv,d], V[N,Hkv,d].
+ *       Normalize each Q and K head with query_norm/key_norm, then apply
+ *       rotary position embedding to Q and K at positions [0,N).
+ *    c. Apply causal grouped-query attention to Q, K and V to obtain
+ *       A[N,Hq,d]. Flatten its head axes for attention_projection, then
+ *       add the projection to X: R = X + P(A, attention_projection).
+ *    d. Normalize R with post_attention_norm to obtain S[N,D]. Project S
+ *       into gate G[N,F] and up B[N,F]. Compute M = SiLU(G) * B elementwise.
+ *    e. Project M back to D features and add the second residual:
+ *       X_next = R + P(M, down_projection). Record X_next as block_output
+ *       and use it as X for the following block.
+ * 3. After all blocks, gather the requested rows of X, apply final_norm,
+ *    then vocabulary_projection. With C requested rows and vocabulary
+ *    size Vocab, logits have shape [C,Vocab]. An empty selection omits
+ *    this branch.
+ * Observation requests never stop the block loop. Operation contracts in
+ * kernels/operations.h define storage rounding at each numerical boundary.
+ * Overlay: docs/architecture/transformer-execution.md,
+ * "One Qwen3 transformer block" and "First forward pass".
+ *
+ * Cost: O(L) operations/parameter slots for L transformer blocks, plus
+ * selected-row metadata. Dense FLOPs follow the overlay; no expanded KV heads or required N*N score tensor.
  * Optimization: one post-attention normalization reused by both MLP branches;
  * only requested rows reach vocabulary projection. Physical reuse belongs to
  * executor planning, not to changing model equations or observation values.
  *
- * Corpus consultation, header design, 2026-10-18:
+ * Corpus consultation, implementation, 2026-10-18:
  * cpp-guidelines I.4 (#ri-typed): model dimensions are separate from tensor IDs.
  * cpp-guidelines I.7 (#ri-post): ordered equations and capture semantics explicit.
+ * cpp-guidelines ES.103 (#res-overflow): check dimension and metadata extents.
  * cpp-perf-guidelines CDSA.32: generate the immutable recipe once per workload.
  * Source: guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
  */

@@ -1,5 +1,5 @@
 /*
- * Header design; no model execution, CUDA allocation or kernels exist yet.
+ * Prepared full forward execution; numerical verification is recorded separately.
  * Axis: X1, execution planning. This first interface is a complete causal
  * forward pass; persistent KV caching and autoregressive sampling are later.
  *
@@ -50,7 +50,10 @@
  *
  * Design and cost: preparation includes weights, scratch, output staging and
  * capture/position metadata in admission; report estimated device peak and
- * host output bytes (including token provenance). Actual allocations may still
+ * host output bytes (logical payload and metadata, including token provenance;
+ * excludes allocator capacity/overhead and plan-owned transfer staging). Device
+ * peak is admitted arena bytes, excluding driver/context reservations and
+ * allocator alignment overhead. Actual allocations may still
  * fail. Logit position lists follow PositionSelection's strict ordering and
  * bounds rules, including an empty list selecting no rows. Raw logits retain
  * their declared storage dtype. Reusing the plan avoids rebuilding schedules;
@@ -59,7 +62,7 @@
  * A final readback wait is intentional at this numerical-harness boundary.
  * No overlap or throughput improvement is claimed before measurement.
  *
- * Corpus guidance queried for header design, 2026-10-17 and 2026-10-18:
+ * Corpus guidance queried and full rules read for implementation, 2026-10-18:
  * cpp-guidelines I.7 (#ri-post): host-ready results and failure cleanup are explicit.
  * cpp-guidelines R.1 (#rr-raii): owned scratch/results follow plan/result lifetime.
  * cpp-perf-guidelines GPU.1: budget batched output transfers, not each layer's

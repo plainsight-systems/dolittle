@@ -20,7 +20,9 @@ from functools import partial
 from html.parser import HTMLParser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import posixpath
+from collections.abc import Mapping
 import re
 import shutil
 import subprocess
@@ -139,9 +141,21 @@ class Page(HTMLParser):
                 self.links.append(candidate.strip().split()[0])
 
 
-def check_site(output: Path, base: str, published: set[str]) -> None:
-    output = output.resolve()
-    pages = {str(p.relative_to(output)): Page(p.read_text()) for p in output.rglob('*.html')}
+def check_site_snapshot(files: Mapping[str, bytes], base: str, published: set[str]) -> None:
+    """Validate an immutable in-memory publication snapshot without I/O.
+
+    Keys are canonical relative POSIX file names; values contain file bytes.
+    This is the same publication/URL/social/RSS contract used after a real build.
+    Parsing creates local metadata only and never mutates the supplied snapshot.
+    """
+    base_url(base)
+    for name, content in files.items():
+        path = PurePosixPath(name)
+        if (not name or path.is_absolute() or '..' in path.parts or
+                path.as_posix() != name or '\\' in name or not isinstance(content, bytes)):
+            raise ValueError(f'Invalid snapshot file: {name}')
+    pages = {name: Page(content.decode('utf-8')) for name, content in files.items()
+             if name.endswith('.html')}
     expected = {'index.html', 'writing/index.html', 'about/index.html', '404.html'} | {
         f'writing/{slug}/index.html' for slug in published}
     if set(pages) != expected:
@@ -149,19 +163,22 @@ def check_site(output: Path, base: str, published: set[str]) -> None:
     origin = urlsplit(base)
     prefix = unquote(origin.path)
 
-    def local_target(link: str, referring_url: str) -> tuple[Path | None, str]:
+    def local_target(link: str, referring_url: str) -> tuple[str | None, str]:
         parsed = urlsplit(urljoin(referring_url, link))
         if parsed.scheme not in {'http', 'https'} or parsed.netloc != origin.netloc:
             return None, ''
         path = unquote(parsed.path)
         if not path.startswith(prefix):
             raise ValueError(f'Link escapes site base path: {link}')
-        target = (output / path[len(prefix):]).resolve()
-        if not target.is_relative_to(output):
+        relative = path[len(prefix):]
+        target = posixpath.normpath(relative)
+        if target == '..' or target.startswith('../') or target.startswith('/'):
             raise ValueError(f'Link escapes output: {link}')
-        if target.is_dir():
-            target /= 'index.html'
-        if not target.is_file():
+        if target == '.':
+            target = 'index.html'
+        elif target not in files:
+            target = target.rstrip('/') + '/index.html'
+        if target not in files:
             raise ValueError(f'Missing target: {link}')
         return target, unquote(parsed.fragment)
 
@@ -184,25 +201,40 @@ def check_site(output: Path, base: str, published: set[str]) -> None:
         if not image_url.startswith(base):
             raise ValueError(f'{name}: social image must use the site base URL.')
         social, _ = local_target(image_url, page_url)
-        if social.suffix != '.jpg' or not social.read_bytes().startswith(b'\xff\xd8'):
+        if social is None or PurePosixPath(social).suffix != '.jpg' or not files[social].startswith(b'\xff\xd8'):
             raise ValueError(f'{name}: social image is not a JPEG.')
         for link in page.links:
-            target, fragment = local_target(link, urljoin(base, name.removesuffix('index.html')))
-            if target and fragment and target.suffix == '.html':
-                if fragment not in pages[str(target.relative_to(output))].ids:
+            target, fragment = local_target(link, page_url)
+            if target and fragment and PurePosixPath(target).suffix == '.html':
+                if fragment not in pages[target].ids:
                     raise ValueError(f'{name}: missing fragment {link}')
-    for css in output.rglob('*.css'):
-        css_url = urljoin(base, str(css.relative_to(output)))
-        for link in re.findall(r'url\([\"\']?([^\)\"\']+)', css.read_text()):
-            local_target(link, css_url)
+    for name, content in files.items():
+        if name.endswith('.css'):
+            css_url = urljoin(base, name)
+            for link in re.findall(r'url\(["\']?([^\)"\']+)', content.decode('utf-8')):
+                local_target(link, css_url)
     allowed = {'.html', '.xml', '.txt', '.css', '.svg', '.png', '.jpg', '.webp', '.woff2'}
-    for path in output.rglob('*'):
-        if path.is_file() and path.suffix.lower() not in allowed:
-            raise ValueError(f'Unexpected published file: {path.relative_to(output)}')
-    feed = ET.parse(output / 'writing/index.xml')
+    for name in files:
+        if PurePosixPath(name).suffix.lower() not in allowed:
+            raise ValueError(f'Unexpected published file: {name}')
+    if 'writing/index.xml' not in files:
+        raise ValueError('Missing writing RSS feed.')
+    feed = ET.fromstring(files['writing/index.xml'])
     links = [item.findtext('link') for item in feed.findall('./channel/item')]
     if len(links) != len(published) or set(links) != {urljoin(base, f'writing/{s}/') for s in published}:
         raise ValueError('RSS entries differ from published writing.')
+
+
+def check_site(output: Path, base: str, published: set[str]) -> None:
+    """Read a built directory, then apply the pure snapshot validation contract."""
+    output = output.resolve()
+    files = {}
+    for path in output.rglob('*'):
+        if path.is_file():
+            if not path.resolve().is_relative_to(output):
+                raise ValueError(f'Published file escapes output: {path.relative_to(output)}')
+            files[path.relative_to(output).as_posix()] = path.read_bytes()
+    check_site_snapshot(files, base, published)
 
 
 def build(base: str) -> Path:

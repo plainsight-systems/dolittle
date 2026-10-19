@@ -1,0 +1,40 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "host-debug",
+      "displayName": "Host C++ (Debug, no CUDA)",
+      "description": "Host libraries and tests on macOS or Linux. Requires OpenSSL 3 development files.",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/host-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_TESTING": true,
+        "DOLITTLE_CUDA": false
+      }
+    },
+    {
+      "name": "cuda-debug",
+      "displayName": "Linux CUDA (Debug)",
+      "description": "Full CUDA engine and tests. Configure in the Linux environment containing CUDA 13.2+ and OpenSSL 3 development files.",
+      "inherits": "host-debug",
+      "binaryDir": "${sourceDir}/build/cuda-debug",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "cacheVariables": { "DOLITTLE_CUDA": true }
+    }
+  ],
+  "buildPresets": [
+    { "name": "host-debug", "configurePreset": "host-debug" },
+    { "name": "cuda-debug", "configurePreset": "cuda-debug" }
+  ],
+  "testPresets": [
+    {
+      "name": "host-units",
+      "configurePreset": "host-debug",
+      "filter": { "include": { "label": "^unit$" } },
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    }
+  ]
+}

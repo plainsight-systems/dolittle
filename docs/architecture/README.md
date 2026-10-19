@@ -18,9 +18,19 @@ Andrew's feedback, the mapping exposes model families, tokenizer kinds, tensor f
 and representations, cache strategies, sampling mechanisms, NLA pairs and
 backends as explicit families with named initial implementations. It assigns
 ownership, dependencies and header contracts without treating the selected
-model as the entire architecture. No source stubs or engine implementation
-have been introduced by these documents. Next, design file headers and
-numerical checks for the first implementation slice.
+model as the entire architecture. The first forward-pass file-header designs
+are complete. The first full forward-pass sources now implement loading and
+binding, host preparation, CUDA resources and kernels, execution and completed-
+result comparison. See [build commands](../../tests/README.md) for the separate
+host, archive, device and forward scenarios; build success alone does not
+establish equivalence.
+
+CUDA 13.2 compilation uses a digest-pinned Docker environment, with nlohmann/json
+3.12.0 and OpenSSL 3 supporting metadata and hashing. The build retains native
+Ampere code plus PTX. The image builds; GPU execution currently uses the native
+Linux host because NVIDIA Container Toolkit access is not configured. Native
+and forced-PTX results cover the tested short-sequence/reference policy only;
+long-context behavior, newer GPUs and container GPU execution remain unverified.
 
 The selected target is **Qwen/Qwen3-8B**, paired with
 **marco-bazzani/Qwen3-8B-nla**. The tested revisions and file hashes are in
@@ -28,8 +38,12 @@ The selected target is **Qwen/Qwen3-8B**, paired with
 contracts and measurements are in the
 [comparison](../research/2026-10-16-nla-comparison/README.md).
 
-Begin with zero-based block 24 captures, the separate full AV and 28-block AR
-weights, and the AR's separate value head. Sequential BF16 execution fits the
-24 GB 3090 Ti in the reference workload. Use the accepted overlays and mapping
-to design loading, cache ownership and capture/explanation scheduling in the
-file headers; add source files as their implementation slices require them.
+The selected pairing requires zero-based block-24 output, but shared observation
+planning accepts any model-advertised block input/output. The separate full AV,
+28-block AR and AR value head remain later implementation work. Sequential BF16
+execution fits the 24 GB 3090 Ti in the historical reference workload.
+
+The completed source scope is one full causal target pass with current-pass K/V.
+Persistent cache, tokenizer/text protocols, generation, NLA interpretation and
+reconstruction, serving and the browser application remain subsequent slices.
+Keep their accepted architecture visible without generating empty source stubs.

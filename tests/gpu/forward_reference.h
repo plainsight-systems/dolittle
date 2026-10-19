@@ -1,5 +1,5 @@
 /*
- * Header design for the first numerical harness; no checks have executed.
+ * Completed-result comparison for the first numerical harness.
  * Axis: D3, independent forward-pass verification, not production inference.
  *
  * Contract: a reference case owns exact token IDs, the verified checkpoint
@@ -42,8 +42,11 @@
  * model. tests/support/numerical.h owns the pure array error metrics. Device
  * execution that produces the result is integration work and counts against
  * the repository-wide limit; this helper does not create additional scenarios.
+ * CompletedForwardView borrows immutable, completed host data only for this
+ * call; no spans are retained. The ForwardResult overload adapts its accessors
+ * to the identical comparison exercised by in-memory unit tests.
  *
- * Corpus guidance queried for header design, 2026-10-17 and 2026-10-18:
+ * Corpus guidance queried/read for implementation, 2026-10-18:
  * cpp-guidelines I.4 (#ri-typed): semantic point and token positions distinguish
  * outputs even when their widths match.
  * cpp-guidelines I.7 (#ri-post): comparison states exactly what passing means.
@@ -103,10 +106,28 @@ struct OutputComparison {
     std::string failure;
 };
 
+struct CompletedForwardView {
+    inference::ExecutionId execution_id;
+    std::string_view checkpoint_identity;
+    std::span<const std::uint32_t> token_ids;
+    tensors::ComputationMode numerical_mode;
+    inference::LogitRows logits;
+    std::span<const inference::CapturedRows> captures;
+};
+
 [[nodiscard]] std::vector<OutputComparison> compare_forward(
     const ForwardReferenceCase& reference,
-    const inference::ForwardResult& actual,
+    CompletedForwardView actual,
     NumericalTolerance logit_tolerance,
     NumericalTolerance observation_tolerance);
+
+[[nodiscard]] inline std::vector<OutputComparison> compare_forward(
+    const ForwardReferenceCase& reference, const inference::ForwardResult& actual,
+    NumericalTolerance logit_tolerance, NumericalTolerance observation_tolerance) {
+    return compare_forward(reference,
+        CompletedForwardView{actual.execution_id(), actual.checkpoint_identity(),
+            actual.token_ids(), actual.numerical_mode(), actual.logits(), actual.captures()},
+        logit_tolerance, observation_tolerance);
+}
 
 }  // namespace dolittle::tests

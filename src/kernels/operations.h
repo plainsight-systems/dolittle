@@ -1,5 +1,6 @@
 /*
- * Header design; operation preparation and kernels are not implemented.
+ * Pure operation validation and CUDA preparation/submission implement this
+ * catalog; mathematical kernels are supplied by the CUDA implementation files.
  * Axis X5: bounded mathematical operations and backend capability selection.
  * Contract: TensorId indexes the supplied layout table; invalid IDs, shapes,
  * strides, constants and unsupported modes fail with invalid_argument. Size
@@ -7,11 +8,15 @@
  * propagates. Preparation owns copied descriptors, borrows a stable Device,
  * chooses a supported implementation and reports workspace bytes/alignment
  * before tensor allocation. No silent precision change or CPU fallback.
+ * CUDA currently needs no global operation workspace and requires natural
+ * element alignment. RoPE theta must also fit a positive finite FP32 value.
  * operands() declares required alignment/access for each referenced tensor;
  * planner placement satisfies these requirements before binding buffers.
  *
- * Initial operations require dense row-major tensors and distinct output
+ * Initial operations require nonempty dense row-major tensors and distinct output
  * storage, floating inputs/outputs in activation_storage and FP32 reductions.
+ * Activation storage is BF16 or FP32. Singleton-axis strides may vary because
+ * they do not change any logical address. Projection X/Y have rank at least two.
  * Embedding reads uint32 [N] IDs and [V,D] weights, produces [N,D]. The executor
  * validates every ID < V before upload. Projection uses W[out,in], Y=X*W^T,
  * without bias; X/Y have equal leading row counts, trailing dimensions flatten
@@ -33,7 +38,8 @@
  *
  * submit binds exactly the operation's distinct referenced tensor IDs, once
  * each. A write operand needs mutable storage. Extents/alignment and device
- * identity must match preparation; overlapping regions involving an output or
+ * identity must match preparation; bound bytes equal the prepared extent.
+ * Overlapping regions involving an output or
  * workspace are rejected, but read/read aliasing is allowed. All borrowed
  * resources and this prepared operation stay unmoved/alive until queue
  * completion. submit enqueues without host wait;
@@ -56,9 +62,12 @@
  * Optimization: resolve dispatch once and reuse workspace, keep intermediate
  * values on device. Fusion cannot erase requested observation values.
  *
- * Corpus consultation, header design, 2026-10-18:
+ * Corpus consultation, validation/CUDA implementation, 2026-10-18:
  * cpp-guidelines I.4 (#ri-typed): operation variants and tensor IDs replace
  * untyped callbacks. I.7 (#ri-post): exact equations, readiness and limits.
+ * ES.103 (#res-overflow): reject overflow in flattening and position bounds.
+ * cpp-perf-guidelines GPU.2: require declared dense addressing before dispatch.
+ * Source: guidelines/gpu/GPU.2-shape-data-for-coalesced-lane-access.md.
  * cpp-perf-guidelines GPU.1: intermediate tensors stay on device.
  * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
  * cpp-perf-guidelines GPU.9: caller admits/reuses declared workspace.
