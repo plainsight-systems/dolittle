@@ -32,6 +32,26 @@
  * host access explicit and confine necessary native API operations.
  * cpp-perf-guidelines COPY.7: borrow spans/references without hidden payload
  * copies. Source: guidelines/copy-move/COPY.7-eliminate-hidden-copies.md.
+ * Steady-state design, 2026-10-20:
+ * Warm one reusable completion event when creating a queue. Device/staging
+ * allocation records a diagnostic allocation violation when invoked inside
+ * the guarded generation loop; queue mark/wait reuse completed events.
+ * Overlay: transformer-execution.md, "Device selection and allocation-free
+ * generation". Core I.7 (#ri-post): borrowing, bounds and failure contracts.
+ * Performance GPU.1: device-resident decisions; MEM.9: prepare storage before
+ * steady state and check the invariant. Sources:
+ * guidelines/gpu/GPU.1-keep-data-on-device.md;
+ * guidelines/memory/MEM.9-embedded-allocate-at-init.md.
+ * Both corpora queried/read for header design and implementation, 2026-10-20.
+ * Queue-completion design/implementation consultation, 2026-10-20:
+ * Core I.7 (#ri-post) and CP.3 (#rconc-data): collection establishes host
+ * readiness; in-flight slots have exclusive ownership until completion.
+ * Performance GPU.1 (guidelines/gpu/GPU.1-keep-data-on-device.md) keeps
+ * sampled IDs and RNG state on-device. GPU.7
+ * (guidelines/gpu/GPU.7-pipeline-cpu-and-gpu-work.md) separates submission
+ * from readback through explicit prefix completion. Live device-owned decode
+ * uses its own graph publication protocol instead of per-token events. Both
+ * local corpora were queried and the full rules read in both work phases.
  */
 #include "gpu/cuda/device.h"
 
@@ -44,6 +64,7 @@
 #include <utility>
 #include <vector>
 
+#include "diagnostics/allocation.h"
 #include "gpu/cuda/backend.h"
 
 namespace dolittle::gpu {
@@ -102,9 +123,11 @@ class CudaDevice final : public Device {
   ~CudaDevice() override { state_->drain_noexcept(); }
   const DeviceInfo& info() const noexcept override { return state_->info; }
   DeviceBuffer allocate(AllocationRequest r) override {
+    diagnostics::record_allocation();
     return detail::BackendAccess::allocate(*this, r);
   }
   HostBuffer allocate_staging(AllocationRequest r) override {
+    diagnostics::record_allocation();
     return detail::BackendAccess::allocate_staging(*this, r);
   }
   Queue create_queue() override {
@@ -295,6 +318,9 @@ Queue detail::BackendAccess::create_queue(Device& device) {
   impl->state = device_state(device);
   impl->state->check(
       cudaStreamCreateWithFlags(&impl->stream, cudaStreamNonBlocking));
+  impl->marks.emplace_back();
+  impl->state->check(cudaEventCreateWithFlags(&impl->marks.back().event,
+                                              cudaEventDisableTiming));
   return Queue(std::move(impl));
 }
 cudaStream_t detail::BackendAccess::stream(Queue& queue, Device& device) {
@@ -411,6 +437,19 @@ void Queue::copy(DeviceRegion destination, ConstDeviceRegion source) {
             .subspan(source.offset)
             .data(),
         destination.bytes, cudaMemcpyDeviceToDevice, impl_->stream));
+  }
+}
+void Queue::reserve_completion_points(std::size_t count) {
+  impl_->state->activate();
+  if (impl_->issued != impl_->completed) {
+    throw std::logic_error("reserve completion points on an idle queue");
+  }
+  impl_->marks.resize(std::max(count, impl_->marks.size()));
+  for (auto& mark : impl_->marks) {
+    if (!mark.event) {
+      impl_->state->check(
+          cudaEventCreateWithFlags(&mark.event, cudaEventDisableTiming));
+    }
   }
 }
 CompletionPoint Queue::mark() {

@@ -1,67 +1,34 @@
 /*
- * Owned in-memory experiment records and atomic variant insertion.
- * Axis R4: owned target transcript/captures and append-only interpretation
- * variants. Contract: one Record owns one completed or interrupted target
- * result, its exact formatted prompt, decoded byte mapping and segmentation,
- * plus bounded variants. RunId identifies the experiment; CaptureKey identifies
- * a consumed target token at an advertised site; VariantId identifies an
- * attempt within that run. None is an AV token position. No device, plan,
- * tokenizer or checkpoint lifetime is needed after construction. This is
- * in-memory retention, not persistence to disk.
+ * Axis R4: immutable target capture index and bounded interpretation history.
+ * Contract: a record owns target IDs, decoded byte mapping, classifications,
+ * capture leases and provenance. It admits bounded variants and validates every
+ * count/extent/site before publishing. Capture lookup returns only a completed
+ * consumed-token row. Device must outlive device leases, including borrowed
+ * row copies held beyond the record. Record contains no execution queue.
  *
- * Algorithm: docs/architecture/logical-overview.md, "Capture alignment",
- * "3 Retain the experiment and change phases", "4 Interpret selected
- * positions":
- * 1. Move the generation's exact tokens, completed raw capture chunks and
- *    provenance into the record. Validate prompt/consumed/emitted lengths and
- *    capture row extents. Each (site,position) is unique, position < consumed,
- *    and the site's storage/width agrees with the pair-validated capture_site
- *    supplied by Run. Preserve original bytes. Record checks consistency; Pair
- *    and Run establish checkpoint/semantic compatibility before creating it.
- * 2. Index rows by site and absolute consumed position, retaining chunk owners;
- *    do not concatenate/copy the full capture payload. Absent rows remain
- * absent. An emitted but unconsumed token after failure has no fabricated
- * vector.
- * 3. Receive the byte mapping and segmentation already prepared by Run's target
- *    tokenizer/protocol. Validate ID correspondence, byte extents and absolute
- *    segment positions. Record does not tokenize or classify. Exact IDs remain
- *    authoritative, including byte splits, unmapped IDs and unclassified
- * segments.
- * 4. For each selected row, append a separately owned AV attempt with settings,
- *    seed, injection provenance, exact output IDs/bytes, stop/failure and tag
- * status. Repeated attempts never overwrite an earlier description or rerun the
- * target. Failed loading/conversion attempts can have no generated result.
- * Completed tags do not erase cancellation, token-limit or execution-failure
- * status. completed means the loop ended by stop ID or token cap, not that tags
- * were complete. A generation result must agree with outcome, requested
- * settings, injection provenance and decoded generated IDs; without one,
- * outcome cannot be completed and there can be no decoded output or explanation
- * range.
- * 5. Validate and admit the entire candidate before assigning its monotonic ID
- *    and publishing it. A rejected append leaves the record unchanged. A failed
- *    attempt that was admitted remains a record, not a successful
- * interpretation.
+ * Algorithm: logical-overview.md retain/interpret; execution-boundary.md H1/H4.
+ * Validate generation provenance and emitted/consumed counts; graceful partial
+ * prefill may leave a prompt suffix but never a pending generated token.
+ * Validate each site and payload, index (site, absolute consumed position) to
+ * its row offset, sort and reject duplicates. Host reference lookup returns a
+ * span; live lookup returns an immutable subregion sharing its device owner.
+ * Append a variant only after validating its source key, settings, normalized
+ * injection provenance when available, generation outcome and text mapping.
+ * Failed GPU normalization may have no valid injection provenance. Raw target
+ * data and previous variants remain unchanged by rejected appends.
+ * Cost: O(captured positions) index, O(log positions) lookup, bounded variant
+ * storage. retained_bytes accounts host payload/capacity; Run separately admits
+ * the retained device arenas when loading AV weights. Optimization: no live
+ * activation copies or CPU normalization during lookup/model switching.
  *
- * Ownership/failure: views borrow this stable noncopyable/nonmovable owner.
- * Capture views survive variant insertion; variant references are stable until
- * Record destruction (individually owned entries). Callers serialize all
- * access. Invalid provenance/alignment -> invalid_argument; byte/count overflow
- * or budget exhaustion -> length_error; bad_alloc propagates with no partial
- * publication. Limits include owned vector/string capacities and index/entry
- * storage; allocator and process overhead are excluded explicitly, never
- * represented as a RAM cap.
- *
- * Cost: O(N + output bytes + R log R) construction for R indexed capture rows;
- * payload N*D*b for one site. Selected BF16 pair costs 8192*N capture bytes,
- * plus metadata, decoded text, pending candidate and generation staging
- * admitted by Run. Optimization: move payload owners and index their rows; no
- * whole-trace copy on model switch or variant append. Growth is bounded by
- * count and byte budgets. Corpus consultation, implementation, 2026-10-19 (full
- * rules read): cpp-guidelines R.1 (#rr-raii): records, not GPU plans, own
- * retained payloads. cpp-guidelines I.7 (#ri-post): atomic append and
- * unavailable-row semantics. cpp-perf-guidelines GPU.1: retain the existing
- * completed readback; no replay or extra device transfer to rediscover a
- * selected capture. Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * Corpus consultation, header design and implementation, 2026-10-20: both local
+ * servers queried separately in each phase and the cited rules read in full.
+ * cpp-guidelines I.1 (#ri-explicit), R.1 (#rr-raii): explicit residency,
+ * completion, ownership and failure contracts. cpp-perf-guidelines GPU.1,
+ * GPU.6, GPU.7, GPU.9: keep tensor intermediates/decisions on device, batch
+ * dispatch, decouple observation and separate persistent from transient arenas.
+ * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * Related GPU.6/7/9 entries describe dispatch, staging and storage.
  */
 #include "experiment/record.h"
 
@@ -136,6 +103,8 @@ void validate_generation(const inference::GenerationResult& g) {
   }
   inference::sampling::validate_settings(g.settings.sampling);
   if (g.reason != inference::StopReason::execution_failure &&
+      (g.reason != inference::StopReason::user_stop ||
+       g.tokens.size() != g.prompt_tokens) &&
       g.consumed_tokens != g.tokens.size()) {
     throw std::invalid_argument("successful generation has unconsumed IDs");
   }
@@ -245,7 +214,10 @@ Record::Record(TargetRecord target, RecordLimits limits)
     const auto row_bytes = multiply(
         c.site.vector_width, tensors::element_bytes(c.site.storage_type));
     if (!same_site(c.site, t.capture_site) ||
-        c.bytes.size() != multiply(c.positions.size(), row_bytes)) {
+        (c.device
+             ? (!c.bytes.empty() || !c.device->owner ||
+                c.device->bytes < multiply(c.positions.size(), row_bytes))
+             : c.bytes.size() != multiply(c.positions.size(), row_bytes))) {
       throw std::invalid_argument("capture shape/site mismatch");
     }
     for (std::size_t j = 0; j < c.positions.size(); ++j) {
@@ -288,6 +260,12 @@ std::optional<nla::CaptureRow> Record::capture(CaptureKey wanted) const {
     return std::nullopt;
   }
   const auto& c = p.target.generation.captures.at(it->chunk);
+  if (c.device) {
+    auto view = *c.device;
+    view.offset += it->offset;
+    view.bytes = it->bytes;
+    return nla::CaptureRow{c.site, wanted.position, {}, std::move(view)};
+  }
   return nla::CaptureRow{c.site, wanted.position,
                          std::span(c.bytes).subspan(it->offset, it->bytes)};
 }
@@ -331,8 +309,10 @@ VariantId Record::append(Interpretation attempt) {
       validate_decoded(attempt.decoded,
                        std::span(g.tokens).subspan(g.prompt_tokens));
     }
-    if (!attempt.injection ||
-        attempt.injection->prompt_position.value >= g.prompt_tokens ||
+    if ((!attempt.injection &&
+         g.reason != inference::StopReason::execution_failure) ||
+        (attempt.injection &&
+         attempt.injection->prompt_position.value >= g.prompt_tokens) ||
         !g.captures.empty() ||
         !same_settings(attempt.requested_settings, g.settings)) {
       throw std::invalid_argument("AV result provenance mismatch");

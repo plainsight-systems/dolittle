@@ -61,6 +61,17 @@
  * rescans. CP.22 (#rconc-unknown), independent cursor state with no external
  * callbacks; COPY.7, borrow ID spans
  * (guidelines/copy-move/COPY.7-eliminate-hidden-copies.md).
+ * Steady-state design, 2026-10-20:
+ * append_into validates caller capacity before clearing output or mutating
+ * state, classifies each contiguous ID once and commits the new cursor.
+ * Prepared streaming capacity prevents allocation in successful steady state.
+ * Overlay: transformer-execution.md, "Device selection and allocation-free
+ * generation". Core I.7 (#ri-post): borrowing, bounds and failure contracts.
+ * Performance GPU.1: device-resident decisions; MEM.9: prepare storage before
+ * steady state and check the invariant. Sources:
+ * guidelines/gpu/GPU.1-keep-data-on-device.md;
+ * guidelines/memory/MEM.9-embedded-allocate-at-init.md.
+ * Both corpora queried/read for header design and implementation, 2026-10-20.
  */
 #include "text/qwen3_chat.h"
 
@@ -131,19 +142,27 @@ struct Qwen3Cursor final : SegmentCursor {
   }
   std::vector<TokenSegment> append(std::span<const tokenizers::TokenId> ids,
                                    std::size_t first) override {
+    std::vector<TokenSegment> result;
+    result.reserve(ids.size());
+    append_into(ids, first, result);
+    return result;
+  }
+  void append_into(std::span<const tokenizers::TokenId> ids, std::size_t first,
+                   std::vector<TokenSegment>& result) override {
     if (first != next ||
         ids.size() > std::numeric_limits<std::size_t>::max() - next) {
       throw std::invalid_argument("noncontiguous segment input");
     }
-    std::vector<TokenSegment> result;
-    result.reserve(ids.size());
+    if (ids.size() > result.capacity()) {
+      throw std::length_error("segment destination capacity");
+    }
+    result.clear();
     auto after = state;
     for (auto id : ids) {
       result.push_back({first + result.size(), classify(after, id)});
     }
     next += ids.size();
     state = after;
-    return result;
   }
 };
 struct Qwen3Chat final : Protocol {

@@ -8,9 +8,18 @@
  * cpp-perf-guidelines GPU.1 (guidelines/gpu/GPU.1-keep-data-on-device.md):
  * host contract checks are separate from device timing or correctness claims.
  * Both corpora consulted for implementation, 2026-10-18.
+ * Sampling extension, header design and implementation, 2026-10-19:
+ * cpp-guidelines NL.2 (#rl-comments-intent): state distribution invariants.
+ * cpp-perf-guidelines CDSA.20: verify numeric order and signed-zero ties
+ * against an independent comparison-based CDF. Source:
+ * guidelines/cpu-dsa/CDSA.20-sort-integer-keys-not-records.md.
  */
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <limits>
+#include <numeric>
+#include <vector>
 
 #include "inference/sampling/categorical.h"
 #include "tests/support/check.h"
@@ -20,7 +29,85 @@ using dolittle::inference::sampling::SelectionMode;
 using dolittle::inference::sampling::Settings;
 using dolittle::tests::check;
 using dolittle::tests::expect_throws;
+namespace {
+// Independent contract model: order numeric logits, then integrate the declared
+// FP64 categorical distribution. No encoded keys or sorting implementation
+// assumptions enter the expected result.
+std::uint32_t reference_select(const std::vector<float>& logits,
+                               Settings settings, RandomStream& random) {
+  std::vector<std::uint32_t> ids(logits.size());
+  std::iota(ids.begin(), ids.end(), 0U);
+  std::erase_if(ids, [&](auto id) { return !std::isfinite(logits.at(id)); });
+  std::sort(ids.begin(), ids.end(), [&](auto a, auto b) {
+    return logits.at(a) != logits.at(b) ? logits.at(a) > logits.at(b) : a < b;
+  });
+  if (settings.top_k && ids.size() > settings.top_k) ids.resize(settings.top_k);
+  std::vector<double> weights;
+  double total = 0;
+  for (auto id : ids) {
+    weights.push_back(
+        std::exp((static_cast<double>(logits.at(id)) - logits.at(ids.front())) /
+                 settings.temperature));
+    total += weights.back();
+  }
+  double retained = weights.front();
+  std::size_t count = 1;
+  while (count < weights.size() && retained / total < settings.top_p) {
+    retained += weights.at(count++);
+  }
+  const double u = static_cast<double>(random() >> 11) * 0x1.0p-53;
+  double cumulative = 0;
+  for (std::size_t i = 0; i < count; ++i) {
+    cumulative += weights.at(i) / retained;
+    if (u < cumulative) return ids.at(i);
+  }
+  return ids.at(count - 1);
+}
+void check_distribution_contract() {
+  // Repeatable inputs exercise ties, signed zero, subnormals, masks and varying
+  // finite magnitudes. Each call must preserve the declared CDF and RNG state.
+  // NOLINTNEXTLINE(bugprone-random-generator-seed)
+  RandomStream input(7391);
+  for (const std::size_t size : {17U, 1023U, 4096U}) {
+    Categorical sampler(size);
+    std::vector<float> values(size);
+    for (auto& value : values) {
+      value =
+          static_cast<float>(static_cast<int>(input() % 4001) - 2000) / 127.0F;
+    }
+    const std::array edges{0.0F,
+                           -0.0F,
+                           std::numeric_limits<float>::denorm_min(),
+                           -std::numeric_limits<float>::denorm_min(),
+                           -std::numeric_limits<float>::infinity(),
+                           1.0F,
+                           1.0F};
+    std::copy(edges.begin(), edges.end(), values.begin());
+    for (const auto settings :
+         {Settings{SelectionMode::categorical, 1, 0, 1},
+          Settings{SelectionMode::categorical, .6, 0, .95},
+          Settings{SelectionMode::categorical, 2, 11, .7}}) {
+      RandomStream actual(input()), expected = actual;
+      for (int draw = 0; draw < 64; ++draw) {
+        check(sampler.select(values, settings, actual) ==
+                  reference_select(values, settings, expected),
+              "sampling preserves ordered CDF for finite logits and masks");
+        check(actual == expected, "sampling preserves one-draw RNG state");
+      }
+    }
+    for (std::size_t i = 0; i < size; ++i) values.at(i) = i % 2 ? -0.0F : 0.0F;
+    RandomStream actual(input()), expected = actual;
+    const Settings tied{SelectionMode::categorical, 1, 0, .5};
+    for (int draw = 0; draw < 64; ++draw) {
+      check(sampler.select(values, tied, actual) ==
+                reference_select(values, tied, expected),
+            "signed-zero ties retain ascending token ID");
+    }
+  }
+}
+}  // namespace
 int main() try {
+  check_distribution_contract();
   Categorical sampler(4);
   // Fixed seeds make the sampling contract repeatable; this is not entropy
   // generation. NOLINTNEXTLINE(bugprone-random-generator-seed)

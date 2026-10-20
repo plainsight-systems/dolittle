@@ -9,6 +9,11 @@
  * publication. cpp-perf-guidelines GPU.1 tests operate on already-owned host
  * rows; no replay or transfer. Source:
  * guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * Execution-boundary consultation, header design and implementation,
+ * 2026-10-20: Core I.1/R.1 and Performance GPU.1/GPU.9 (both local corpora
+ * queried/read) make partial-prefill and failed-injection metadata explicit.
+ * These checks construct values only; no device, execution plan or subprocess
+ * is created.
  */
 #include "experiment/record.h"
 #include "tests/support/check.h"
@@ -101,6 +106,43 @@ int main() try {
           completed_record.variant(completed_id).interpretation.decoded.bytes ==
               "b",
       "misaligned output cannot alter a completed variant");
+  {
+    auto partial = target();
+    partial.generation.prompt_tokens = 2;
+    partial.generation.consumed_tokens = 1;
+    partial.generation.reason = inference::StopReason::user_stop;
+    partial.generation.captures.at(0).positions.resize(1);
+    partial.generation.captures.at(0).bytes.resize(8);
+    partial.segments.clear();
+    experiment::Record stopped(std::move(partial), {65536, 2});
+    tests::check(stopped.capture({key.site, {0}}).has_value() &&
+                     !stopped.capture({key.site, {1}}),
+                 "cancelled prompt suffix cannot advertise captures");
+    auto pending = target();
+    pending.generation.reason = inference::StopReason::user_stop;
+    pending.generation.consumed_tokens = 1;
+    pending.generation.captures.at(0).positions.resize(1);
+    pending.generation.captures.at(0).bytes.resize(8);
+    tests::expect_throws<std::invalid_argument>(
+        [&] { experiment::Record rejected(std::move(pending), {65536, 2}); });
+  }
+  {
+    experiment::Record retained(target(), {65536, 2});
+    experiment::Interpretation rejected{};
+    rejected.capture = key;
+    rejected.stage = experiment::AttemptStage::generation;
+    rejected.outcome = experiment::AttemptOutcome::failed;
+    rejected.generation = target().generation;
+    auto& generation = *rejected.generation;
+    generation.tokens.resize(generation.prompt_tokens);
+    generation.consumed_tokens = 0;
+    generation.captures.clear();
+    generation.reason = inference::StopReason::execution_failure;
+    rejected.requested_settings = generation.settings;
+    const auto failure = retained.append(std::move(rejected));
+    tests::check(!retained.variant(failure).interpretation.injection,
+                 "failed normalization must not invent valid provenance");
+  }
   auto duplicate = target();
   duplicate.generation.captures.at(0).positions.at(1) = {0};
   tests::expect_throws<std::invalid_argument>(

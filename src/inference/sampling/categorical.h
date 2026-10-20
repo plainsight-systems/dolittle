@@ -23,10 +23,20 @@
  * changing them can change the sampled trace even with identical logits.
  *
  * Implementation design: FP64 host weights/cumulative sums and stable ID tie
- * ordering. One reusable candidate buffer, O(V) scratch and O(V log V) sorting
- * in the baseline. No std::discrete_distribution dependency on vendor mapping.
- * Optimization: reuse scratch; measure partial selection before replacing the
- * full sort, preserving exactly the retained candidates and order.
+ * ordering. Optimization: encode each finite FP32 logit's complete bit pattern
+ * as a descending unsigned key; both signed zeros share one key. Four stable
+ * 8-bit radix passes preserve the initial ascending ID order on equal logits.
+ * Build all histograms in one scan and skip digits shared by every candidate.
+ * Small sets (<512 candidates) retain comparison sorting to avoid histogram
+ * setup. Two vocabulary-reserved candidate buffers provide O(V) scratch; large
+ * sorts take O(V) work without altering any probability or RNG arithmetic.
+ * No std::discrete_distribution dependency on vendor mapping.
+ * Corpus consultation, header design and implementation, 2026-10-19:
+ * cpp-guidelines NL.2
+ * (#rl-comments-intent): document exact ordering, including signed zero.
+ * cpp-perf-guidelines CDSA.20: use exact integer float keys, stable passes and
+ * reusable scratch; these small records can be sorted directly. Source:
+ * guidelines/cpu-dsa/CDSA.20-sort-integer-keys-not-records.md.
  * Invalid inputs or allocation failure leave the RNG unchanged. Commit the RNG
  * advance only after all validation/preparation succeeds. Objects are serial,
  * not reentrant; moved-from objects permit only destruction/reassignment.

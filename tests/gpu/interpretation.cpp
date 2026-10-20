@@ -25,6 +25,18 @@
  * cpp-guidelines R.1 (#rr-raii), I.7 (#ri-post) enforce ownership and numerical
  * postconditions. Performance GPU.1 separates fixture/readback work from
  * compute; source guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * Prepared-buffer/device-selection contract consultation, 2026-10-20:
+ * Core I.7 (#ri-post) and MEM.9
+ * (guidelines/memory/MEM.9-embedded-allocate-at-init.md), both corpora queried
+ * and full rules read for design/implementation. Exercise public results and
+ * capacity/failure contracts; independent reference inputs remain unchanged.
+ * Upload pipeline design/implementation consultation, 2026-10-20: both
+ * corpora queried in both phases. Core R.1 (#rr-raii) and I.7 (#ri-post)
+ * require completed resident weights and owned staging lifetimes; performance
+ * GPU.7 (guidelines/gpu/GPU.7-pipeline-cpu-and-gpu-work.md) requires safe slot
+ * reuse. The tiny cached AV pass uses an odd, bounded staging allowance so
+ * weights cross upload boundaries; the unchanged numerical oracle checks
+ * values after slot reuse. This extends the existing experiment scenario.
  */
 #include "tests/gpu/interpretation.h"
 
@@ -35,12 +47,14 @@
 
 #include "bounds.h"
 #include "experiment/run.h"
+#include "inference/injection/device.h"
 #include "inference/sampling/categorical.h"
 #include "models/qwen3/checkpoint.h"
 #include "nla/pairs/qwen3_8b.h"
 #include "tensors/formats/safetensors.h"
 #include "tensors/representations/bf16.h"
 #include "tensors/tensor.h"
+#include "tests/gpu/capture_export.h"
 #include "tests/support/check.h"
 #include "tests/support/numerical.h"
 #include "text/qwen3_chat.h"
@@ -116,12 +130,24 @@ struct FixtureTokenizer final : tokenizers::Tokenizer {
       std::span<const std::uint32_t> ids) const override {
     tokenizers::DecodedBytes out;
     out.tokens.reserve(ids.size());
+    out.bytes.reserve(ids.size());
+    decode_into(ids, out);
+    return out;
+  }
+  std::size_t max_token_bytes() const noexcept override { return 1; }
+  void decode_into(std::span<const std::uint32_t> ids,
+                   tokenizers::DecodedBytes& out) const override {
+    if (ids.size() > out.tokens.capacity() ||
+        ids.size() > out.bytes.capacity()) {
+      throw std::length_error("fixture decode capacity");
+    }
+    out.bytes.clear();
+    out.tokens.clear();
     for (auto id : ids) {
       const auto begin = out.bytes.size();
       out.bytes += 'x';
       out.tokens.push_back({id, begin, out.bytes.size(), true});
     }
-    return out;
   }
   bool contains(std::uint32_t) const noexcept override { return true; }
 };
@@ -168,6 +194,16 @@ struct FixturePair final : nla::Pair {
           "tiny pairing identity");
   }
   nla::Injection prepare_injection(nla::CaptureRow row) const override {
+    if (row.device) {
+      return {{injection_position,
+               row.site.vector_width,
+               site.storage_type,
+               {},
+               inference::DeviceNormalization{*row.device,
+                                              row.site.storage_type, scale}},
+              0,
+              scale};
+    }
     return nla::normalize_activation(row, injection_position, scale,
                                      site.storage_type);
   }
@@ -355,6 +391,39 @@ Json check_interpretation(gpu::Device& device,
       injection.embedding.bytes ==
           encode(av.at("injection_values").get<std::vector<float>>(), storage),
       "injected stored bytes disagree with frozen reference");
+  // Explicit diagnostic readback checks the GPU conversion on the same frozen
+  // source as the CPU helper. This is outside live target-to-AV execution.
+  {
+    auto queue = device.create_queue();
+    auto source = device.allocate({capture_bytes.size(), 4});
+    auto staging = device.allocate_staging({capture_bytes.size(), 4});
+    std::memcpy(staging.bytes().data(), capture_bytes.data(),
+                capture_bytes.size());
+    queue.upload({&source, 0, capture_bytes.size()},
+                 {&staging, 0, capture_bytes.size()});
+    for (const auto output_type : {storage, tensors::ElementType::float32}) {
+      inference::DeviceInjection normalized(
+          device, queue, {&source, 0, capture_bytes.size()}, storage,
+          output_type, site.vector_width, injection.scale);
+      auto output = device.allocate_staging({normalized.output().bytes, 4});
+      auto metadata = device.allocate_staging({2 * sizeof(float), 4});
+      normalized.submit();
+      queue.download({&output, 0, output.bytes().size()}, normalized.output());
+      queue.download({&metadata, 0, sizeof(float)}, normalized.norm());
+      queue.download({&metadata, sizeof(float), sizeof(unsigned)},
+                     normalized.status());
+      queue.drain();
+      float norm{};
+      unsigned status{};
+      std::memcpy(&norm, metadata.bytes().data(), sizeof(norm));
+      std::memcpy(&status, metadata.bytes().subspan(sizeof(norm)).data(),
+                  sizeof(status));
+      const auto& expected = output_type == storage ? injection : fp32;
+      check(!status && norm == expected.source_l2_norm &&
+                std::ranges::equal(output.bytes(), expected.embedding.bytes),
+            "GPU NLA normalization differs on the frozen source row");
+    }
+  }
   target_archive.reset();
   av_archive.reset();
   auto sampler =
@@ -372,7 +441,8 @@ Json check_interpretation(gpu::Device& device,
         return sampler->select(logits, settings, rng);
       },
       device.info().backend,
-      256 * mib};
+      256 * mib,
+      inference::sampling::Execution::device};
   experiment::Run run(device, {1}, std::move(inputs),
                       {23 * gib, gib, 16, 4096, 4096, mib, {256 * mib, 4}});
   const inference::GenerationSettings target_settings{
@@ -391,7 +461,8 @@ Json check_interpretation(gpu::Device& device,
     throw std::runtime_error("target capture was not retained");
   }
   const auto retained_snapshot =
-      std::vector<std::byte>(retained->bytes.begin(), retained->bytes.end());
+      export_capture(device, retained->device, retained->bytes,
+                     site.vector_width * tensors::element_bytes(storage));
   const auto& target_captures =
       target.at("generation").at("reference").at("captures");
   const auto target_capture = std::find_if(
@@ -402,7 +473,7 @@ Json check_interpretation(gpu::Device& device,
   check(target_capture != target_captures.end(), "target oracle capture site");
   const auto& target_limit = target_capture->at("tolerance");
   const auto target_metric =
-      compare_values(capture_values, decode(retained->bytes, storage),
+      compare_values(capture_values, decode(retained_snapshot, storage),
                      {target_limit.at("max_absolute_error"),
                       target_limit.at("max_relative_l2")});
   // The target keeps its original frozen numerical limits; byte identity here
@@ -454,8 +525,10 @@ Json check_interpretation(gpu::Device& device,
   }
   {
     auto loaded = provider(av_request)(256 * mib);
-    auto resident = inference::load_resident_model(
-        device, std::move(loaded.checkpoint), {mode, 23 * gib, 16 * mib});
+    const std::size_t staging_allowance = actual ? 16 * mib : 257;
+    auto resident =
+        inference::load_resident_model(device, std::move(loaded.checkpoint),
+                                       {mode, 23 * gib, staging_allowance});
     const auto prompt = av.at("prompt_ids").get<std::vector<std::uint32_t>>();
     const auto& steps = av.at("steps");
     inference::CachedForwardOptions options{
@@ -467,6 +540,22 @@ Json check_interpretation(gpu::Device& device,
         {0, 0},
         23 * gib,
         512 * mib};
+    {
+      if (!retained->device.has_value()) {
+        throw std::runtime_error("live target capture must be device-owned");
+      }
+      inference::EmbeddingOverride device_override{
+          injection.embedding.position,
+          site.vector_width,
+          storage,
+          {},
+          inference::DeviceNormalization{retained->device.value(), storage,
+                                         injection.scale}};
+      auto diagnostic = inference::prepare_cached_forward(
+          *resident, options, std::move(device_override));
+      expect_throws<std::invalid_argument>(
+          [&] { (void)diagnostic.consume(std::span(prompt).first(1), true); });
+    }
     auto cached = inference::prepare_cached_forward(*resident, options,
                                                     injection.embedding);
     for (std::size_t pos = 0; pos < prompt.size();) {
@@ -544,7 +633,8 @@ Json check_interpretation(gpu::Device& device,
   expect_throws<std::logic_error>(
       [&] { (void)run.interpret(key, av_settings); });
   check(run.record()->variant_count() == 3 &&
-            std::ranges::equal(retained->bytes, retained_snapshot),
+            export_capture(device, retained->device, retained->bytes,
+                           retained_snapshot.size()) == retained_snapshot,
         "record survives closing model resources");
   return {
       {"passed", passed},

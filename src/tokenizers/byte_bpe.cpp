@@ -62,6 +62,18 @@
  * host access explicit and confine necessary native API operations.
  * cpp-perf-guidelines COPY.7: borrow spans/references without hidden payload
  * copies. Source: guidelines/copy-move/COPY.7-eliminate-hidden-copies.md.
+ * Steady-state design, 2026-10-20:
+ * Precompute the longest decoded vocabulary entry. decode_into clears sizes
+ * but retains caller capacity, appends immutable token bytes and ranges;
+ * preparation reserves the maximum admitted delta. No vocabulary or
+ * temporary per-token copies.
+ * Overlay: transformer-execution.md, "Device selection and allocation-free
+ * generation". Core I.7 (#ri-post): borrowing, bounds and failure contracts.
+ * Performance GPU.1: device-resident decisions; MEM.9: prepare storage before
+ * steady state and check the invariant. Sources:
+ * guidelines/gpu/GPU.1-keep-data-on-device.md;
+ * guidelines/memory/MEM.9-embedded-allocate-at-init.md.
+ * Both corpora queried/read for header design and implementation, 2026-10-20.
  */
 #include "tokenizers/byte_bpe.h"
 
@@ -159,6 +171,10 @@ struct ByteBpe final : Tokenizer {
   };
   std::string identity_;
   ByteBpeLimits limits{};
+  std::size_t longest_token{};
+  std::size_t max_token_bytes() const noexcept override {
+    return longest_token;
+  }
   std::unordered_map<std::string, TokenId> vocabulary;
   std::unordered_map<TokenId, std::string> decoded;
   std::unordered_map<std::uint64_t, Merge> merges;
@@ -170,11 +186,21 @@ struct ByteBpe final : Tokenizer {
     return decoded.contains(id);
   }
   DecodedBytes decode(std::span<const TokenId> ids) const override {
-    if (ids.size() > limits.max_output_tokens) {
-      throw std::length_error("decode token budget");
-    }
+    const auto bytes = decoded_size(ids);
     DecodedBytes out;
     out.tokens.reserve(ids.size());
+    out.bytes.reserve(bytes);
+    decode_into(ids, out);
+    return out;
+  }
+  void decode_into(std::span<const TokenId> ids,
+                   DecodedBytes& out) const override {
+    const auto bytes = decoded_size(ids);
+    if (ids.size() > out.tokens.capacity() || bytes > out.bytes.capacity()) {
+      throw std::length_error("decode destination capacity");
+    }
+    out.bytes.clear();
+    out.tokens.clear();
     for (auto id : ids) {
       auto start = out.bytes.size();
       auto it = decoded.find(id);
@@ -186,7 +212,23 @@ struct ByteBpe final : Tokenizer {
       }
       out.tokens.push_back({id, start, out.bytes.size(), it != decoded.end()});
     }
-    return out;
+  }
+  std::size_t decoded_size(std::span<const TokenId> ids) const {
+    if (ids.size() > limits.max_output_tokens) {
+      throw std::length_error("decode token budget");
+    }
+    std::size_t bytes = 0;
+    for (auto id : ids) {
+      const auto it = decoded.find(id);
+      if (it == decoded.end()) {
+        continue;
+      }
+      if (it->second.size() > limits.max_input_bytes - bytes) {
+        throw std::length_error("decode byte budget");
+      }
+      bytes += it->second.size();
+    }
+    return bytes;
   }
   void emit(std::vector<TokenId>& out, TokenId id) const {
     if (out.size() == limits.max_output_tokens) {
@@ -485,6 +527,9 @@ std::unique_ptr<Tokenizer> make_byte_bpe(ByteBpeSources sources,
       throw std::runtime_error("tokenizer regex compilation failed");
     }
     bpe->regex.reset(regex);
+    for (const auto& entry : bpe->decoded) {
+      bpe->longest_token = std::max(bpe->longest_token, entry.second.size());
+    }
     return bpe;
   } catch (const Json::exception&) {
     throw std::invalid_argument("invalid tokenizer JSON schema");

@@ -107,12 +107,68 @@
   clang-tidy entries pass. The Docker application flow passes. A longer live
   generation crossed the former context limit; full 8,192-token capacity was
   allocated successfully on the 3090 Ti. These runtime checks do not extend
-  the frozen short-sequence numerical oracle evidence. Changes are uncommitted.
+  the frozen short-sequence numerical oracle evidence. The live application,
+  setup, UI and budget changes are committed and pushed as `7f773ba`.
+
+- CUDA optimization uses cooperative single-row GEMV, retained-score attention,
+  direct K/V cache writes and concurrent value-reduction ranges. Live target/AV
+  selection now stays on the GPU; the CPU sampler remains the explicit reference.
+  Generation consumes borrowed views, decodes into reserved buffers and publishes
+  immutable prepared event slots. A checked build enforces no C++ heap or explicit
+  GPU/staging allocations in successful generation iterations and callbacks.
+  BF16 storage, FP32 tensor accumulation and frozen references/limits remain
+  unchanged; no quantization. Device sampling uses documented fixed-tile FP64
+  prefixes, with the same probability law but possible CPU/GPU rounding differences.
+  Strict CUDA build, 19 C++ units, seven browser units, Linux ASan/UBSan, Google
+  formatting and all 70 host/CUDA clang-tidy commands pass. Native and forced-PTX
+  device/tiny/8B target-to-AV checks pass; CUDA memcheck reports zero errors for
+  device selection and both tiny scenarios. The checked application workflow
+  passes retry/reconnect, and all six paper/target/AV comparisons reproduce exact
+  IDs, raw bytes and classifications. The release image passed live target/AV
+  checks and is running locally. Included in the accepted optimization pass; detailed evidence
+  and timings stay in ignored local validation records.
+
+- The CUDA kernel pass adds cooperative wide RMSNorm, paired BF16 loads for
+  wide-input down projections, and aligned 128-bit key loads with query register
+  reuse in attention. Other projection shapes keep their faster scalar path.
+  Reduction order, tensor precision, cache allocation and independent references
+  remain unchanged. Strict compilation, 19 C++ units, Google formatting and all
+  70 host/CUDA static-analysis checks pass. Native and forced-PTX numerical
+  workflows pass all 521 reported 8B checks in each mode. GPU memory checks,
+  the application workflow and exact paper/target/AV output comparisons pass.
+  The verified source image is running locally. Included in the accepted optimization pass;
+  performance traces and implementation evidence stay ignored.
+
+- Live CUDA decoding now uses one device-controlled conditional graph. Position,
+  K/V addressing, RNG, sampling and stopping stay on device. Immutable output
+  slots decouple CPU publication from inference. Native initial acceptance,
+  application workflow, exact paper/target/NLA traces, CUDA memory checking and
+  all 72 static-analysis commands pass. The application trace verifies 128
+  iterations from one graph launch, without per-token host kernel launches or
+  token uploads. Final native/PTX verification passes all 521 reported 8B
+  checks in each mode. The source-matched runtime image passed target/NLA
+  checks and is running locally. Included in the accepted optimization pass; detailed evidence
+  stays ignored.
+
+## Accepted optimization pass
+
+Andrew accepted the GPU execution boundary, CUDA kernel/prefill improvements
+and pipelined resident uploads for integration on 2026-10-20. Execution remains
+GPU-owned from prefill through final-token consumption, including sampling,
+capture and NLA normalization/injection. Uploads rotate two pinned slots within
+2 MiB total and return only after completion. Tensor precision, independent
+references and numerical limits remain unchanged.
+
+Native/PTX workflows each pass all 521 reported 8B comparisons. CUDA memory,
+application retry/reconnect, 19 host units, strict builds, formatting and
+host/CUDA static analysis pass. All six before/after output traces match exactly.
+Profiling verifies one graph launch per sequence and overlapping host staging
+with DMA. Detailed measurements and implementation records remain ignored.
+The existing live service has not been replaced by this source revision.
 
 ## Next
 
-1. Measure time to first generated token and generation throughput after the
-   live-application push. Keep performance records local.
+1. Use the experiment before pursuing further performance work.
 2. Add the public workflow walkthrough when requested. Long-context numerical
    comparison and additional GPU validation remain future evidence.
 

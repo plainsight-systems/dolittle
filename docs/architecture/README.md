@@ -1,5 +1,12 @@
 # Architecture
 
+The accepted [GPU execution boundary and complete transformer flow](execution-boundary.md)
+defines live execution placement and capture ownership. One prepared GPU request
+owns prefill, first selection, decoding and final-token consumption. Captures
+remain device-owned across model switches; GPU normalization and embedding
+replacement feed the AV. CPU output collection does not drive continuation.
+Explicit host reference and vector-export paths remain separate diagnostics.
+
 The [project-site architecture](project-site.md) describes the implemented
 static site, publication boundary, and editorial structure.
 
@@ -27,10 +34,9 @@ establish equivalence.
 
 CUDA 13.2 compilation uses a digest-pinned Docker environment, with nlohmann/json
 3.12.0 and OpenSSL 3 supporting metadata and hashing. The build retains native
-Ampere code plus PTX. The image builds; GPU execution currently uses the native
-Linux host because NVIDIA Container Toolkit access is not configured. Native
-and forced-PTX results cover the tested short-sequence/reference policy only;
-long-context behavior, newer GPUs and container GPU execution remain unverified.
+Ampere code plus PTX. GPU execution supports the native Linux host and configured NVIDIA containers.
+Native and forced-PTX results cover the tested reference workloads; longer
+contexts, newer GPU generations and Metal still require their own evidence.
 
 The selected target is **Qwen/Qwen3-8B**, paired with
 **marco-bazzani/Qwen3-8B-nla**. The tested revisions and file hashes are in
@@ -40,7 +46,7 @@ contracts and measurements are in the
 
 The selected pairing requires zero-based block-24 output, but shared observation
 planning accepts any model-advertised block input/output. The full AV runs after
-target GPU resources are released; the 28-block AR and its value head remain later
+target weights and sequence resources are released; the 28-block AR and its value head remain later
 work. Short sequential BF16 target/AV workflows fit the tested 24 GB 3090 Ti.
 
 The implemented scope includes full target forward execution, cached generation

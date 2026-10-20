@@ -2,7 +2,9 @@
  * Axis X5, CUDA kind: prepared dispatch for the validated operation catalog.
  * Contract: preparation copies descriptors, borrows a stable CUDA device,
  * checks capability/shape/numerical support and reports natural operand
- * alignment with zero global workspace. Submit requires one binding per
+ * alignment plus one persistent FP32 attention scale. initialize writes that
+ * scalar on GPU before graph readers; other operations have zero workspace.
+ * Submit requires one binding per
  * distinct ID, exact prepared byte extents and mutable outputs on the same
  * device/queue. Overlaps involving writes are rejected; read/read aliases are
  * allowed. Resources stay unmoved/alive until completion. Invalid bindings ->
@@ -26,7 +28,19 @@
  * layout discovery, GPU index uploads and hidden workspace. Numerical work
  * stays on GPU. Attention admission accounts for three width-sized FP32 arrays
  * (query and two value sums), 256 reduction values and three scalar slots.
- * RMSNorm uses warp registers without shared scratch. Overflow checks precede
+ * Attention also admits the shared retained-score bound from launch.h; runtime
+ * selects it for supported context/head widths and the recomputation path
+ * otherwise. This bounds both paths even when dynamic cached rows grow.
+ * Optimization consultation, header design and implementation, 2026-10-19:
+ * cpp-guidelines I.7 (#ri-post): admitted bytes cover either attention path.
+ * cpp-perf-guidelines GPU.5: budget retained-score shared storage explicitly.
+ * Source:
+ * guidelines/gpu/GPU.5-use-shared-memory-when-reuse-or-reordering-pays.md.
+ * RMSNorm admits (width+32) shared floats for the bounded cooperative path,
+ * and uses warp registers otherwise. Consultation, design/implementation,
+ * 2026-10-20: Core I.7 and performance GPU.5 require this admission to match
+ * the staged input and 32 partial sums in normalization.cu.
+ * Overflow checks precede
  * byte scaling. Corpus consultation, storage-bound design/implementation,
  * 2026-10-19: cpp-guidelines I.7 (#ri-post): admitted shared bytes cover the
  * launched kernel. cpp-perf-guidelines GDSA.16: count the actual per-output
@@ -51,9 +65,22 @@
  * operations. cpp-perf-guidelines COPY.7: borrow spans/references without
  * hidden payload copies. Source:
  * guidelines/copy-move/COPY.7-eliminate-hidden-copies.md.
+ * Device-loop extension (design/implementation, 2026-10-20): a prepared
+ * prefill/decode body borrows an immutable-for-this-iteration device position.
+ * The graph advances it only after every reader completes. RoPE/attention use
+ * that absolute position; positioned outputs address cache rows S..S+B-1.
+ * Arithmetic and reduction order are unchanged. Graph storage is admitted for
+ * the maximum position; the device loop enforces S+B <= capacity. No per-token
+ * host argument update, copy of position, or host launch is required.
+ * Core I.7/CP.3: explicit bounds and ordered borrowing. Performance
+ * GPU.1/GPU.6: resident control and stable graph arguments
+ * (guidelines/gpu/GPU.1-keep-data-on-device.md;
+ * guidelines/gpu/GPU.6-batch-tiny-gpu-work.md). Both corpora queried and rules
+ * read during header design and implementation.
  */
 #include "kernels/operations.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
@@ -122,7 +149,31 @@ PreparedOperation::PreparedOperation(PreparedOperation&&) noexcept = default;
 PreparedOperation& PreparedOperation::operator=(PreparedOperation&&) noexcept =
     default;
 WorkspaceRequirement PreparedOperation::workspace() const noexcept {
-  return {0, 1};
+  return std::holds_alternative<CausalAttention>(impl_->operation)
+             ? WorkspaceRequirement{sizeof(float), alignof(float)}
+             : WorkspaceRequirement{0, 1};
+}
+void PreparedOperation::initialize(gpu::Queue& queue,
+                                   gpu::DeviceRegion region) const {
+  const auto requirement = workspace();
+  require(region.bytes == requirement.bytes, "constant region size mismatch");
+  if (!region.bytes) return;
+  auto& device = *impl_->device;
+  require(region.owner && region.offset % requirement.alignment == 0 &&
+              region.offset <= region.owner->size_bytes() &&
+              region.bytes <= region.owner->size_bytes() - region.offset,
+          "invalid constant region");
+  auto* base = static_cast<std::byte*>(Bridge::pointer(*region.owner, device));
+  // Native typed boundary after extent/alignment validation.
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+  auto* value =
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+      reinterpret_cast<float*>(std::span(base, region.owner->size_bytes())
+                                   .subspan(region.offset)
+                                   .data());
+  cuda::launch_attention_scale(value, impl_->dimensions.at(3),
+                               Bridge::stream(queue, device));
+  Bridge::check_launch(device);
 }
 std::span<const OperandRequirement> PreparedOperation::operands()
     const noexcept {
@@ -180,7 +231,11 @@ PreparedOperation prepare(gpu::Device& device, const Operation& operation,
         } else if constexpr (std::is_same_v<T, RmsNorm>) {
           d.at(1) = layout(op.input).shape.back();
           d.at(0) = count(op.input) / d.at(1);
-          shared_bytes = 0;
+          if (d.at(1) > cuda::rms_warp_width &&
+              d.at(1) <= cuda::rms_staged_width) {
+            shared_bytes =
+                (d.at(1) + cuda::rms_staged_partials) * sizeof(float);
+          }
         } else if constexpr (std::is_same_v<T, Rotary>) {
           const auto& shape = layout(op.input).shape;
           d = {shape.at(0), shape.at(1), shape.at(2), 0};
@@ -198,6 +253,10 @@ PreparedOperation prepare(gpu::Device& device, const Operation& operation,
           }
           shared_bytes = product(shared_values + attention_fixed_shared_floats,
                                  sizeof(float));
+          if (d.at(3) <= cuda::attention_retained_width) {
+            shared_bytes =
+                std::max(shared_bytes, cuda::attention_retained_shared_bytes);
+          }
         } else if constexpr (std::is_same_v<T, Add>) {
           d.at(0) = count(op.left);
         } else if constexpr (std::is_same_v<T, SiluMultiply>) {
@@ -264,16 +323,53 @@ void PreparedOperation::submit(
           "dynamic attention requires an initialized cache prefix");
   require(bindings.size() == impl_->requirements.size(),
           "binding count differs from operation");
-  require(workspace_region.bytes == 0,
-          "operation requires zero workspace bytes");
-  if (workspace_region.owner) {
-    (void)Bridge::pointer(*workspace_region.owner, device);
-    require(workspace_region.offset <= workspace_region.owner->size_bytes(),
-            "workspace offset exceeds storage");
-  } else {
-    require(workspace_region.offset == 0, "null workspace has nonzero offset");
+  const float* attention_scale = nullptr;
+  require(workspace_region.bytes == workspace().bytes,
+          "operation constant size mismatch");
+  if (workspace_region.bytes) {
+    require(
+        workspace_region.owner &&
+            workspace_region.offset % alignof(float) == 0 &&
+            workspace_region.offset <= workspace_region.owner->size_bytes() &&
+            workspace_region.bytes <=
+                workspace_region.owner->size_bytes() - workspace_region.offset,
+        "invalid operation constant region");
+    const auto* base = static_cast<const std::byte*>(
+        Bridge::pointer(*workspace_region.owner, device));
+    // Prepared typed device constant, never read on the host.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    attention_scale = reinterpret_cast<const float*>(
+        std::span(base, workspace_region.owner->size_bytes())
+            .subspan(workspace_region.offset)
+            .data());
   }
 
+  const std::size_t* device_position = nullptr;
+  if (extent && extent->device_position) {
+    const auto region = *extent->device_position;
+    require(extent->active_rows > 0 &&
+                extent->active_rows <= extent->device_capacity &&
+                extent->device_capacity && region.owner &&
+                region.bytes == sizeof(std::size_t) &&
+                region.offset % alignof(std::size_t) == 0 &&
+                region.offset <= region.owner->size_bytes() &&
+                region.bytes <= region.owner->size_bytes() - region.offset,
+            "invalid device position binding");
+    const auto* base =
+        static_cast<const std::byte*>(Bridge::pointer(*region.owner, device));
+    // Native typed boundary; preparation proves size/alignment and lifetime.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    device_position = reinterpret_cast<const std::size_t*>(
+        std::span(base, region.owner->size_bytes())
+            .subspan(region.offset)
+            .data());
+  }
+  const auto positioned = [&](TensorId id) {
+    for (const auto& binding : bindings) {
+      if (binding.tensor.value == id.value) return binding.positioned_output;
+    }
+    return false;
+  };
   std::array<BoundOperand, 4> bound{};
   for (std::size_t i = 0; i < impl_->requirements.size(); ++i) {
     const auto& required = impl_->requirements.at(i);
@@ -302,13 +398,24 @@ void PreparedOperation::submit(
                 match->offset <= owner->size_bytes() &&
                 match->bytes <= owner->size_bytes() - match->offset,
             "tensor binding extent mismatch");
+    auto bound_bytes = match->bytes;
+    if (match->positioned_output) {
+      require(device_position && required.access == OperandAccess::write &&
+                  (std::holds_alternative<Projection>(impl_->operation) ||
+                   std::holds_alternative<Rotary>(impl_->operation)),
+              "positioned binding requires a cache producer");
+      bound_bytes =
+          product(match->bytes / impl_->rows.max_rows, extent->device_capacity);
+      require(bound_bytes <= owner->size_bytes() - match->offset,
+              "positioned output capacity exceeds allocation");
+    }
     const auto* pointer =
         std::span(base, owner->size_bytes()).subspan(match->offset).data();
     // Native API byte/address boundary; no unrelated typed object is
     // dereferenced. NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     require(reinterpret_cast<std::uintptr_t>(pointer) % required.alignment == 0,
             "tensor binding alignment mismatch");
-    bound.at(i) = {owner, pointer, match->offset, match->bytes};
+    bound.at(i) = {owner, pointer, match->offset, bound_bytes};
   }
   for (std::size_t i = 0; i < impl_->requirements.size(); ++i) {
     for (std::size_t j = i + 1; j < impl_->requirements.size(); ++j) {
@@ -359,7 +466,8 @@ void PreparedOperation::submit(
   const void* cached_value = nullptr;
   if (cache) {
     require(
-        extent->first_position <= cache->capacity &&
+        (!device_position || extent->device_capacity == cache->capacity) &&
+            extent->first_position <= cache->capacity &&
             extent->active_rows <= cache->capacity - extent->first_position &&
             cache->shape.kv_heads == d.at(2) &&
             cache->shape.head_width == d.at(3),
@@ -407,9 +515,10 @@ void PreparedOperation::submit(
               impl_->type, static_cast<const std::uint32_t*>(input(op.tokens)),
               input(op.weight), output(op.output), d.at(0), d.at(1), stream);
         } else if constexpr (std::is_same_v<T, Projection>) {
-          cuda::launch_projection(impl_->type, input(op.input),
-                                  input(op.weight), output(op.output), d.at(0),
-                                  d.at(1), d.at(2), stream);
+          cuda::launch_projection(
+              impl_->type, input(op.input), input(op.weight), output(op.output),
+              d.at(0), d.at(1), d.at(2), stream,
+              positioned(op.output) ? device_position : nullptr);
         } else if constexpr (std::is_same_v<T, RmsNorm>) {
           cuda::launch_rms_norm(impl_->type, input(op.input), input(op.weight),
                                 output(op.output), d.at(0), d.at(1), op.epsilon,
@@ -418,13 +527,14 @@ void PreparedOperation::submit(
           cuda::launch_rotary(
               impl_->type, input(op.input), output(op.output), d.at(0), d.at(1),
               d.at(2), extent ? extent->first_position : op.first_position,
-              op.theta, stream);
+              op.theta, stream, device_position, positioned(op.output));
         } else if constexpr (std::is_same_v<T, CausalAttention>) {
           cuda::launch_attention(
               impl_->type, input(op.query), cache ? cached_key : input(op.key),
               cache ? cached_value : input(op.value), output(op.output),
               d.at(0), d.at(1), d.at(2), d.at(3), stream,
-              extent ? extent->first_position : 0);
+              extent ? extent->first_position : 0, device_position,
+              cache ? cache->capacity : 0, attention_scale);
         } else if constexpr (std::is_same_v<T, Add>) {
           cuda::launch_add(impl_->type, input(op.left), input(op.right),
                            output(op.output), d.at(0), stream);

@@ -8,7 +8,8 @@
  * propagates. Preparation owns copied descriptors, borrows a stable Device,
  * chooses a supported implementation and reports workspace bytes/alignment
  * before tensor allocation. No silent precision change or CPU fallback.
- * CUDA currently needs no global operation workspace and requires natural
+ * CUDA attention owns one initialized FP32 scale in operation workspace;
+ * other operations need no global workspace. Operands require natural
  * element alignment. RoPE theta must also fit a positive finite FP32 value.
  * operands() declares required alignment/access for each referenced tensor;
  * planner placement satisfies these requirements before binding buffers.
@@ -116,6 +117,18 @@
  * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
  * cpp-perf-guidelines GPU.1: all append/attention intermediates stay on device.
  * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * Device-loop extension (design/implementation, 2026-10-20): a prepared
+ * prefill/decode body borrows an immutable-for-this-iteration device position.
+ * The graph advances it only after every reader completes. RoPE/attention use
+ * that absolute position; positioned output bindings address cache row S.
+ * Arithmetic and reduction order are unchanged. Graph storage is admitted for
+ * the maximum position; the device loop enforces S < capacity. No per-token
+ * host argument update, copy of position, or host launch is required.
+ * Core I.7/CP.3: explicit bounds and ordered borrowing. Performance
+ * GPU.1/GPU.6: resident control and stable graph arguments
+ * (guidelines/gpu/GPU.1-keep-data-on-device.md;
+ * guidelines/gpu/GPU.6-batch-tiny-gpu-work.md). Both corpora queried and rules
+ * read during header design and implementation.
  */
 #pragma once
 
@@ -138,6 +151,7 @@ class Device;
 class Queue;
 class DeviceBuffer;
 struct DeviceRegion;
+struct ConstDeviceRegion;
 }  // namespace dolittle::gpu
 
 namespace dolittle::kernels {
@@ -199,6 +213,7 @@ struct BufferBinding {
   std::variant<const gpu::DeviceBuffer*, gpu::DeviceBuffer*> storage;
   std::size_t offset;
   std::size_t bytes;
+  bool positioned_output = false;
 };
 
 // Active rows are bounded by max_rows; last_row selects the final active row.
@@ -207,8 +222,10 @@ struct RowPolicy {
   bool last_row = false;
 };
 struct ExecutionExtent {
-  std::size_t first_position;
-  std::size_t active_rows;
+  std::size_t first_position{};
+  std::size_t active_rows{};
+  const gpu::ConstDeviceRegion* device_position = nullptr;
+  std::size_t device_capacity = 0;
 };
 class PreparedOperation {
  public:
@@ -217,7 +234,11 @@ class PreparedOperation {
   PreparedOperation& operator=(PreparedOperation&&) noexcept;
   PreparedOperation(const PreparedOperation&) = delete;
   PreparedOperation& operator=(const PreparedOperation&) = delete;
+  // Persistent per-operation device constants; initialize once on the owning
+  // queue before any submit, including graph capture. The executor suballocates
+  // these disjoint regions in one arena, never recomputing values on the CPU.
   [[nodiscard]] WorkspaceRequirement workspace() const noexcept;
+  void initialize(gpu::Queue&, gpu::DeviceRegion) const;
   [[nodiscard]] std::span<const OperandRequirement> operands() const noexcept;
   [[nodiscard]] std::string_view implementation_name() const noexcept;
   void submit(

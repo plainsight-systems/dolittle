@@ -13,12 +13,23 @@
  * 4. Multiply X by that inverse RMS and round to storage. Multiply this
  *    rounded value by W in FP32, then round again when writing Y.
  * The intermediate storage rounding precedes the learned scale.
- * CUDA implementation: one 32-thread warp processes a vector; each lane
- * loads neighboring groups for wide vectors and strided features for heads.
- * Lane zero broadcasts the sum. Grid-stride iteration changes scheduling,
- * never reduction order.
- * Cost: O(R*D) work, four FP32 partials per lane, no shared-memory scratch.
- * Optimization: fuse squaring/reduction; avoid a tensor of squared values.
+ * CUDA implementation: for 128<D<=8192, a 256-thread block first loads X
+ * cooperatively into D shared floats. Then 128 threads compute the original
+ * 128 component sums. Groups of four combine left to right into 32 shared
+ * totals; the first warp reduces these and publishes the inverse RMS. After
+ * a barrier, the whole block normalizes and writes adjacent features. Other
+ * widths retain the 32-thread warp path. Grid-stride iteration changes
+ * scheduling, never reduction order. Cost: O(R*D) work; the cooperative path
+ * uses (D+32)*4 shared bytes. Optimization: distribute global loads/stores
+ * across eight warps rather than making one warp issue all loads along the
+ * reduction dependency chain. Preserve the exact four-component sums and both
+ * storage-rounding steps. Corpus consultation, design and implementation,
+ * 2026-10-20: cpp-guidelines I.7 (#ri-post): identical reduction and stored
+ * results; cpp-perf-guidelines GPU.2 and GPU.5: coalesced block transfers,
+ * reuse the shared input for both reduction and output, with explicit phase
+ * barriers. Sources:
+ * guidelines/gpu/GPU.2-shape-data-for-coalesced-lane-access.md;
+ * guidelines/gpu/GPU.5-use-shared-memory-when-reuse-or-reordering-pays.md.
  * Reference: PyTorch Reduce.cuh vectorized four-component reduction and
  * Transformers v4.57.3 Qwen3RMSNorm storage boundaries. Fixed warp geometry
  * preserves batch invariance instead of inheriting library launch selection.
@@ -120,6 +131,60 @@ __global__ void rms_norm(RmsArguments<T> args) {
   }
 }
 
+template <class T>
+__global__ void rms_norm_staged(RmsArguments<T> args) {
+  // Per-block dynamic storage, not mutable process-global state.
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+  extern __shared__ float values[];
+  for (std::size_t row = blockIdx.x; row < args.rows; row += gridDim.x) {
+    for (std::size_t column = threadIdx.x; column < args.width;
+         column += blockDim.x) {
+      values[column] = detail::widen(args.input[row * args.width + column]);
+    }
+    __syncthreads();
+    if (threadIdx.x < feature_group) {
+      float partial = 0.0F;
+      for (std::size_t column = threadIdx.x; column < args.width;
+           column += feature_group) {
+        const auto value = values[column];
+        partial = __fadd_rn(partial, __fmul_rn(value, value));
+      }
+      // Four adjacent threads own the four components of one original lane.
+      // Fetch before adding so all component values remain the original sums.
+      const auto second = __shfl_down_sync(full_warp_mask, partial, 1, 4);
+      const auto third = __shfl_down_sync(full_warp_mask, partial, 2, 4);
+      const auto fourth = __shfl_down_sync(full_warp_mask, partial, 3, 4);
+      if (threadIdx.x % 4 == 0) {
+        values[args.width + threadIdx.x / 4] =
+            __fadd_rn(__fadd_rn(__fadd_rn(partial, second), third), fourth);
+      }
+    }
+    __syncthreads();
+    if (threadIdx.x < warp_lanes) {
+      float sum = values[args.width + threadIdx.x];
+#pragma unroll
+      for (unsigned offset = 1; offset < warp_lanes; offset *= 2) {
+        sum = __fadd_rn(sum, __shfl_down_sync(full_warp_mask, sum, offset));
+      }
+      if (threadIdx.x == 0) {
+        const auto mean = __fmul_rn(sum, 1.0F / static_cast<float>(args.width));
+        values[args.width] = rsqrtf(__fadd_rn(mean, args.epsilon));
+      }
+    }
+    __syncthreads();
+    const auto inverse = values[args.width];
+    for (std::size_t column = threadIdx.x; column < args.width;
+         column += blockDim.x) {
+      const auto normalized =
+          detail::storage_round<T>(__fmul_rn(values[column], inverse));
+      args.output[row * args.width + column] = detail::narrow<T>(
+          __fmul_rn(normalized, detail::widen(args.weight[column])));
+    }
+    // All readers finish before a grid-stride iteration replaces the tile.
+    __syncthreads();
+  }
+}
+
 // NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic,
 // cppcoreguidelines-avoid-c-arrays,
 // cppcoreguidelines-pro-bounds-constant-array-index)
@@ -128,6 +193,17 @@ template <class T>
 void submit(const void* input, const void* weight, void* output,
             std::size_t rows, std::size_t width, float epsilon,
             cudaStream_t stream) {
+  if (width > rms_warp_width && width <= rms_staged_width) {
+    rms_norm_staged<<<detail::grid_blocks(rows), detail::threads,
+                      (width + rms_staged_partials) * sizeof(float), stream>>>(
+        RmsArguments<T>{.input = static_cast<const T*>(input),
+                        .weight = static_cast<const T*>(weight),
+                        .output = static_cast<T*>(output),
+                        .rows = rows,
+                        .width = width,
+                        .epsilon = epsilon});
+    return;
+  }
   rms_norm<<<detail::grid_blocks(rows), warp_lanes, 0, stream>>>(
       RmsArguments<T>{.input = static_cast<const T*>(input),
                       .weight = static_cast<const T*>(weight),

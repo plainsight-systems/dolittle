@@ -48,6 +48,18 @@
  * (#ri-encapsulate) confines native pointer/array access to the guarded kernel;
  * GDSA.2 preserves the exact partial ownership and arithmetic order. Source:
  * guidelines/gpu-dsa/GDSA.2-declare-each-reductions-determinism.md.
+ * Device-loop extension (design/implementation, 2026-10-20): a prepared
+ * prefill/decode body borrows an immutable-for-this-iteration device position.
+ * The graph advances it only after every reader completes. RoPE/attention use
+ * that absolute position; positioned output bindings address cache rows
+ * S..S+B-1. Arithmetic and reduction order are unchanged. Graph storage is
+ * admitted for the maximum position; the device loop enforces S+B <= capacity.
+ * No per-token host argument update, copy of position, or host launch is
+ * required. Core I.7/CP.3: explicit bounds and ordered borrowing. Performance
+ * GPU.1/GPU.6: resident control and stable graph arguments
+ * (guidelines/gpu/GPU.1-keep-data-on-device.md;
+ * guidelines/gpu/GPU.6-batch-tiny-gpu-work.md). Both corpora queried and rules
+ * read during header design and implementation.
  */
 #include "kernels/cuda/common.cuh"
 
@@ -62,6 +74,8 @@ struct RotaryArguments {
   std::size_t width;
   std::size_t first_position;
   double theta;
+  const std::size_t* device_position;
+  bool positioned_output;
 };
 
 // Device-only indexing: preparation proves allocation extents; the loops
@@ -69,7 +83,12 @@ struct RotaryArguments {
 // sizes. NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
 template <class T>
 __global__ void rotary(RotaryArguments<T> args) {
-  const auto [input, output, pairs, heads, width, first_position, theta] = args;
+  const auto [input, base_output, pairs, heads, width, host_position, theta,
+              device_position, positioned_output] = args;
+  const auto first_position =
+      device_position ? *device_position : host_position;
+  auto* output =
+      base_output + (positioned_output ? first_position * heads * width : 0);
   const auto half = width / 2;
   const auto stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
   for (std::size_t index =
@@ -111,7 +130,8 @@ __global__ void rotary(RotaryArguments<T> args) {
 template <class T>
 void submit(const void* input, void* output, std::size_t positions,
             std::size_t heads, std::size_t width, std::size_t first_position,
-            double theta, cudaStream_t stream) {
+            double theta, cudaStream_t stream,
+            const std::size_t* device_position, bool positioned_output) {
   const auto pairs = positions * heads * (width / 2);
   rotary<<<detail::grid_blocks(detail::ceil_div(pairs, detail::threads)),
            detail::threads, 0, stream>>>(
@@ -121,20 +141,24 @@ void submit(const void* input, void* output, std::size_t positions,
                          .heads = heads,
                          .width = width,
                          .first_position = first_position,
-                         .theta = theta});
+                         .theta = theta,
+                         .device_position = device_position,
+                         .positioned_output = positioned_output});
 }
 }  // namespace
 
 void launch_rotary(tensors::ElementType type, const void* input, void* output,
                    std::size_t positions, std::size_t heads, std::size_t width,
                    std::size_t first_position, double theta,
-                   cudaStream_t stream) {
+                   cudaStream_t stream, const std::size_t* device_position,
+                   bool positioned_output) {
   if (detail::is_bfloat16(type)) {
     submit<__nv_bfloat16>(input, output, positions, heads, width,
-                          first_position, theta, stream);
+                          first_position, theta, stream, device_position,
+                          positioned_output);
   } else {
     submit<float>(input, output, positions, heads, width, first_position, theta,
-                  stream);
+                  stream, device_position, positioned_output);
   }
 }
 }  // namespace dolittle::kernels::cuda

@@ -59,6 +59,17 @@
  * preparation precondition. cpp-perf-guidelines CDSA.32: persist versioned
  * preparation for immutable data;
  * guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
+ * Steady-state design, 2026-10-20:
+ * Compose device sampling for the live CUDA path. Host categorical
+ * selection remains an explicit reference path; no per-step vocabulary
+ * transfer is required by live composition.
+ * Overlay: transformer-execution.md, "Device selection and allocation-free
+ * generation". Core I.7 (#ri-post): borrowing, bounds and failure contracts.
+ * Performance GPU.1: device-resident decisions; MEM.9: prepare storage before
+ * steady state and check the invariant. Sources:
+ * guidelines/gpu/GPU.1-keep-data-on-device.md;
+ * guidelines/memory/MEM.9-embedded-allocate-at-init.md.
+ * Both corpora queried/read for header design and implementation, 2026-10-20.
  */
 #include <openssl/rand.h>
 
@@ -143,7 +154,9 @@ int integer(std::string_view value) {
 }
 std::string read(const std::filesystem::path& path, std::size_t cap) {
   const auto size = std::filesystem::file_size(path);
-  if (size > cap) throw std::length_error("configuration file limit");
+  if (size > cap) {
+    throw std::length_error("configuration file limit");
+  }
   std::ifstream source(path, std::ios::binary);
   std::string bytes(static_cast<std::size_t>(size), '\0');
   if (!source.read(bytes.data(), static_cast<std::streamsize>(bytes.size()))) {
@@ -199,7 +212,9 @@ std::shared_ptr<const Request> request(const Json& model,
   for (const auto& f : model.at("files")) {
     result.artifacts.push_back({f.at("path"), f.at("bytes"), f.at("sha256")});
     const auto& path = result.artifacts.back().relative_path;
-    if (path.ends_with(".safetensors")) result.shards.push_back(path);
+    if (path.ends_with(".safetensors")) {
+      result.shards.push_back(path);
+    }
   }
   return std::make_shared<const Request>(std::move(result));
 }
@@ -229,26 +244,22 @@ experiment::RunInputs inputs(const Sources& sources) {
        av_archive->artifact("nla_meta.yaml"), *av_text.tokenizer,
        *av_text.protocol},
       {mib, mib, pair_template_tokens});
-  auto sampler =
-      std::make_shared<inference::sampling::Categorical>(qwen3_vocabulary);
   const tensors::ComputationMode mode{tensors::ElementType::bfloat16,
                                       tensors::ElementType::float32};
   auto target_provider = provider(target_archive);
   auto av_provider = provider(av_archive);
-  experiment::RunInputs result{
-      std::move(pair),
-      std::move(target_provider),
-      std::move(av_provider),
-      mode,
-      mode,
-      std::move(target_text.tokenizer),
-      std::move(av_text.tokenizer),
-      std::move(target_text.protocol),
-      [sampler](auto logits, auto settings, auto& rng) {
-        return sampler->select(logits, settings, rng);
-      },
-      "cuda",
-      (metadata_mib + 2 * tokenizer_mib) * mib};
+  experiment::RunInputs result{std::move(pair),
+                               std::move(target_provider),
+                               std::move(av_provider),
+                               mode,
+                               mode,
+                               std::move(target_text.tokenizer),
+                               std::move(av_text.tokenizer),
+                               std::move(target_text.protocol),
+                               {},
+                               "cuda",
+                               (metadata_mib + 2 * tokenizer_mib) * mib,
+                               inference::sampling::Execution::device};
   return result;
 }
 std::string epoch() {
@@ -315,7 +326,9 @@ int main(int argc, char** argv) try {
       throw std::invalid_argument("duplicate model role");
     }
   }
-  if (!target || !av) throw std::invalid_argument("missing model role");
+  if (!target || !av) {
+    throw std::invalid_argument("missing model role");
+  }
   const int port = integer(args.at("--port"));
   if (port < 1 || port > maximum_port) {
     throw std::invalid_argument("port range");
@@ -375,7 +388,9 @@ int main(int argc, char** argv) try {
     while (!finished.stop_requested() && !interrupted) {
       std::this_thread::sleep_for(std::chrono::milliseconds(signal_poll_ms));
     }
-    if (interrupted) stop.request_stop();
+    if (interrupted) {
+      stop.request_stop();
+    }
   });
   std::cout << "Dolittle listening at http://" << host << "\n" << std::flush;
   server.serve(stop.get_token());

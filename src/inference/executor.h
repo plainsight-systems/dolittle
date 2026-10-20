@@ -1,189 +1,78 @@
 /*
- * Prepared full forward execution; numerical verification is recorded
- * separately. Axis: X1, execution planning. This first interface is a complete
- * causal forward pass plus single-turn cached prefill/decode. Sampling is
- * separate.
+ * Axis X1: prepare model recipes, bind storage and execute full or cached
+ passes.
+ * Contract: verified BoundCheckpoint and Device outlive borrowed plans. A
+ * ResidentModel owns a checkpoint, uploaded weights and ordered queue; at most
+ * one cached plan leases it. Destroy the plan before its resident model and
+ * retain Device until all exported capture leases die. Failed plans are
+ poisoned
+ * and drained; they cannot resume. Allocation, shape/provenance/budget checks
+ * happen before live launch. Model-provided observation sites determine hooks.
  *
- * Contract: preparation borrows a verified BoundCheckpoint and Device, which
- * must both outlive the plan. Checkpoint data remains immutable; callers must
- * not concurrently use or reconfigure the device during plan operations.
- * It validates the model's
- * forward/observation capabilities, shape, dtype, selected logits and memory
- * budget before tensor allocation/upload. It copies/resolves metadata rather
- * than retaining the caller's vectors. Unknown sites/modes or incompatible
- * inputs fail explicitly. Invalid input -> invalid_argument; size/budget
- * overflow -> length_error; device failure -> runtime_error; host allocation ->
- * bad_alloc.
+ * Algorithm: transformer-execution.md full model/block flow and
+ * execution-boundary.md sections 3-6.
+ * 1. Validate the recipe and each operand. Assign immutable weights, contiguous
+ *    per-layer K/V, persistent outputs and transient scratch. Extend source
+ *    lifetimes through capture copies. Bind independent attention-scale slots;
+ *    initialize 1/sqrt(head_width) on device before their first reader.
+ * 2. For live generation, admit P prompt and G continuation positions, upload
+ *    all prompt IDs and allocate independent retained device capture storage.
+ *    Build fixed full-chunk, remainder, first-selection and decode graph
+ bodies.
+ *    Device position selects IDs, RoPE position, KV write/read windows and the
+ *    destination row for every requested hook.
+ * 3. Each body embeds IDs and runs the model's ordered block recipe: RMSNorm,
+ *    Q/K/V projections, Q/K head norms, RoPE, causal grouped-query attention,
+ *    output projection/residual, post-attention norm, gated SiLU MLP/residual.
+ *    Capture raw advertised values after their producer and before scratch
+ *    reuse. The head gathers the last row, normalizes and projects vocabulary
+ *    logits; device sampling feeds the next embedding without readback.
+ * 4. An AV override leases a completed source row and declares type/scale.
+ *    DeviceInjection validates and normalizes it inside the root graph. Status
+ *    gates all inference bodies. Copy its output over the marker embedding
+ *    after lookup and before block 0, only in the containing prompt chunk.
+ * 5. Start once; collection updates host metadata from immutable events. The
+ *    GPU owns all progress decisions. finish drains and seals the plan. Capture
+ *    leases outlive transient storage and target-to-AV weight replacement.
  *
- * execute consumes exactly the prepared number of token IDs, all within the
- * bound vocabulary. Sequence positions are [0,N), without padding, truncation,
- * sliding eviction or persistent cache. The ID span is borrowed only for the
- * call. It does not sample tokens or load an NLA. A plan is reusable serially
- * with different token contents of the same length; it is not reentrant.
+ * FullForwardPlan is an explicit diagnostic path: execute an exact fixed token
+ * trace with optional host injection, capture selected rows and batch readbacks
+ * at one completion point. Cached consume/consume_view similarly replay known
+ * IDs for oracle comparison; borrowed views expire at the next consume. These
+ * APIs reject use after live preparation. Host injection cannot enter a live
+ * sequence; device injection cannot silently enter a host diagnostic pass.
+ * Tensor storage/rounding is model-selected BF16/FP32 with FP32 accumulation;
+ * this executor does not alter arithmetic to match a reference.
+ * Resident loading returns only after every weight upload completes. Its
+ * bounded staging uses two reusable slots: wait for a slot's prior transfer,
+ * fill it from the checkpoint, submit/mark its upload, then rotate. One-byte
+ * budgets fall back to one slot. Total staging never exceeds the supplied
+ * allowance; owners drain pending uses on failure. Byte copies preserve all
+ * checkpoint values. Optimization: CPU filling overlaps another slot's DMA;
+ * resources are allocated before submission. Upload design/implementation
+ * consultation, 2026-10-20 (both servers queried in both phases):
+ * cpp-guidelines R.1 (#rr-raii) and I.7 (#ri-post) require owned
+ * lifetimes and completed-return semantics. cpp-perf-guidelines GPU.7 requires
+ * resource-specific completion and bounded multi-buffering; source:
+ * guidelines/gpu/GPU.7-pipeline-cpu-and-gpu-work.md.
  *
- * execute returns only after requested host logits and captures are complete.
- * ForwardResult owns all returned bytes and position metadata independently
- * of the plan, checkpoint and device. Views remain valid until result move or
- * destruction. Results carry verified checkpoint identity and caller-supplied
- * execution ID (unique within the consuming experiment/harness), an owned
- * copy of the consumed token IDs, and the executed numerical mode. Failed calls
- * yield no successful result and drain dependent work before reusing/freeing
- * scratch. Device failure makes the plan unusable until it is recreated.
- * Moved-from plans/results support destruction/reassignment only.
+ * Design/cost: one prepared graph O(recipe size), not O(sequence length).
+ * Weights O(parameter bytes); KV O(layers*capacity*kv_heads*head_width*2*b);
+ * capture payload O((P+G)*sum(row_bytes)); scratch O(chunk*model widths).
+ * The immutable journal is O(P+G) small metadata. Separate budgets cover host
+ * staging/diagnostic buffers and device state, constants, sampler and captures.
+ * Optimization: direct device-positioned KV writes avoid append copies;
+ * graph execution and GPU NLA conversion allocate nothing or read tensors back.
+ * CPU-only oracle replay is explicit and never chosen as a live fallback.
  *
- * Algorithm: docs/architecture/transformer-execution.md, "Full model flow",
- * "One Qwen3 transformer block", "First forward pass", and "Storage lifetimes":
- * 1. Prepare the selected model recipe, output rows, observation requests,
- *    kernel choices and live-buffer budget. No hard-coded observation block.
- * 2. Embed exact IDs, evaluate each block with full causal attention and
- *    current-pass K/V, and arrange requested copies at advertised boundaries.
- * 3. Apply the selected output path and project only requested logit rows.
- * 4. Complete batched readbacks, attach provenance, and return owned results.
- * No persistent KV cache survives this operation; scratch can be reused.
- * The bound model supplies ForwardRecipe; preparation validates its single
- * producers, parameter bindings, dependencies and observation values. Operation
- * preparation resolves supported kernels and operand/workspace alignment.
- * Plan owns uploaded weights, one ordered queue, scratch and bounded staging;
- * storage_plan.h supplies pure checked scratch placement after schedule last
- * uses are known; weight/output arenas and workspace are admitted separately.
- * the checkpoint owns host payloads. Captures extend source last-use intervals.
- * Raw capture copies are scheduled before reusing the source, with host-ready
- * results established by one final completion point, not per-block waits.
- *
- * Design and cost: preparation includes weights, scratch, output staging and
- * capture/position metadata in admission; report estimated device peak and
- * host output bytes (logical payload and metadata, including token provenance;
- * excludes allocator capacity/overhead and plan-owned transfer staging). Device
- * peak is admitted arena bytes, excluding driver/context reservations and
- * allocator alignment overhead. Actual allocations may still
- * fail. Logit position lists follow PositionSelection's strict ordering and
- * bounds rules, including an empty list selecting no rows. Raw logits retain
- * their declared storage dtype. Reusing the plan avoids rebuilding schedules;
- * result-owned host output allocation remains an explicit per-call cost.
- * Optimization: intermediates stay on device; no per-observation host wait.
- * A final readback wait is intentional at this numerical-harness boundary.
- * No overlap or throughput improvement is claimed before measurement.
- *
- * Corpus guidance queried and full rules read for implementation, 2026-10-18:
- * cpp-guidelines I.7 (#ri-post): host-ready results and failure cleanup are
- * explicit. cpp-guidelines R.1 (#rr-raii): owned scratch/results follow
- * plan/result lifetime. cpp-perf-guidelines GPU.1: budget batched output
- * transfers, not each layer's intermediates. Source:
- * guidelines/gpu/GPU.1-keep-data-on-device.md. cpp-perf-guidelines GPU.7: order
- * source reuse/copies by completion, not a device-wide wait per hook. Source:
- * guidelines/gpu/GPU.7-pipeline-cpu-and-gpu-work.md. cpp-perf-guidelines
- * COPY.5: execution plans/results transfer unique ownership. Source:
- * guidelines/copy-move/COPY.5-resource-owning-types-are-move-only.md.
- * cpp-perf-guidelines GPU.9: scratch reuse includes observation last uses.
- * Source: guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
- *
- * Incremental execution: cached target execution.
- * Input: a bound model, numerical mode, capacity C, maximum prompt chunk Bmax,
- * selected observation sites and device/host byte budgets. Output: a serial,
- * single-sequence plan owning weights, cache, scratch, staging and token
- * history. The caller establishes the tokenizer/protocol pairing with this
- * checkpoint; the executor validates token IDs and mathematical capabilities,
- * not chat text.
- *
- * Cached algorithm:
- * 1. Prepare the model's incremental recipe and all resource requirements for
- *    up to Bmax new positions and a cache prefix up to C. The same schedule
- *    accepts B=1 for decode. Reuse one weight arena across both.
- * 2. For each consume(ids), let S be committed positions and B be ids.size().
- *    Require 0 < B <= Bmax, S+B <= C and valid IDs before submitting anything.
- *    Use absolute RoPE positions S+i; existing cached keys are already rotated.
- * 3. Execute every block for these B positions. Copy its new K/V into that
- *    block's cache at [S,S+B); attention reads keys through S+i for query i.
- *    Copy requested residual rows before scratch is reused. A capture's
- * absolute position is S+i even though its temporary row index is i.
- * 4. If requested, project only the final new row to vocabulary logits. Batch
- *    this row and the chunk's captures into the same readback/completion point.
- * 5. After completion, return owned chunk bytes and commit S+B atomically
- * across blocks. Generation appends them to its retained host result. Earlier
- * chunks then survive a later poisoned-device failure without another GPU
- * readback.
- * 6. On failure, drain work and invalidate this plan/cache. Do not return the
- *    failed chunk or advance S. finish seals the plan; no restart or resume.
- * Malformed calls rejected before submission leave the plan usable. Failure
- * after submission makes it unusable. Result bytes/views outlive the plan.
- *
- * Implementation design: prepare bounded shapes once, pass current S/B as
- * checked launch parameters, and keep scratch layouts at admitted capacity.
- * Do not build a model recipe, upload weights or allocate device memory per
- * emitted token. FullForwardPlan remains the independent no-cache path.
- * Cost: cache is sum(2*C*Hkv*d*element_bytes), scratch scales with Bmax,
- * device capture staging with Bmax*sum(site_width*element_bytes). Host retained
- * captures scale with C; host staging and per-call result bytes are separate
- * peak costs. Host admission counts payload buffers, positions and sampling
- * scratch; excludes archive mappings, tokenizer tables, allocator overhead and
- * schedule/owner metadata. This is not a bound on process resident memory. Each
- * sampling step has one readback wait. Capture bytes join that existing
- * boundary instead of adding a host wait for each block. Optimization: resident
- * weights/cache, reused chunk/decode schedules, batched capture/logit
- * transfers. Include prompt tails and zero-logit finalization in preparation;
- * padding to Bmax must never become a valid attention position. Overlay:
- * transformer-execution.md, "Prefill and decoding" and "Storage lifetimes".
- * Corpus consultation, header design and implementation, 2026-10-18:
- * cpp-guidelines I.7 (#ri-post), R.1 (#rr-raii): transactional prefix commit
- * and owned host results preserve completed chunks after a later device
- * failure. cpp-perf-guidelines GPU.9: admit persistent/cache/scratch arenas
- * separately. Source:
- * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
- * cpp-perf-guidelines GPU.1: batch captures at the required sampling boundary.
+ * Corpus consultation, header design and implementation, 2026-10-20: both local
+ * servers queried separately in each phase and the cited rules read in full.
+ * cpp-guidelines I.1 (#ri-explicit), R.1 (#rr-raii): explicit residency,
+ * completion, ownership and failure contracts. cpp-perf-guidelines GPU.1,
+ * GPU.6, GPU.7, GPU.9: keep tensor intermediates/decisions on device, batch
+ * dispatch, decouple observation and separate persistent from transient arenas.
  * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
- *
- * Resident-model and embedding-input extension:
- * ResidentModel owns one verified host checkpoint, one immutable uploaded
- * weight arena and its ordered queue. It borrows Device. A sequence prepared
- * from it borrows the stable ResidentModel and owns its own KV/scratch/staging.
- * At most one sequence plan may be alive per resident owner. Destroy that plan
- * before its resident owner, and the owner before Device; Run enforces this
- * order. finish seals a sequence; destruction releases its storage and lease.
- * Fresh sequences reuse weights only, never prefix validity or sequence IDs.
- * Resident loading owns the checkpoint even on failure. The existing
- * preparation overload keeps borrowing its host checkpoint and owns private
- * resident weight state; the new resident overload shares weights explicitly
- * between fresh sequences.
- *
- * EmbeddingOverride owns exactly D contiguous elements in activation storage,
- * a width and an absolute input position. Preparation validates bytes,
- * finiteness, dtype and a declared recipe embedding boundary. It admits row
- * staging and extends the destination tensor's lifetime through replacement and
- * all readers. For each consume with prefix S and B rows:
- * 1. Look up every exact token ID, preserving the marker ID in token history.
- * 2. After the declared producer, if S <= p < S+B, upload the replacement to
- *    row p-S of [B,D] on the same queue, before any observation/block-0 read.
- *    The owned source remains alive until queue completion. Other rows keep
- *    their original embedding bytes. Do not download or re-upload [B,D].
- * 3. Execute ordinary blocks/cache writes/logits. Commit the injection together
- *    with successful chunk completion. Failed submission poisons the sequence;
- *    device failure also poisons its resident owner. Never retry a partial
- * chunk.
- * 4. Later chunks/decode never reapply the row. finish rejects an unconsumed
- *    requested replacement; failure cleanup may destroy such a plan safely.
- * Generation preflight must additionally require p < prompt length, so an
- * arbitrary future generated token cannot be replaced accidentally.
- * Full-forward execute's new overload validates p < sequence length and follows
- * the same lookup/replacement order, allowing independent injected-input
- * comparisons. Existing overloads retain their behavior. No existing API
- * silently ignores an injection request.
- *
- * Admission: max_device_bytes counts resident weights plus sequence arenas,
- * not just the incremental allocation. Resident load accounts for bounded
- * upload staging; per-sequence host limits include the owned injection plus
- * copy staging. Cost: one D*b upload per injected sequence; no extra per-block
- * wait. Persistent AV weights avoid O(weight bytes) upload on every variant.
- * Fresh KV allocation stays the accepted simple baseline; no cross-request
- * pooling is introduced. Optimization: split persistent weight lifetime from
- * per-sequence storage. Overlay: logical-overview.md, "3 Retain the experiment
- * and change phases"; transformer-execution.md, "NLA entry and exit paths" and
- * "Storage lifetimes". Corpus consultation, header design and implementation
- * (full rules read), 2026-10-19: cpp-guidelines R.1 (#rr-raii), I.7 (#ri-post):
- * explicit owner/lease/completion. cpp-perf-guidelines GPU.1: one row transfer,
- * no embedding round trip; source guidelines/gpu/GPU.1-keep-data-on-device.md.
- * cpp-perf-guidelines GPU.9: persistent weights and transient sequences
- * separated; source
- * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
+ * Related GPU.6/7/9 entries describe dispatch, staging and storage.
  */
 #pragma once
 
@@ -192,11 +81,14 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stop_token>
 #include <string_view>
 #include <vector>
 
 #include "inference/cache/cache.h"
+#include "inference/decoding/device.h"
 #include "inference/observations.h"
+#include "inference/sampling/device.h"
 
 namespace dolittle::models {
 class BoundCheckpoint;
@@ -210,12 +102,19 @@ namespace dolittle::inference {
 struct ExecutionId {
   std::uint64_t value;
 };
-// Owned replacement applied after lookup, before block 0.
+// Device normalization input; the pair specifies the law without evaluating it.
+struct DeviceNormalization {
+  DeviceCapture source;
+  tensors::ElementType source_type;
+  float scale;
+};
+// Replacement applied after lookup, before block 0.
 struct EmbeddingOverride {
   models::TokenPosition position;
   std::size_t width;
   tensors::ElementType storage_type;
   std::vector<std::byte> bytes;
+  std::optional<DeviceNormalization> device{};
 };
 
 struct ForwardOptions {
@@ -315,6 +214,13 @@ struct ConsumedChunk {
   std::optional<OwnedLogitRow> next_logits;
   std::vector<OwnedCapture> captures;
 };
+struct ConsumedView {
+  models::TokenPosition first_position{};
+  std::span<const std::uint32_t> tokens;
+  std::optional<LogitRows> next_logits;
+  std::span<const CapturedRows> captures;
+  std::optional<std::uint32_t> selected_token;
+};
 class ResidentModel;
 class CachedForwardPlan {
  public:
@@ -339,6 +245,24 @@ class CachedForwardPlan {
   [[nodiscard]] std::size_t estimated_peak_host_bytes() const noexcept;
   [[nodiscard]] ConsumedChunk consume(std::span<const std::uint32_t> token_ids,
                                       bool need_next_logits);
+  void prepare_sampling();
+  // One prepared request owns prefill, first selection and decode. Returned
+  // events are observation only; retained capture owners outlive this plan.
+  struct DeviceGenerationRequest {
+    sampling::Settings sampling;
+    std::uint64_t seed;
+    std::span<const std::uint32_t> prompt_ids;
+    std::span<const std::uint32_t> stop_ids;
+    std::size_t max_new_tokens;
+  };
+  void prepare_device_generation(const DeviceGenerationRequest&);
+  void start_sequence();
+  void request_stop() noexcept;
+  [[nodiscard]] DeviceSequence::Event collect_sequence(const std::stop_token&);
+  [[nodiscard]] std::span<const DeviceCapture> device_captures() const noexcept;
+  [[nodiscard]] ConsumedView consume_view(
+      std::span<const std::uint32_t>, bool,
+      std::optional<sampling::DeviceDraw> draw = {});
   void finish();
 
  private:

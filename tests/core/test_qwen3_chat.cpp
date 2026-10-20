@@ -8,6 +8,11 @@
  * cpp-perf-guidelines GPU.1 (guidelines/gpu/GPU.1-keep-data-on-device.md):
  * host contract checks are separate from device timing or correctness claims.
  * Both corpora consulted for implementation, 2026-10-18.
+ * Prepared-buffer/device-selection contract consultation, 2026-10-20:
+ * Core I.7 (#ri-post) and MEM.9
+ * (guidelines/memory/MEM.9-embedded-allocate-at-init.md), both corpora queried
+ * and full rules read for design/implementation. Exercise public results and
+ * capacity/failure contracts; independent reference inputs remain unchanged.
  */
 #include <array>
 
@@ -45,6 +50,11 @@ struct ByteEchoTokenizer final : tokenizers::Tokenizer {
     }
     return result;
   }
+  std::size_t max_token_bytes() const noexcept override { return 1; }
+  void decode_into(std::span<const std::uint32_t>,
+                   tokenizers::DecodedBytes&) const override {
+    throw std::logic_error("byte-echo collaborator is encode-only");
+  }
   bool contains(std::uint32_t id) const noexcept override { return id < 256; }
   tokenizers::DecodedBytes decode(
       std::span<const std::uint32_t>) const override {
@@ -77,6 +87,18 @@ int main() try {
   const std::array kinds{K::unclassified, K::control, K::reasoning,
                          K::control,      K::answer,  K::control,
                          K::unclassified, K::control};
+  {
+    auto cursor = protocol->make_cursor(19, text::ThinkingMode::enabled);
+    std::vector<text::TokenSegment> output;
+    dolittle::tests::expect_throws<std::length_error>(
+        [&] { cursor->append_into(ids, 19, output); });
+    output.reserve(ids.size());
+    cursor->append_into(ids, 19, output);
+    check(
+        output.size() == ids.size() && output.front().position == 19 &&
+            output.back().kind == kinds.back(),
+        "capacity failure preserves cursor position and classification state");
+  }
   auto segments = protocol->segment(ids, 19, text::ThinkingMode::enabled);
   for (std::size_t i = 0; i < ids.size(); ++i) {
     check(

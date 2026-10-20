@@ -1,110 +1,56 @@
 /*
- * Complete target-generation contract.
- * Axis R2: one sequence's token progression, stopping and capture finalization.
- * Inputs: a prepared prompt, compatible cached execution plan, sampler
- * settings, seed, maximum new tokens and a cooperative stop token. Output:
- * owned exact prompt/generated IDs, consumed length, raw captures, provenance
- * and stop reason. The caller establishes tokenizer/protocol pairing with the
- * verified model. Generate validates nonempty prompt IDs, fresh prefix,
- * capacity and sampler inputs before upload. The selector is borrowed for the
- * call, selected at composition, and obeys sampler.h; it is invoked once per
- * emitted token. No tokenizer, template, sampling law, cache layout or block 24
- * is hardcoded here.
+ * Axis R2: complete target/AV sequence generation and observed result assembly.
+ * Contract: borrow a fresh compatible CachedForwardPlan and validated prompt;
+ * admit P prompt IDs plus G generated IDs before starting. Live execution uses
+ * device sampling; the explicitly selected host_reference path uses the
+ caller's
+ * TokenSelector. Results own exact IDs, consumed positions, provenance and
+ * capture leases. Device must outlive those leases. No model/block constant is
+ * hardcoded here. One run is serial and cannot resume after finalization.
  *
- * Algorithm (P prompt tokens, G maximum new tokens):
- * 1. Cached-plan preparation admits capacity C, weights, cache, scratch and
- *    host outputs. Here require P+G <= C before uploading token IDs, including
- *    room to consume the final emitted token. Reject rather than truncate.
- * 2. Consume prompt chunks through cached execution, preserving absolute
- *    positions. Only the last prompt row needs logits for the first draw.
- * 3. If stopping is already requested or G=0, finish after consuming the prompt
- *    without drawing. Otherwise select one token from the latest logits and
- *    append its ID to the trace as emitted but not yet consumed.
- * 4. Consume that token at the next absolute position. Its capture belongs to
- *    this pass, not the pass whose logits selected it. Commit consumed length
- *    only after all block writes and required copies succeed.
- * 5. If its ID is a stop ID, the token budget is exhausted, or cooperative stop
- *    is requested, finish without another draw. Otherwise use its logits for
- *    step 3. Stop precedence is stop ID, then token limit, then user stop.
- * 6. Seal the completed plan and return an owned result. Stop IDs remain
- *    in the exact trace and receive captures even when hidden in display text.
- * A graceful stop is checked between completed calls. It never abandons an
- * emitted-but-unconsumed token; finalization performs no further sampling.
- * Execution failure drains work, invalidates the session and returns a failed
- * result containing only completed captures plus explicit consumed length.
- * An unconsumed emitted token may remain in that failed trace without a
- * capture. Preflight errors throw before a run starts. Resource exhaustion may
- * throw if no result can be materialized; it must not publish fabricated
- * completion. next_action is the pure progression rule used by the loop:
- * consume unfinished prompt first, then any pending emitted token, then finish
- * or sample. It rejects impossible counts (including more than one pending
- * generated token). Stopping never takes precedence over consuming a pending
- * token. It touches no GPU, tokenizer or RNG, allowing state invariants to be
- * tested as an isolated unit.
+ * Algorithm: execution-boundary.md sections 3-5; logical-overview.md
+ generation.
+ * 1. Validate IDs/settings/identity/capacity, reserve result metadata and
+ prepare
+ *    the device graph, journal and capture arenas. Upload the complete prompt.
+ * 2. Start once. The GPU consumes full prompt chunks and its remainder, then
+ *    selects the first ID from the final prompt row. Each decode consumes the
+ *    previously selected ID before deciding whether to select another.
+ * 3. Collect immutable metadata: selection appends an ID; consumed-range events
+ *    advance the capture watermark; injection events report a valid source
+ norm.
+ *    The collector never supplies input, acknowledges a slot or relaunches
+ work.
+ * 4. Terminal metadata supplies EOS, budget, cancellation or validation
+ failure.
+ *    Drain the graph and seal the result. Every selected token, including EOS,
+ *    receives its own forward pass/capture before graceful termination.
+ * Cancellation may end prefill with an unconsumed prompt suffix. An observer
+ * may lag until GPU completion; callback failure requests cancellation but
+ * collection still preserves all selected/consumed metadata. Borrow callback
+ * spans only for the call. Checked builds reject steady-state allocations.
+ * CUDA/transport failure drains and discards device capture leases rather than
+ * advertising invalid tensors. Device-side validation failure retains only the
+ * already completed prefix. Preparation failures throw before launch.
  *
- * Design and cost: one resident weight set, one admitted contiguous cache and
- * bounded prefill/decode scratch. Each draw downloads one vocabulary row and
- * waits once; captures join the same readback to preserve a durable host
- * prefix. Reserve trace/result metadata before the first emission. For C
- * admitted positions, each selected BF16 D=4096 site costs 8 KiB*C retained
- * host bytes. Device capture scratch scales with the admitted prompt chunk
- * size, not C; transfer staging and per-call result copies add explicit peak
- * bytes. Optimization: chunk prompt work, reuse the same bounded schedule for
- * decode, and avoid per-block waits or per-token GPU allocation. Finalization
- * may omit vocabulary projection; it must still execute every requested capture
- * site. Owned results survive plan/cache/weights teardown. The plan is serial,
- * single sequence, non-reentrant and not resumable after finish/stop/failure.
- * Overlay: docs/architecture/logical-overview.md, "2 Generate and capture"
- * and "Capture alignment"; transformer-execution.md, "Prefill and decoding".
- * Corpus consultation, header design and implementation, 2026-10-18:
- * cpp-guidelines I.1 (#ri-explicit), I.7 (#ri-post), R.1 (#rr-raii): record
- * exact emitted/consumed state, completion, failure and resource ownership.
- * cpp-perf-guidelines GPU.1: retain KV on device; batch capture bytes with the
- * required logit readback/completion per draw.
+ * The host_reference path separately consumes chunks, downloads logits and
+ * captures, calls the supplied selector and consumes its final selected ID.
+ * This diagnostic mode does not satisfy the live execution boundary.
+ * Numerical laws belong to kernels/sampler and remain unchanged here.
+ * Cost: O(P+G) host IDs/positions and metadata journal; O((P+G)*sum(row_bytes))
+ * persistent device captures. No ordinary activation/logit readback, injection
+ * upload, host RNG or per-token GPU submission. Optimization: all successful
+ * publication writes use prepared capacity; GPU continuation has no consumer
+ * dependency. Capture owners survive plan/cache/model teardown.
+ *
+ * Corpus consultation, header design and implementation, 2026-10-20: both local
+ * servers queried separately in each phase and the cited rules read in full.
+ * cpp-guidelines I.1 (#ri-explicit), R.1 (#rr-raii): explicit residency,
+ * completion, ownership and failure contracts. cpp-perf-guidelines GPU.1,
+ * GPU.6, GPU.7, GPU.9: keep tensor intermediates/decisions on device, batch
+ * dispatch, decouple observation and separate persistent from transient arenas.
  * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
- * cpp-perf-guidelines GPU.9: admit/reserve persistent, transient and output
- * arenas. Source:
- * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
- *
- * AV reuse (implemented, 2026-10-19): this same loop consumes the
- * Pair's PreparedPrompt and a resident-AV sequence plan.
- * PreparedPrompt.thinking records the AV template setting, not the target
- * trace's classification. The Pair validates its own tokenizer/protocol
- * identities; no target text is copied into the AV prompt. Before the first
- * consume, inspect the plan's optional embedding_override_position and require
- * it < prompt.ids.size(). The executor handles the replacement in whichever
- * prompt chunk contains it; decode must never apply a replacement. Preserve
- * exact AV prompt/generated IDs, settings, seed, consumed count and
- * stop/failure as for target generation. The experiment attaches the role and
- * original capture identity, then extracts output tags. No second generation
- * algorithm, new sampling law or early tag-based stop. Optimization: reuse
- * progression and bounded decode work; only one injected row adds a transfer,
- * with no per-token change after prefill. Overlay: logical-overview.md, "4
- * Interpret selected positions". Corpus consultation, header design and
- * implementation (full rules read), 2026-10-19: cpp-guidelines I.7 (#ri-post):
- * replacement is restricted to the prompt. cpp-perf-guidelines GPU.1: no
- * repeated injection transfer during decode; source
- * guidelines/gpu/GPU.1-keep-data-on-device.md.
- *
- * Live application extension: IMPLEMENTED CONTRACT, 2026-10-19.
- * Overlay: docs/architecture/live-application.md, "Progress, segmentation and
- * exact positions". An optional borrowed GenerationObserver sees initial
- * prompt IDs once, each newly emitted ID once, and completed consumed-count
- * advances (possibly with an empty appended span). first_position identifies
- * appended IDs in the same absolute sequence as GenerationResult. Counts are
- * monotonic; emission can precede consumption by one token. Updates occur only
- * after existing host-visible completion boundaries, with no extra GPU work.
- * Views expire when update returns; observer is non-owning and cannot reenter
- * the plan. No network/file I/O, mutex-held callback or RNG change is allowed.
- * false means publication failed: disable further observer calls and request
- * graceful stop through the ordinary progression rule. Final-token consumption
- * and owned GenerationResult remain required; no fabricated CUDA failure.
- * No-observer overload retains existing behavior. Reserve metadata before first
- * emission; work is O(new IDs), never O(total prefix) per update.
- * Header corpus: cpp-guidelines CP.22 (#rconc-unknown), callbacks run outside
- * locks; cpp-perf-guidelines GPU.1, use existing completed readback only;
- * source guidelines/gpu/GPU.1-keep-data-on-device.md. COPY.7, borrow update
- * spans; source guidelines/copy-move/COPY.7-eliminate-hidden-copies.md.
+ * Related GPU.6/7/9 entries describe dispatch, staging and storage.
  */
 #pragma once
 
@@ -161,6 +107,7 @@ struct GenerationResult {
   std::vector<OwnedCapture> captures;
   StopReason reason{};
   std::string failure_message;
+  std::optional<float> injection_norm{};
 };
 // Optional observer contract; callback values are borrowed for the call.
 struct GenerationUpdate {
@@ -179,16 +126,14 @@ class GenerationObserver {
   virtual ~GenerationObserver() = default;
   [[nodiscard]] virtual bool update(const GenerationUpdate&) noexcept = 0;
 };
-[[nodiscard]] GenerationResult generate(CachedForwardPlan&,
-                                        const text::PreparedPrompt&,
-                                        GenerationSettings,
-                                        const sampling::TokenSelector&,
-                                        ExecutionId, GenerationObserver&,
-                                        const std::stop_token& stop = {});
-[[nodiscard]] GenerationResult generate(CachedForwardPlan&,
-                                        const text::PreparedPrompt&,
-                                        GenerationSettings,
-                                        const sampling::TokenSelector&,
-                                        ExecutionId,
-                                        const std::stop_token& stop = {});
+[[nodiscard]] GenerationResult generate(
+    CachedForwardPlan&, const text::PreparedPrompt&, GenerationSettings,
+    const sampling::TokenSelector&, ExecutionId, GenerationObserver&,
+    const std::stop_token& stop = {},
+    sampling::Execution execution = sampling::Execution::device);
+[[nodiscard]] GenerationResult generate(
+    CachedForwardPlan&, const text::PreparedPrompt&, GenerationSettings,
+    const sampling::TokenSelector&, ExecutionId,
+    const std::stop_token& stop = {},
+    sampling::Execution execution = sampling::Execution::device);
 }  // namespace dolittle::inference

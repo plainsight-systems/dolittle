@@ -1,5 +1,9 @@
 # File and folder mapping
 
+The accepted [GPU execution boundary](execution-boundary.md) defines device ownership,
+GPU normalization/injection and autonomous prefill through final-token
+consumption. Mathematical contracts and independent references remain fixed.
+
 **Reviewed and accepted — 2026-10-17.** This maps the
 [change axes](change-axes.md) into a source layout for the accepted
 [experiment](logical-overview.md) and [transformer](transformer-execution.md)
@@ -74,6 +78,8 @@ dolittle/
 │   │   ├── sampling/
 │   │   │   ├── sampler.h            # Token selection and independent RNG contract
 │   │   │   └── categorical.{h,cpp}  # Initial filtering/draw mechanism; greedy mode
+│   │   ├── decoding/device.h        # Autonomous prepared sequence and metadata journal
+│   │   ├── injection/device.h       # GPU NLA normalization/status contract
 │   │   └── cache/
 │   │       ├── cache.h              # Logical KV access, identity and capacity contract
 │   │       └── contiguous.{h,cpp}   # Initial preallocated contiguous strategy
@@ -99,6 +105,9 @@ dolittle/
 │   │       ├── operations.cpp        # Prepared CUDA bindings and dispatch
 │   │       ├── launch.h              # Private validated kernel-launch boundary
 │   │       ├── common.cuh            # Private conversion/reduction helpers
+│   │       ├── decode.cu            # Conditional sequence graph and D2D hook copies
+│   │       ├── injection.cu         # FP32 L2, scale, cast and GPU validation
+│   │       ├── sampling.cu          # Device RNG, filtering and selection
 │   │       ├── projection.cu
 │   │       ├── normalization.cu
 │   │       ├── rotary.cu
@@ -264,11 +273,24 @@ Generation owns stopping and consumed-token alignment; the sampler owns token
 selection. Target and AV have independent sampling state. A new AV seed never
 advances the target RNG stream, and AR execution has no sampler.
 
-Host sampling remains a proposed first baseline, not a measured decision.
-Transferring 151936 logits costs 303872 bytes in BF16 or 607744 in FP32 per
-generated token, plus completion overhead. Account for it before choosing the
-initial execution path. GPU acceleration may add backend operations without
-changing the selected sampling semantics. No runtime plugin system is required.
+The live path uses the prepared `device.h` selector, implemented by
+`kernels/cuda/sampling.cu`; `categorical.*` remains the host reference and
+explicit diagnostic path. Only an 8-byte token/status pair returns from device
+selection. Stable ordering, filtering and draw mapping share one contract;
+FP64 device prefix grouping can round differently from the CPU serial fold.
+Generation owns RNG commit after valid completion. Backend selection is explicit
+at composition, with no runtime plugin system.
+
+Device-controlled decoding has a separate scheduling boundary:
+`inference/decoding/device.h` declares the prepared sequence boundary: one
+request owns prefill, first selection, decode and immutable metadata events.
+`kernels/cuda/decode.cu` implements CUDA conditional bodies, GPU progress and D2D
+hook copies. `inference/injection/device.h` declares normalization/status storage;
+`kernels/cuda/injection.cu` performs FP32 L2, scale, cast and validation on GPU.
+Both contracts are backend-independent; native graph/kernel mechanisms stay in
+`kernels/cuda/`. Future Metal implementations must preserve autonomous progress
+and device residency rather than silently choosing host token scheduling.
+
 
 ## Axis ownership
 
@@ -285,7 +307,7 @@ files. Qwen3 checkpoint naming and Qwen3 mathematics are an example.
 | M5 Text protocol | `src/text/protocol.h` | `src/text/qwen3_chat.*` |
 | M6 Transformer mathematics | `src/models/model.h`, `src/models/observation.h` | `src/models/qwen3/model.*` |
 | M7 NLA conversion | `src/nla/protocol.h` | `src/nla/pairs/qwen3_8b.*` |
-| R1 Sampling | `src/inference/sampling/sampler.h` | `src/inference/sampling/categorical.*` |
+| R1 Sampling | `src/inference/sampling/sampler.h` | `src/inference/sampling/categorical.*`, `device.h`; `src/kernels/cuda/sampling.cu` |
 | R2 Sequence progression | `src/inference/generation.*` | One sequence loop using selected contracts |
 | R3 Experiment scheduling | `src/experiment/run.*`, `session.*` | One-run residency; session adds bounded worker/commands |
 | R4 Observation records | `src/experiment/record.*` | Owned observations and variants |
@@ -300,7 +322,7 @@ files. Qwen3 checkpoint naming and Qwen3 mathematics are an example.
 | A3 Presentation | `app/view.js` | `app/index.html`, `app/app.css` |
 | D1 Build environment | `CMakeLists.txt` | `Dockerfile`, explicit backend build targets |
 | D2 Launch orchestration | `scripts/run.py`, `src/main.cpp` | `compose.yaml`, concrete composition at startup |
-| D3 Numerical verification | `scripts/check.py`, `tests/` | Independent fixtures and existing reference tooling |
+| D3 Verification | `scripts/check.py`, `tests/`, `src/diagnostics/allocation.*` | Independent fixtures and checked generation allocation contract |
 | D4 Measurement | `src/measurement.*` | Phase/operation timing and cost reports |
 
 `operations.h` initially declares a bounded catalog of operations. Their
@@ -485,23 +507,22 @@ the existing model/kernel file openings. The no-cache implementation remains
 the comparison baseline. The executor must receive explicit cache producers
 from the model; it must not infer them from tensor names or operation order.
 
-The baseline uses preallocated contiguous cache capacity and host
-sampling. Prefill is chunked; decode consumes one new token. Rotated K and
-unrotated V are appended once per block. Absolute positions continue across
-chunks, and attention reads only the valid causal prefix. One shared prefix
-length commits after the entire call succeeds.
+Cached execution uses preallocated contiguous K/V capacity. Live generation
+runs the prepared GPU sequence described above; explicit reference replay uses
+host-supplied chunks and optional logit readback. Rotated K and unrotated V
+write once per block at the absolute device position. Attention reads only the
+initialized causal prefix. Readiness commits after all copies for that range.
 
-Captures join each chunk's logit readback at its existing completion boundary.
-Completed host chunks survive a later device failure. This costs capture bytes
-per step but adds no per-block host wait. A final emitted token is consumed
-even when no further token will be sampled. Stop IDs remain in provenance.
+Live captures remain in a separate device arena; completion metadata identifies
+the valid prefix. CUDA execution failure makes device captures unavailable.
+Graceful cancellation still consumes every selected token, including EOS.
 
-For the selected BF16 model, KV capacity costs 144 KiB per position; one
-captured site costs 8 KiB per retained host position. At 4096 positions these
-are 576 MiB and 32 MiB respectively. Weights, bounded chunk scratch, aligned
-arenas, transfer staging, per-call copies and metadata are additional costs.
-Each host sampling draw requires a 303872-byte BF16 vocabulary row and queue
-completion. These are derived costs, not measured generation performance.
+For the selected BF16 model, KV capacity costs 144 KiB per position and one
+captured site costs 8 KiB per retained device position: 576 MiB and 32 MiB at
+4096 positions. Weights, chunk scratch, graph/runtime overhead and metadata are
+additional. Live publication contains small token/range/status records, never
+activation payloads. Host reference sampling explicitly downloads a vocabulary
+row; diagnostic exports are outside live target-to-AV inference.
 
 The tokenizer design uses the existing pinned tokenizer artifacts, including
 NFC normalization, exact Unicode splitting, ranked byte merges and added-token
@@ -540,8 +561,8 @@ in the existing owner families below.
 
 These remain the accepted axes and folders. Resident weights belong to execution
 planning, rather than a new model-family or cache-strategy directory. Embedding
-replacement uses the existing ordered queue upload capability; no NLA-specific
-CUDA kernel or duplicate transformer is needed. The selected AV uses the same
+replacement uses a device normalization kernel and an ordered D2D embedding
+copy inside the prepared graph. It reuses the same transformer recipe. The selected AV uses the same
 verified Qwen3 config and chat template, so its pair composes the existing
 tokenizer/text implementations with its own actor prompt and source identity.
 The generic interfaces remain capable of other pairs and observation sites.
@@ -549,8 +570,8 @@ The generic interfaces remain capable of other pairs and observation sites.
 Each interpretation starts a new contiguous KV cache while the AV weights stay
 resident. Cache pooling remains deferred. Target tokens and raw captures live in
 the record across both phases; interpretation never regenerates the target.
-Reconstruction, server and browser work remain subsequent slices. No placeholder
-AR/backend/application files are added for this slice.
+Reconstruction and additional backends remain future work. The server and
+browser use these same retained records and execution contracts.
 
 Implementation acceptance replaces the tiny and pinned-8B generation
 integration scenarios with their corresponding **target → retained capture → AV**

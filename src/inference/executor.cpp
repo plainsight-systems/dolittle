@@ -1,91 +1,87 @@
 /*
- * Prepared full and cached execution with owned arenas and result metadata.
- * Axis X1: orchestrate full passes and serial incremental token consumption.
- * Contract: implement executor.h's borrowed checkpoint/device lifetime, serial
- * reuse, host-ready owned result and failure cleanup. Sampling, tokenization
- * and NLA execution are separate responsibilities. Validate all token IDs
- * before enqueuing their upload. Algorithm: transformer overlay, "Preparing the
- * first execution recipe", "Configurable observation points" and "Storage
- * lifetimes":
- * 1. Resolve selections; obtain and validate the model recipe; prepare kernels
- *    and workspace/operand requirements without allocating tensor storage.
- * 2. Insert requested row copies into the ordered schedule. Extend source last
- *    uses through these copies; place scratch and admit all weight, retained
- *    output, workspace, alignment and staging bytes before allocation/upload.
- * 3. Own one queue and admitted arenas. Upload weights through bounded staging,
- *    waiting before staging reuse during setup. No full-weight pinned
- * duplicate.
- * 4. Per call, copy token provenance, upload IDs, execute prepared operations
- * and capture copies, enqueue final readbacks and wait for completion. Copy
- *    completed staging into result-owned bytes with stable metadata/views.
- * 5. On failure drain submitted work before releasing its resources; publish no
- *    successful partial result. Poisoned devices invalidate plans.
- * Cached algorithm: inputs are B new IDs, committed prefix length S, prepared
- * model/cache bindings and selected semantic sites. Output is an owned chunk.
- * 1. Admit C positions and Bmax scratch once. Obtain K/V producer IDs and the
- *    logit-tail boundary from IncrementalRecipe; do not infer model names.
- * 2. Upload active IDs only; execute the bounded recipe with runtime rows B
- *    and RoPE base S. Before each attention step, copy its newly rotated K and
- *    projected V to the owned per-block cache at [S,S+B).
- * 3. Attention reads keys j<=S+i for local query i. Copy each selected residual
- *    after its producer and before its scratch storage can be reused.
- * 4. When logits are requested, gather local row B-1 and run final norm and
- *    vocabulary projection. Otherwise skip that tail; all blocks still run.
- * 5. Enqueue the logit/capture downloads and wait once. Materialize owned host
- *    bytes, then commit history and S+B. A submitted failure invalidates the
- *    entire cache; earlier returned chunks remain owned and readable.
- * Optimization: one weight/cache/scratch allocation per turn, one prepared
- * schedule for both chunked prefill and B=1 decode. Per-call host results and
- * one final wait remain explicit costs. Cache lifecycle limitations are in
- * cache/contiguous.h; no pooling or cross-turn prefix reuse is implemented.
- * Design and cost: model/placement setup is amortized. Per-call host
- * allocations, input upload and final readback remain explicit. Optimization:
- * no per-layer host wait or tensor allocation, no all-position vocabulary
- * projection when unneeded. Build views only after owner storage is stable.
- * Result destruction needs no GPU. Pure validators/placement are unit-tested
- * independently. Actual forward/device execution and teardown validation belong
- * to the limited integration scenarios. Overlay:
- * docs/architecture/transformer-execution.md. Corpus consultation,
- * implementation, 2026-10-18: cpp-guidelines R.1 (#rr-raii): resource ownership
- * survives exceptions and teardown. cpp-guidelines I.7 (#ri-post): readiness
- * and failure cleanup precede publication. cpp-perf-guidelines GPU.7:
- * completion tracks resource dependencies, not global waits. Source:
- * guidelines/gpu/GPU.7-pipeline-cpu-and-gpu-work.md. cpp-perf-guidelines GPU.9:
- * prepare storage once and preserve last-use lifetimes. Source:
- * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
+ * Axis X1: prepare model recipes, bind storage and execute full or cached
+ passes.
+ * Contract: verified BoundCheckpoint and Device outlive borrowed plans. A
+ * ResidentModel owns a checkpoint, uploaded weights and ordered queue; at most
+ * one cached plan leases it. Destroy the plan before its resident model and
+ * retain Device until all exported capture leases die. Failed plans are
+ poisoned
+ * and drained; they cannot resume. Allocation, shape/provenance/budget checks
+ * happen before live launch. Model-provided observation sites determine hooks.
  *
- * Static-analysis design/implementation, 2026-10-19:
- * Checked resource access rejects missing prepared optionals before use; span
- * indexing uses bounds.h. Destruction drains without throwing; execution
- * failures poison the plan before unwinding. These checks add no GPU work or
- * copies. cpp-guidelines SL.con.3 (#rsl-bounds), I.30 (#ri-encapsulate): make
- * checked host access explicit and confine necessary native API operations.
- * cpp-perf-guidelines COPY.7: borrow spans/references without hidden payload
- * copies. Source: guidelines/copy-move/COPY.7-eliminate-hidden-copies.md.
+ * Algorithm: transformer-execution.md full model/block flow and
+ * execution-boundary.md sections 3-6.
+ * 1. Validate the recipe and each operand. Assign immutable weights, contiguous
+ *    per-layer K/V, persistent outputs and transient scratch. Extend source
+ *    lifetimes through capture copies. Bind independent attention-scale slots;
+ *    initialize 1/sqrt(head_width) on device before their first reader.
+ * 2. For live generation, admit P prompt and G continuation positions, upload
+ *    all prompt IDs and allocate independent retained device capture storage.
+ *    Build fixed full-chunk, remainder, first-selection and decode graph
+ bodies.
+ *    Device position selects IDs, RoPE position, KV write/read windows and the
+ *    destination row for every requested hook.
+ * 3. Each body embeds IDs and runs the model's ordered block recipe: RMSNorm,
+ *    Q/K/V projections, Q/K head norms, RoPE, causal grouped-query attention,
+ *    output projection/residual, post-attention norm, gated SiLU MLP/residual.
+ *    Capture raw advertised values after their producer and before scratch
+ *    reuse. The head gathers the last row, normalizes and projects vocabulary
+ *    logits; device sampling feeds the next embedding without readback.
+ * 4. An AV override leases a completed source row and declares type/scale.
+ *    DeviceInjection validates and normalizes it inside the root graph. Status
+ *    gates all inference bodies. Copy its output over the marker embedding
+ *    after lookup and before block 0, only in the containing prompt chunk.
+ * 5. Start once; collection updates host metadata from immutable events. The
+ *    GPU owns all progress decisions. finish drains and seals the plan. Capture
+ *    leases outlive transient storage and target-to-AV weight replacement.
  *
- * Resident execution: upload weights once into aligned parameter-ID slots and
- * retain one ordered queue. A sequence leases that state and owns fresh KV,
- * scratch and staging; shared internal ownership guards pending resource
- * lifetime while the public owner/sequence destruction order remains explicit.
- * Reject a second live sequence. Preparation failure releases the lease;
- * execution failure poisons it and the resident state. The legacy overload
- * still owns private weights. Each supplied replacement is validated against
- * the explicit embedding boundary. After lookup, upload D*b bytes from separate
- * stable host staging to row p-S exactly when S <= p < S+B, before block-0
- * reads or observation copies. Commit replacement only with chunk completion.
- * Full-forward maps the recipe producer to its expanded schedule index, so
- * inserted observation gathers cannot move the injection after a consumer.
- * Token-upload and replacement staging never overlap. Weights use 256-byte
- * parameter offsets; kernel alignment is checked against those offsets. No
- * per-token weight upload or extra per-block wait is introduced. Corpus
- * consultation, implementation (both servers queried, full rules read),
- * 2026-10-19: cpp-guidelines R.1 (#rr-raii) ties resources to their owning
- * phase; I.7 (#ri-post) makes completion, provenance and failure effects
- * explicit. cpp-perf-guidelines GPU.1 keeps intermediate embeddings on device
- * and budgets required transfers; source
- * guidelines/gpu/GPU.1-keep-data-on-device.md. cpp-perf-guidelines GPU.9
- * separates persistent weights from sequence storage; source
- * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
+ * FullForwardPlan is an explicit diagnostic path: execute an exact fixed token
+ * trace with optional host injection, capture selected rows and batch readbacks
+ * at one completion point. Cached consume/consume_view similarly replay known
+ * IDs for oracle comparison; borrowed views expire at the next consume. These
+ * APIs reject use after live preparation. Host injection cannot enter a live
+ * sequence; device injection cannot silently enter a host diagnostic pass.
+ * Tensor storage/rounding is model-selected BF16/FP32 with FP32 accumulation;
+ * this executor does not alter arithmetic to match a reference.
+ *
+ * Resident upload algorithm (checkpoint loading and binding): pack parameter
+ * bytes into aligned device offsets, then split the admitted host staging
+ * allowance into two disjoint slots. For each parameter chunk, wait for that
+ * slot's previous upload, copy source bytes into it, enqueue the H2D copy,
+ * record its completion point, and advance to the other slot. CPU staging can
+ * overlap the previous slot's DMA on the same ordered queue. Drain the final
+ * uploads before returning the resident model. Staging and weights remain
+ * owned until completion, including exception cleanup through their RAII
+ * handles. No tensor conversion or arithmetic occurs in this byte pipeline.
+ * Cost: total staging <= min(weight arena bytes, host allowance, 2 MiB),
+ * two completion slots, one CPU copy and one H2D copy per parameter byte.
+ * A one-byte allowance uses one slot; odd allowances leave at most one byte
+ * unused. Optimization: wait on slot reuse, not immediately after submission;
+ * allocate staging and completion resources once before the upload loop.
+ * Upload design/implementation consultation, 2026-10-20 (both phases queried
+ * both servers and retrieved the rules): cpp-guidelines R.1 (#rr-raii)
+ * retains in-flight resources on failure; I.7 (#ri-post) makes ready weights
+ * a return postcondition. cpp-perf-guidelines GPU.7 requires multi-buffered
+ * upload storage, per-resource completion and measured overlap. Source:
+ * guidelines/gpu/GPU.7-pipeline-cpu-and-gpu-work.md.
+ *
+ * Design/cost: one prepared graph O(recipe size), not O(sequence length).
+ * Weights O(parameter bytes); KV O(layers*capacity*kv_heads*head_width*2*b);
+ * capture payload O((P+G)*sum(row_bytes)); scratch O(chunk*model widths).
+ * The immutable journal is O(P+G) small metadata. Separate budgets cover host
+ * staging/diagnostic buffers and device state, constants, sampler and captures.
+ * Optimization: direct device-positioned KV writes avoid append copies;
+ * graph execution and GPU NLA conversion allocate nothing or read tensors back.
+ * CPU-only oracle replay is explicit and never chosen as a live fallback.
+ *
+ * Corpus consultation, header design and implementation, 2026-10-20: both local
+ * servers queried separately in each phase and the cited rules read in full.
+ * cpp-guidelines I.1 (#ri-explicit), R.1 (#rr-raii): explicit residency,
+ * completion, ownership and failure contracts. cpp-perf-guidelines GPU.1,
+ * GPU.6, GPU.7, GPU.9: keep tensor intermediates/decisions on device, batch
+ * dispatch, decouple observation and separate persistent from transient arenas.
+ * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * Related GPU.6/7/9 entries describe dispatch, staging and storage.
  */
 #include "inference/executor.h"
 
@@ -103,6 +99,8 @@
 #include "bounds.h"
 #include "gpu/device.h"
 #include "inference/cache/contiguous.h"
+#include "inference/decoding/device.h"
+#include "inference/injection/device.h"
 #include "inference/storage_plan.h"
 #include "models/checkpoint.h"
 #include "tensors/representations/bf16.h"
@@ -145,6 +143,7 @@ struct Slot {
 struct Step {
   kernels::PreparedOperation operation;
   std::vector<kernels::BufferBinding> bindings;
+  std::size_t workspace_offset = 0;
 };
 void validate_injection(const models::ForwardRecipe&, const EmbeddingOverride&,
                         std::size_t, tensors::ComputationMode);
@@ -227,8 +226,8 @@ struct FullForwardPlan::Impl {
       try {
         present(queue).drain();
       } catch (...) {  // NOLINT(bugprone-empty-catch)
-        // Preserve the active exception; buffer owners perform a final no-throw
-        // drain.
+        // Preserve the active exception; buffer owners perform a final
+        // no-throw drain.
       }
     }
   }
@@ -379,7 +378,8 @@ FullForwardPlan prepare_full_forward(gpu::Device& device,
       first.at(use.tensor.value) = std::min(first.at(use.tensor.value), s);
       last.at(use.tensor.value) = s;
     }
-    workspace_bytes = std::max(workspace_bytes, op.workspace().bytes);
+    plan->steps.at(s).workspace_offset = workspace_bytes;
+    workspace_bytes = add(workspace_bytes, op.workspace().bytes);
     workspace_alignment =
         std::max(workspace_alignment, op.workspace().alignment);
   }
@@ -482,6 +482,13 @@ FullForwardPlan prepare_full_forward(gpu::Device& device,
   if (workspace_bytes) {
     plan->workspace.emplace(
         device.allocate({workspace_bytes, workspace_alignment}));
+    for (const auto& step : plan->steps) {
+      if (step.operation.workspace().bytes) {
+        step.operation.initialize(present(plan->queue),
+                                  {&*plan->workspace, step.workspace_offset,
+                                   step.operation.workspace().bytes});
+      }
+    }
   }
   // Bounded weight staging is reused serially during setup; token staging may
   // require more bytes for an explicitly admitted long sequence.
@@ -555,6 +562,10 @@ ForwardResult FullForwardPlan::execute_impl(
       throw std::invalid_argument("token outside vocabulary");
     }
   }
+  if (injection && injection->device) {
+    throw std::invalid_argument(
+        "diagnostic full forward requires an exported host injection");
+  }
   if (injection) {
     validate_injection(plan.recipe, *injection, plan.length.value, plan.mode);
   }
@@ -594,9 +605,9 @@ ForwardResult FullForwardPlan::execute_impl(
          ++step_index) {
       const auto& step = plan.steps.at(step_index);
       const auto bytes = step.operation.workspace().bytes;
-      step.operation.submit(
-          present(plan.queue), step.bindings,
-          {bytes ? &present(plan.workspace) : nullptr, 0, bytes});
+      step.operation.submit(present(plan.queue), step.bindings,
+                            {bytes ? &present(plan.workspace) : nullptr,
+                             step.workspace_offset, bytes});
       if (injection && plan.injection_step &&
           step_index == *plan.injection_step) {
         const auto& slot =
@@ -682,8 +693,9 @@ void validate_injection(const models::ForwardRecipe& recipe,
                         tensors::ComputationMode mode) {
   if (!recipe.embedding_boundary || row.position.value >= capacity ||
       !row.width || row.storage_type != mode.activation_storage ||
-      row.bytes.size() !=
-          multiply(row.width, tensors::element_bytes(row.storage_type))) {
+      (!row.device &&
+       row.bytes.size() !=
+           multiply(row.width, tensors::element_bytes(row.storage_type)))) {
     throw std::invalid_argument("invalid embedding replacement");
   }
   const auto& layout =
@@ -691,6 +703,17 @@ void validate_injection(const models::ForwardRecipe& recipe,
   if (layout.shape.size() != 2 || layout.shape.at(1) != row.width) {
     throw std::invalid_argument(
         "replacement width differs from embedding boundary");
+  }
+  if (row.device) {
+    const auto& input = *row.device;
+    if (!row.bytes.empty() || !input.source.owner ||
+        input.source.bytes !=
+            multiply(row.width, tensors::element_bytes(input.source_type)) ||
+        !std::isfinite(input.scale) || input.scale <= 0) {
+      throw std::invalid_argument("invalid device injection descriptor");
+    }
+    return;  // Values are validated on-device; no CPU dereference is
+             // possible.
   }
   for (std::size_t i = 0; i < row.width; ++i) {
     float value{};
@@ -748,25 +771,38 @@ std::unique_ptr<ResidentModel> load_resident_model(
   }
   const auto staging_bytes =
       std::min({state->bytes, options.max_host_staging_bytes,
-                std::size_t{16} * 1024 * 1024});
+                std::size_t{2} * 1024 * 1024});
+  constexpr std::size_t max_slots = 2;
+  const std::size_t slot_count = staging_bytes >= max_slots ? max_slots : 1;
+  const auto slot_bytes = staging_bytes / slot_count;
+  std::array<std::optional<gpu::CompletionPoint>, max_slots> completions{};
+  std::size_t slot = 0;
   state->queue.emplace(device.create_queue());
+  auto& queue = present(state->queue);
+  queue.reserve_completion_points(slot_count);
   state->weights.emplace(device.allocate({state->bytes, resident_alignment}));
   auto staging = device.allocate_staging({staging_bytes, 4});
   for (std::size_t i = 0; i < parameters.size(); ++i) {
     const auto view = state->checkpoint->parameter({i});
     tensors::validate_view(view);
     for (std::size_t offset = 0; offset < view.bytes.size();) {
-      const auto bytes = std::min(staging_bytes, view.bytes.size() - offset);
-      std::memcpy(staging.bytes().data(), view.bytes.subspan(offset).data(),
-                  bytes);
-      present(state->queue)
-          .upload(
-              {&present(state->weights), state->offsets.at(i) + offset, bytes},
-              {&staging, 0, bytes});
-      present(state->queue).wait(present(state->queue).mark());
+      auto& completion = completions.at(slot);
+      if (completion) {
+        queue.wait(*completion);
+      }
+      const auto bytes = std::min(slot_bytes, view.bytes.size() - offset);
+      const auto staging_offset = slot * slot_bytes;
+      std::memcpy(staging.bytes().subspan(staging_offset, bytes).data(),
+                  view.bytes.subspan(offset, bytes).data(), bytes);
+      queue.upload(
+          {&present(state->weights), state->offsets.at(i) + offset, bytes},
+          {&staging, staging_offset, bytes});
+      completion = queue.mark();
+      slot = (slot + 1) % slot_count;
       offset += bytes;
     }
   }
+  queue.drain();
   auto impl = std::make_unique<ResidentModel::Impl>();
   impl->state = std::move(state);
   return std::unique_ptr<ResidentModel>(new ResidentModel(std::move(impl)));
@@ -776,6 +812,7 @@ struct CachedForwardPlan::Impl {
     models::ObservationSite site;
     kernels::TensorId source;
     std::size_t offset, row_bytes;
+    std::size_t decode_offset = 0;
   };
   std::shared_ptr<ResidentState> resident;
   std::optional<EmbeddingOverride> injection;
@@ -790,15 +827,30 @@ struct CachedForwardPlan::Impl {
   std::vector<Slot> slots;
   std::vector<Step> steps;
   std::vector<Capture> captures;
+  gpu::Device* device{};
+  std::unique_ptr<sampling::DeviceCategorical> sampler;
+  std::optional<gpu::HostBuffer> selection_readback;
+  std::unique_ptr<DeviceSequence> decode;
+  std::unique_ptr<DeviceInjection> device_injection;
+  std::optional<gpu::DeviceBuffer> prompt_ids;
+  std::optional<gpu::HostBuffer> prompt_staging;
+  std::shared_ptr<gpu::DeviceBuffer> retained_capture_storage;
+  std::vector<DeviceCapture> retained_captures;
+  std::size_t collected = 0;
+  bool device_generation = false, decode_started = false;
+  std::vector<models::TokenPosition> positions;
+  std::vector<CapturedRows> views;
   std::vector<models::ObservationSite> sites;
   std::vector<std::vector<std::size_t>> copies_after;
   std::vector<std::optional<std::size_t>> cache_at;
+  std::vector<std::optional<gpu::DeviceRegion>> cache_destinations;
+  std::vector<std::vector<std::size_t>> cache_binding_indices;
   std::vector<std::uint32_t> history;
   std::size_t committed = 0, peak = 0, host_bytes = 0, output_bytes = 0,
               logit_bytes = 0;
   bool failed = false, finished = false;
   std::optional<gpu::Queue> queue;
-  std::optional<gpu::DeviceBuffer> weights, scratch, output;
+  std::optional<gpu::DeviceBuffer> weights, scratch, output, constants;
   std::optional<gpu::HostBuffer> upload, readback;
   std::unique_ptr<cache::Contiguous> cache;
   Impl(const models::BoundCheckpoint& c, CachedForwardOptions o,
@@ -809,15 +861,20 @@ struct CachedForwardPlan::Impl {
   Impl(Impl&&) = delete;
   Impl& operator=(Impl&&) = delete;
   ~Impl() {
+    if (decode) {
+      decode->request_stop();
+    }
     if (queue || resident) {
       try {
         work_queue().drain();
-
       } catch (...) {  // NOLINT(bugprone-empty-catch)
-        // Preserve the active exception; buffer owners perform a final no-throw
-        // drain.
+        // Preserve the active exception; buffer owners perform a final
+        // no-throw drain.
       }
     }
+    // Release graph borrowers while their queue and bound arenas still exist.
+    decode.reset();
+    device_injection.reset();
     if (resident) {
       resident->leased = false;
     }
@@ -834,8 +891,125 @@ struct CachedForwardPlan::Impl {
     throw std::logic_error("unknown cached arena");
   }
   gpu::ConstDeviceRegion source(kernels::TensorId id, std::size_t bytes) {
+    const auto& cached = cache_destinations.at(id.value);
+    if (cached) {
+      return {cached->owner, cached->offset, bytes};
+    }
     const auto& slot = slots.at(id.value);
     return {buffer(slot.arena), slot.offset, bytes};
+  }
+  void submit_chunk(std::span<const std::uint32_t> ids,
+                    std::size_t first_position, bool need_logits,
+                    std::optional<sampling::DeviceDraw> draw,
+                    gpu::HostBuffer& readback, gpu::HostBuffer* selection) {
+    auto& p = *this;
+    const kernels::ExecutionExtent extent{first_position, ids.size()};
+    const bool direct_cache =
+        p.options.max_prefill_chunk <= p.options.capacity - first_position;
+    for (const auto& append : p.recipe.cache_appends) {
+      if (direct_cache) {
+        const auto window = p.cache->writable_window(
+            p.work_queue(), append.block.value, first_position,
+            p.options.max_prefill_chunk);
+        p.cache_destinations.at(append.rotated_key.value) = window.keys;
+        p.cache_destinations.at(append.value.value) = window.values;
+      } else {
+        p.cache_destinations.at(append.rotated_key.value).reset();
+        p.cache_destinations.at(append.value.value).reset();
+      }
+    }
+    const auto& tokens = p.slots.at(p.recipe.forward.token_input.value);
+    const auto bytes = ids.size_bytes();
+    std::memcpy(present(p.upload).bytes().data(), ids.data(), bytes);
+    p.work_queue().upload({&present(p.scratch), tokens.offset, bytes},
+                          {&present(p.upload), 0, bytes});
+    for (std::size_t i = 0; i < p.steps.size(); ++i) {
+      if (!need_logits && i == p.recipe.logits_begin) {
+        break;
+      }
+      std::optional<cache::ContiguousLayerView> view;
+      if (p.cache_at.at(i)) {
+        const auto block = present(p.cache_at.at(i));
+        const auto& append = p.recipe.cache_appends.at(block);
+        view = p.cache->layer(block);
+        const auto bytes_per_row =
+            multiply(multiply(view->shape.kv_heads, view->shape.head_width),
+                     tensors::element_bytes(
+                         p.options.numerical_mode.activation_storage));
+        if (!direct_cache) {
+          p.cache->append(
+              p.work_queue(), block, first_position, ids.size(),
+              p.source(append.rotated_key, multiply(ids.size(), bytes_per_row)),
+              p.source(append.value, multiply(ids.size(), bytes_per_row)));
+        }
+      }
+      auto& step = p.steps.at(i);
+      for (auto index : p.cache_binding_indices.at(i)) {
+        auto& binding = step.bindings.at(index);
+        const auto& destination = p.cache_destinations.at(binding.tensor.value);
+        const auto& slot = p.slots.at(binding.tensor.value);
+        auto* buffer = destination ? destination->owner : p.buffer(slot.arena);
+        if (std::holds_alternative<gpu::DeviceBuffer*>(binding.storage)) {
+          binding.storage = buffer;
+        } else {
+          binding.storage = static_cast<const gpu::DeviceBuffer*>(buffer);
+        }
+        binding.offset = destination ? destination->offset : slot.offset;
+      }
+      step.operation.submit(
+          p.work_queue(), step.bindings,
+          {step.operation.workspace().bytes ? &*p.constants : nullptr,
+           step.workspace_offset, step.operation.workspace().bytes},
+          i <= p.recipe.logits_begin ? &extent : nullptr,
+          view ? &*view : nullptr);
+      if (p.injection && !p.injected &&
+          i == present(p.recipe.forward.embedding_boundary).producer_step &&
+          p.injection->position.value >= first_position &&
+          p.injection->position.value < first_position + ids.size()) {
+        const auto& slot = p.slots.at(
+            present(p.recipe.forward.embedding_boundary).tensor.value);
+        const auto row_bytes = p.injection->bytes.size();
+        const auto offset =
+            slot.offset +
+            (p.injection->position.value - first_position) * row_bytes;
+        p.work_queue().upload({p.buffer(slot.arena), offset, row_bytes},
+                              {&present(p.injection_staging), 0, row_bytes});
+      }
+      for (auto c : p.copies_after.at(i)) {
+        const auto& capture = p.captures.at(c);
+        const auto bytes = multiply(ids.size(), capture.row_bytes);
+        p.work_queue().copy({&present(p.output), capture.offset, bytes},
+                            p.source(capture.source, bytes));
+      }
+    }
+    if (draw) {
+      const gpu::ConstDeviceRegion logits{&present(p.output), 0, p.logit_bytes};
+      const auto selected = draw ? p.sampler->submit(logits, *draw)
+                                 : p.sampler->submit_next(logits);
+      p.work_queue().download({selection, 0, selected.bytes}, selected);
+    } else if (need_logits) {
+      p.work_queue().download({&readback, 0, p.logit_bytes},
+                              {&present(p.output), 0, p.logit_bytes});
+    }
+    for (const auto& capture : p.captures) {
+      const auto bytes = multiply(ids.size(), capture.row_bytes);
+      p.work_queue().download({&readback, capture.offset, bytes},
+                              {&present(p.output), capture.offset, bytes});
+    }
+  }
+  void poison() noexcept {
+    if (decode) {
+      decode->request_stop();
+    }
+    failed = true;
+    if (resident) {
+      resident->failed = true;
+    }
+    try {
+      work_queue().drain();
+    } catch (...) {  // NOLINT(bugprone-empty-catch)
+      // Preserve the original error; destruction attempts final cleanup.
+    }
   }
 };
 CachedForwardPlan::CachedForwardPlan(std::unique_ptr<Impl> p)
@@ -881,11 +1055,20 @@ CachedForwardPlan::embedding_override_position() const noexcept {
                           : std::nullopt;
 }
 void CachedForwardPlan::finish() {
-  if (impl_->injection && !impl_->injected) {
+  if (impl_->injection && !impl_->injected && !impl_->device_generation) {
     throw std::logic_error("replacement not consumed");
   }
   if (impl_->failed) {
     throw std::runtime_error("failed cached execution plan");
+  }
+  if (impl_->decode_started) {
+    impl_->decode->request_stop();
+    try {
+      impl_->decode->drain();
+    } catch (...) {
+      impl_->poison();
+      throw;
+    }
   }
   impl_->finished = true;
 }
@@ -949,6 +1132,8 @@ CachedForwardPlan CachedForwardPlan::prepare_impl(
                             options.capacity,
                             {}};
   p->cache_at.resize(forward.operations.size());
+  p->cache_destinations.resize(forward.tensors.size());
+  p->cache_binding_indices.resize(forward.operations.size());
   for (const auto& append : p->recipe.cache_appends) {
     const auto& shape = forward.tensors.at(append.rotated_key.value).shape;
     spec.layers.push_back({shape.at(1), shape.at(2)});
@@ -973,10 +1158,6 @@ CachedForwardPlan CachedForwardPlan::prepare_impl(
     auto operation =
         kernels::prepare(device, forward.operations.at(i), forward.tensors,
                          options.numerical_mode, rows);
-    if (operation.workspace().bytes) {
-      throw std::invalid_argument(
-          "cached plan requires zero-workspace operation kind");
-    }
     for (const auto& use : operation.operands()) {
       auto& slot = p->slots.at(use.tensor.value);
       slot.alignment = std::max(slot.alignment, use.alignment);
@@ -1065,7 +1246,13 @@ CachedForwardPlan CachedForwardPlan::prepare_impl(
           {{i}, slot.bytes, slot.alignment, first.at(i), last.at(i)});
     }
   }
-  const auto fixed = add(add(weight_bytes, cache_bytes), p->output_bytes);
+  std::size_t constants_bytes = 0;
+  for (auto& step : p->steps) {
+    step.workspace_offset = constants_bytes;
+    constants_bytes = add(constants_bytes, step.operation.workspace().bytes);
+  }
+  const auto fixed = add(add(add(weight_bytes, cache_bytes), p->output_bytes),
+                         constants_bytes);
   if (fixed > options.max_device_bytes) {
     throw std::length_error("cached fixed arenas exceed device budget");
   }
@@ -1082,7 +1269,9 @@ CachedForwardPlan CachedForwardPlan::prepare_impl(
   host_bytes = add(host_bytes, observations.payload_bytes());
   host_bytes =
       add(host_bytes, multiply(options.capacity, 2 * sizeof(std::uint32_t)));
-  host_bytes = add(host_bytes, multiply(count, sizeof(std::uint32_t)));
+  host_bytes = add(host_bytes, multiply(count, sizeof(models::TokenPosition)));
+  host_bytes =
+      add(host_bytes, multiply(p->captures.size(), sizeof(CapturedRows)));
   host_bytes = add(host_bytes, multiply(multiply(count, p->captures.size()),
                                         sizeof(models::TokenPosition)));
   host_bytes =
@@ -1103,7 +1292,17 @@ CachedForwardPlan CachedForwardPlan::prepare_impl(
     p->queue.emplace(device.create_queue());
     p->weights.emplace(device.allocate({weight_bytes, 4}));
   }
-  if (p->injection) {
+  if (constants_bytes) {
+    p->constants.emplace(device.allocate({constants_bytes, alignof(float)}));
+    for (const auto& step : p->steps) {
+      if (step.operation.workspace().bytes) {
+        step.operation.initialize(p->work_queue(),
+                                  {&*p->constants, step.workspace_offset,
+                                   step.operation.workspace().bytes});
+      }
+    }
+  }
+  if (p->injection && !p->injection->device) {
     p->injection_staging.emplace(
         device.allocate_staging({p->injection->bytes.size(), 4}));
     std::memcpy(present(p->injection_staging).bytes().data(),
@@ -1145,12 +1344,34 @@ CachedForwardPlan CachedForwardPlan::prepare_impl(
       }
     }
   }
+  for (const auto& append : p->recipe.cache_appends) {
+    for (std::size_t i = 0; i < p->steps.size(); ++i) {
+      const auto& bindings = p->steps.at(i).bindings;
+      for (std::size_t b = 0; b < bindings.size(); ++b) {
+        const auto id = bindings.at(b).tensor.value;
+        if (id == append.rotated_key.value || id == append.value.value) {
+          p->cache_binding_indices.at(i).push_back(b);
+        }
+      }
+    }
+  }
+  p->device = &device;
+  p->positions.resize(p->options.max_prefill_chunk);
+  p->views.reserve(p->captures.size());
+  for (const auto& capture : p->captures) {
+    p->views.push_back({capture.site, {}, {}});
+  }
   return CachedForwardPlan(std::move(p));
 }
-ConsumedChunk CachedForwardPlan::consume(std::span<const std::uint32_t> ids,
-                                         bool need_logits) {
+ConsumedView CachedForwardPlan::consume_view(
+    std::span<const std::uint32_t> ids, bool need_logits,
+    std::optional<sampling::DeviceDraw> draw) {
   auto& p = *impl_;
-  if (p.failed || p.finished) {
+  if (p.injection && p.injection->device) {
+    throw std::invalid_argument(
+        "device injection requires autonomous execution");
+  }
+  if (p.failed || p.finished || p.device_generation) {
     throw std::runtime_error("cached plan is no longer usable");
   }
   if (ids.empty() || ids.size() > p.options.max_prefill_chunk ||
@@ -1162,98 +1383,46 @@ ConsumedChunk CachedForwardPlan::consume(std::span<const std::uint32_t> ids,
       throw std::invalid_argument("token outside vocabulary");
     }
   }
-  ConsumedChunk result;
+  if (draw && (!need_logits || !p.sampler)) {
+    throw std::invalid_argument("device selection not prepared or requested");
+  }
+  ConsumedView result{};
   result.first_position = {p.committed};
-  result.tokens.assign(ids.begin(), ids.end());
-  if (need_logits) {
+  result.tokens = ids;
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    p.positions.at(i) = {p.committed + i};
+  }
+  const auto positions = std::span(p.positions).first(ids.size());
+  for (std::size_t c = 0; c < p.captures.size(); ++c) {
+    const auto& capture = p.captures.at(c);
+    p.views.at(c) = {
+        capture.site, positions,
+        present(p.readback)
+            .bytes()
+            .subspan(capture.offset, multiply(ids.size(), capture.row_bytes))};
+  }
+  result.captures = p.views;
+  if (need_logits && !draw && !p.device_generation) {
     result.next_logits =
-        OwnedLogitRow{{p.committed + ids.size() - 1},
-                      vocabulary_size(),
-                      p.options.numerical_mode.activation_storage,
-                      std::vector<std::byte>(p.logit_bytes)};
+        LogitRows{positions.last(1), vocabulary_size(),
+                  p.options.numerical_mode.activation_storage,
+                  present(p.readback).bytes().first(p.logit_bytes)};
   }
-  result.captures.reserve(p.captures.size());
-  for (const auto& capture : p.captures) {
-    OwnedCapture out{
-        capture.site,
-        {},
-        std::vector<std::byte>(multiply(ids.size(), capture.row_bytes))};
-    out.positions.reserve(ids.size());
-    for (std::size_t i = 0; i < ids.size(); ++i) {
-      out.positions.push_back({p.committed + i});
-    }
-    result.captures.push_back(std::move(out));
-  }
-  const kernels::ExecutionExtent extent{p.committed, ids.size()};
   try {
-    const auto& tokens = p.slots.at(p.recipe.forward.token_input.value);
-    const auto bytes = ids.size_bytes();
-    std::memcpy(present(p.upload).bytes().data(), ids.data(), bytes);
-    p.work_queue().upload({&present(p.scratch), tokens.offset, bytes},
-                          {&present(p.upload), 0, bytes});
-    for (std::size_t i = 0; i < p.steps.size(); ++i) {
-      if (!need_logits && i == p.recipe.logits_begin) {
-        break;
-      }
-      std::optional<cache::ContiguousLayerView> view;
-      if (p.cache_at.at(i)) {
-        const auto block = present(p.cache_at.at(i));
-        const auto& append = p.recipe.cache_appends.at(block);
-        view = p.cache->layer(block);
-        const auto bytes_per_row =
-            multiply(multiply(view->shape.kv_heads, view->shape.head_width),
-                     tensors::element_bytes(
-                         p.options.numerical_mode.activation_storage));
-        p.cache->append(
-            p.work_queue(), block, p.committed, ids.size(),
-            p.source(append.rotated_key, multiply(ids.size(), bytes_per_row)),
-            p.source(append.value, multiply(ids.size(), bytes_per_row)));
-      }
-      auto& step = p.steps.at(i);
-      step.operation.submit(p.work_queue(), step.bindings, {},
-                            i <= p.recipe.logits_begin ? &extent : nullptr,
-                            view ? &*view : nullptr);
-      if (p.injection && !p.injected &&
-          i == p.recipe.forward.embedding_boundary->producer_step &&
-          p.injection->position.value >= p.committed &&
-          p.injection->position.value < p.committed + ids.size()) {
-        const auto& slot =
-            p.slots.at(p.recipe.forward.embedding_boundary->tensor.value);
-        const auto row_bytes = p.injection->bytes.size();
-        const auto offset =
-            slot.offset +
-            (p.injection->position.value - p.committed) * row_bytes;
-        p.work_queue().upload({p.buffer(slot.arena), offset, row_bytes},
-                              {&present(p.injection_staging), 0, row_bytes});
-      }
-      for (auto c : p.copies_after.at(i)) {
-        const auto& capture = p.captures.at(c);
-        const auto bytes = multiply(ids.size(), capture.row_bytes);
-        p.work_queue().copy({&present(p.output), capture.offset, bytes},
-                            p.source(capture.source, bytes));
-      }
-    }
-    if (need_logits) {
-      p.work_queue().download({&present(p.readback), 0, p.logit_bytes},
-                              {&present(p.output), 0, p.logit_bytes});
-    }
-    for (const auto& capture : p.captures) {
-      const auto bytes = multiply(ids.size(), capture.row_bytes);
-      p.work_queue().download({&present(p.readback), capture.offset, bytes},
-                              {&present(p.output), capture.offset, bytes});
-    }
+    p.submit_chunk(ids, p.committed, need_logits, draw, present(p.readback),
+                   p.selection_readback ? &*p.selection_readback : nullptr);
     p.work_queue().wait(p.work_queue().mark());
-    if (need_logits) {
-      std::memcpy(result.next_logits->bytes.data(),
-                  present(p.readback).bytes().data(), p.logit_bytes);
-    }
-    for (std::size_t c = 0; c < p.captures.size(); ++c) {
-      std::memcpy(
-          result.captures.at(c).bytes.data(),
-          present(p.readback).bytes().subspan(p.captures.at(c).offset).data(),
-          result.captures.at(c).bytes.size());
+    if (draw) {
+      std::array<std::uint32_t, 2> selected{};
+      std::memcpy(selected.data(), present(p.selection_readback).bytes().data(),
+                  sizeof(selected));
+      if (selected.at(1) || selected.at(0) >= vocabulary_size()) {
+        throw std::invalid_argument("invalid device sampling distribution");
+      }
+      result.selected_token = selected.at(0);
     }
     p.history.insert(p.history.end(), ids.begin(), ids.end());
+    result.tokens = std::span(p.history).subspan(p.committed, ids.size());
     p.committed += ids.size();
     if (p.injection && p.injection->position.value < p.committed) {
       p.injected = true;
@@ -1270,6 +1439,264 @@ ConsumedChunk CachedForwardPlan::consume(std::span<const std::uint32_t> ids,
       // drain.
     }
     throw;
+  }
+  return result;
+}
+
+void CachedForwardPlan::prepare_device_generation(
+    const DeviceGenerationRequest& request) {
+  const auto& [settings, seed, prompt, stop_ids, generated] = request;
+  auto& p = *impl_;
+  if (p.device_generation || p.committed || p.failed || p.finished ||
+      prompt.empty() || prompt.size() > p.options.capacity ||
+      generated > p.options.capacity - prompt.size()) {
+    throw std::logic_error("sequence must be prepared once before execution");
+  }
+  if (p.injection && !p.injection->device) {
+    throw std::invalid_argument(
+        "live injection requires a device normalization input");
+  }
+  prepare_sampling();
+  p.sampler->start(settings, seed, stop_ids);
+  const auto capacity = prompt.size() + generated;
+  const DeviceSequence::Shape shape{
+      prompt.size(), generated,
+      std::min(prompt.size(), p.options.max_prefill_chunk)};
+  std::size_t capture_bytes = 0;
+  for (auto& c : p.captures) {
+    c.decode_offset = capture_bytes;
+    capture_bytes = add(capture_bytes, multiply(capacity, c.row_bytes));
+  }
+  auto extra_device = add(
+      add(DeviceSequence::device_bytes(), prompt.size_bytes()), capture_bytes);
+  if (p.injection) {
+    extra_device =
+        add(extra_device, DeviceInjection::required_bytes(
+                              p.injection->width, p.injection->storage_type));
+  }
+  const auto extra_host =
+      add(DeviceSequence::host_bytes(shape), prompt.size_bytes());
+  if (extra_host > p.options.max_host_bytes - p.host_bytes ||
+      extra_device > p.options.max_device_bytes - p.peak) {
+    throw std::length_error("sequence resources exceed admitted budget");
+  }
+  p.prompt_ids.emplace(
+      p.device->allocate({prompt.size_bytes(), alignof(std::uint32_t)}));
+  p.prompt_staging.emplace(p.device->allocate_staging(
+      {prompt.size_bytes(), alignof(std::uint32_t)}));
+  std::memcpy(p.prompt_staging->bytes().data(), prompt.data(),
+              prompt.size_bytes());
+  p.work_queue().upload({&present(p.prompt_ids), 0, prompt.size_bytes()},
+                        {&present(p.prompt_staging), 0, prompt.size_bytes()});
+  if (capture_bytes) {
+    p.retained_capture_storage = std::make_shared<gpu::DeviceBuffer>(
+        p.device->allocate({capture_bytes, 4}));
+    p.retained_captures.reserve(p.captures.size());
+    for (const auto& c : p.captures) {
+      p.retained_captures.push_back({p.retained_capture_storage,
+                                     c.decode_offset,
+                                     multiply(capacity, c.row_bytes)});
+    }
+  }
+  if (p.injection) {
+    const auto& injection = present(p.injection);
+    const auto& input = present(injection.device);
+    p.device_injection = std::make_unique<DeviceInjection>(
+        *p.device, p.work_queue(), input.source.region(), input.source_type,
+        injection.storage_type, injection.width, input.scale);
+  }
+  p.decode = std::make_unique<DeviceSequence>(*p.device, p.work_queue(), shape);
+  const auto position = p.decode->position();
+  const auto& tokens = p.slots.at(p.recipe.forward.token_input.value);
+  try {
+    p.decode->begin(p.sampler->result_storage(), p.sampler->terminal_state(),
+                    {&present(p.scratch), tokens.offset, tokens.bytes},
+                    {&present(p.prompt_ids), 0, prompt.size_bytes()},
+                    p.device_injection ? p.device_injection->status()
+                                       : gpu::ConstDeviceRegion{},
+                    p.device_injection ? p.device_injection->norm()
+                                       : gpu::ConstDeviceRegion{});
+    if (p.device_injection) {
+      p.device_injection->submit();
+    }
+    for (const auto& append : p.recipe.cache_appends) {
+      const auto window = p.cache->writable_window(
+          p.work_queue(), append.block.value, 0, p.options.max_prefill_chunk);
+      p.cache_destinations.at(append.rotated_key.value) = window.keys;
+      p.cache_destinations.at(append.value.value) = window.values;
+    }
+    const auto submit = [&](std::size_t rows, std::size_t first,
+                            std::size_t end, bool captures,
+                            bool prompt_body = false) {
+      const kernels::ExecutionExtent extent{0, rows, &position,
+                                            p.options.capacity};
+      for (std::size_t i = first; i < end; ++i) {
+        std::optional<cache::ContiguousLayerView> view;
+        if (p.cache_at.at(i)) {
+          view = p.cache->layer(*p.cache_at.at(i));
+        }
+        auto& step = p.steps.at(i);
+        for (auto index : p.cache_binding_indices.at(i)) {
+          auto& binding = step.bindings.at(index);
+          const auto& destination =
+              p.cache_destinations.at(binding.tensor.value);
+          if (std::holds_alternative<gpu::DeviceBuffer*>(binding.storage)) {
+            binding.storage = destination->owner;
+            binding.positioned_output = true;
+          } else {
+            binding.storage =
+                static_cast<const gpu::DeviceBuffer*>(destination->owner);
+          }
+          binding.offset = destination->offset;
+        }
+        step.operation.submit(
+            p.work_queue(), step.bindings,
+            {step.operation.workspace().bytes ? &*p.constants : nullptr,
+             step.workspace_offset, step.operation.workspace().bytes},
+            i <= p.recipe.logits_begin ? &extent : nullptr,
+            view ? &*view : nullptr);
+        if (prompt_body && p.device_injection &&
+            i == present(p.recipe.forward.embedding_boundary).producer_step) {
+          const auto& slot = p.slots.at(
+              present(p.recipe.forward.embedding_boundary).tensor.value);
+          p.decode->replace(p.device_injection->output(),
+                            {p.buffer(slot.arena), slot.offset, slot.bytes},
+                            p.injection->position.value, rows);
+        }
+        if (captures) {
+          for (auto c : p.copies_after.at(i)) {
+            const auto& capture = p.captures.at(c);
+            if (p.cache_destinations.at(capture.source.value)) {
+              throw std::invalid_argument("capture aliases cache producer");
+            }
+            p.decode->capture(
+                p.source(capture.source, multiply(rows, capture.row_bytes)),
+                {p.retained_capture_storage.get(), capture.decode_offset,
+                 multiply(capacity, capture.row_bytes)},
+                capture.row_bytes, rows);
+          }
+        }
+      }
+    };
+    p.decode->begin_stage(DeviceSequence::Stage::prefill);
+    submit(shape.chunk, 0, p.recipe.logits_begin, true, true);
+    p.decode->end_stage();
+    p.decode->begin_stage(DeviceSequence::Stage::tail);
+    const auto remainder = prompt.size() % shape.chunk;
+    if (remainder) {
+      submit(remainder, 0, p.recipe.logits_begin, true, true);
+    }
+    p.decode->end_stage();
+    p.decode->begin_stage(DeviceSequence::Stage::first_selection);
+    submit(remainder ? remainder : shape.chunk, p.recipe.logits_begin,
+           p.steps.size(), false);
+    (void)p.sampler->submit_next({&present(p.output), 0, p.logit_bytes});
+    p.decode->end_stage();
+    p.decode->begin_stage(DeviceSequence::Stage::decode);
+    submit(1, 0, p.recipe.logits_begin, true);
+    p.decode->begin_selection();
+    submit(1, p.recipe.logits_begin, p.steps.size(), false);
+    (void)p.sampler->submit_next({&present(p.output), 0, p.logit_bytes});
+    p.decode->end_stage();
+    p.decode->complete();
+  } catch (...) {
+    p.decode.reset();
+    p.poison();
+    throw;
+  }
+  p.host_bytes = add(p.host_bytes, extra_host);
+  p.peak = add(p.peak, extra_device);
+  p.device_generation = true;
+}
+void CachedForwardPlan::request_stop() noexcept {
+  if (impl_->decode) {
+    impl_->decode->request_stop();
+  }
+}
+void CachedForwardPlan::start_sequence() {
+  auto& p = *impl_;
+  if (!p.device_generation || !p.decode || p.failed || p.finished ||
+      p.decode_started) {
+    throw std::logic_error("sequence unavailable");
+  }
+  try {
+    p.decode->start();
+    p.decode_started = true;
+  } catch (...) {
+    p.poison();
+    throw;
+  }
+}
+DeviceSequence::Event CachedForwardPlan::collect_sequence(
+    const std::stop_token& stop) {
+  auto& p = *impl_;
+  if (!p.decode_started || p.failed || p.finished) {
+    throw std::logic_error("sequence collection unavailable");
+  }
+  try {
+    const auto event = p.decode->collect(p.collected++, stop);
+    if (event.kind == DeviceSequence::Kind::consumed) {
+      if (event.position != p.committed ||
+          event.count > p.options.capacity - p.committed) {
+        throw std::runtime_error("invalid sequence consumed range");
+      }
+      p.committed += event.count;
+    }
+    return event;
+  } catch (...) {
+    p.poison();
+    throw;
+  }
+}
+std::span<const DeviceCapture> CachedForwardPlan::device_captures()
+    const noexcept {
+  return impl_->retained_captures;
+}
+
+void CachedForwardPlan::prepare_sampling() {
+  auto& p = *impl_;
+  if (p.sampler) {
+    return;
+  }
+  if (p.committed || p.failed || p.finished) {
+    throw std::logic_error("selection must be prepared before consumption");
+  }
+  constexpr auto result_bytes = 2 * sizeof(std::uint32_t);
+  const auto bytes =
+      sampling::DeviceCategorical::required_bytes(vocabulary_size());
+  if (p.options.max_host_bytes - p.host_bytes < result_bytes ||
+      bytes > p.options.max_device_bytes - p.peak) {
+    throw std::length_error("selection exceeds admitted budget");
+  }
+  auto sampler = std::make_unique<sampling::DeviceCategorical>(
+      *p.device, p.work_queue(), vocabulary_size(),
+      p.options.numerical_mode.activation_storage, bytes);
+  auto readback =
+      p.device->allocate_staging({result_bytes, alignof(std::uint32_t)});
+  p.sampler = std::move(sampler);
+  p.selection_readback.emplace(std::move(readback));
+  p.host_bytes = add(p.host_bytes, result_bytes);
+  p.peak = add(p.peak, bytes);
+}
+ConsumedChunk CachedForwardPlan::consume(std::span<const std::uint32_t> ids,
+                                         bool need_logits) {
+  const auto view = consume_view(ids, need_logits);
+  ConsumedChunk result{};
+  result.first_position = view.first_position;
+  result.tokens.assign(ids.begin(), ids.end());
+  if (view.next_logits) {
+    const auto& row = *view.next_logits;
+    result.next_logits = OwnedLogitRow{row.positions.front(),
+                                       row.vocabulary_size,
+                                       row.storage_type,
+                                       {row.bytes.begin(), row.bytes.end()}};
+  }
+  result.captures.reserve(view.captures.size());
+  for (const auto& capture : view.captures) {
+    result.captures.push_back(
+        {capture.site,
+         {capture.positions.begin(), capture.positions.end()},
+         {capture.bytes.begin(), capture.bytes.end()}});
   }
   return result;
 }

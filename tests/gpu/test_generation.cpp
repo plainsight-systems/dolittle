@@ -53,6 +53,15 @@
  * Per-row design/implementation consultation, 2026-10-19: I.7 above makes
  * every row a postcondition; GPU.1 keeps comparisons outside GPU timing;
  * GDSA.2 keeps exact cache/full-trace equality distinct from oracle accuracy.
+ * Prepared-buffer/device-selection contract consultation, 2026-10-20:
+ * Core I.7 (#ri-post) and MEM.9
+ * (guidelines/memory/MEM.9-embedded-allocate-at-init.md), both corpora queried
+ * and full rules read for design/implementation. Exercise public results and
+ * capacity/failure contracts; independent reference inputs remain unchanged.
+ * Device-feedback verification, 2026-10-20: Core I.7 (#ri-post) checks
+ * the committed prefix on EOS, cancellation and failed publication. GPU.7
+ * (guidelines/gpu/GPU.7-pipeline-cpu-and-gpu-work.md) requires safe retirement
+ * of queued output slots. Both corpora queried/read for design/implementation.
  */
 #include <algorithm>
 #include <array>
@@ -74,6 +83,7 @@
 #include "tensors/formats/safetensors.h"
 #include "tensors/representations/bf16.h"
 #include "tensors/tensor.h"
+#include "tests/gpu/capture_export.h"
 #include "tests/gpu/forward_reference.h"
 #include "tests/gpu/interpretation.h"
 #include "tests/support/check.h"
@@ -548,8 +558,18 @@ Json check_generation(gpu::Device& device,
   {
     auto plan = inference::prepare_cached_forward(device, checkpoint, options);
     const auto start = Clock::now();
-    generated = inference::generate(plan, prompt, settings, select, {500});
+    generated = inference::generate(plan, prompt, settings, select, {500}, {},
+                                    inference::sampling::Execution::device);
     report.emplace("generation_seconds", Json(seconds(start)));
+    if (!generated.failure_message.empty() || generated.tokens != tokens) {
+      std::cerr << Json{{"failure", generated.failure_message},
+                        {"actual_ids", generated.tokens},
+                        {"expected_ids", tokens},
+                        {"consumed", generated.consumed_tokens},
+                        {"reason", static_cast<unsigned>(generated.reason)}}
+                       .dump()
+                << '\n';
+    }
     tests::check(generated.failure_message.empty() &&
                      generated.reason == inference::StopReason::token_limit &&
                      generated.tokens == tokens &&
@@ -569,19 +589,24 @@ Json check_generation(gpu::Device& device,
     tests::check(capture.positions.size() == tokens.size() &&
                      capture.positions.back().value == tokens.size() - 1,
                  "final emitted token capture missing");
+    const auto exported = tests::export_capture(
+        device, capture.device, capture.bytes,
+        capture.positions.size() * capture.site.vector_width *
+            tensors::element_bytes(capture.site.storage_type));
     report.at("captures")
-        .push_back(compare_rows(reference.at("captures").at(i), capture.bytes,
+        .push_back(compare_rows(reference.at("captures").at(i), exported,
                                 mode.activation_storage, 0, tokens.size(),
                                 passed));
   }
   {
     auto unobserved = options;
     unobserved.capture_sites.clear();
-    unobserved.max_prefill_chunk = 1;
+    unobserved.max_prefill_chunk = 2;
     auto plan =
         inference::prepare_cached_forward(device, checkpoint, unobserved);
     const auto result =
-        inference::generate(plan, prompt, settings, select, {500});
+        inference::generate(plan, prompt, settings, select, {500}, {},
+                            inference::sampling::Execution::device);
     tests::check(result.tokens == generated.tokens && result.captures.empty() &&
                      result.reason == generated.reason,
                  "capture selection or chunking changed generated IDs");
@@ -612,7 +637,8 @@ Json check_generation(gpu::Device& device,
         return sampler.select(logits, sampling, rng);
       };
       const auto result = inference::generate(
-          plan, request, bounded, controlled, {500}, stop.get_token());
+          plan, request, bounded, controlled, {500}, stop.get_token(),
+          inference::sampling::Execution::host_reference);
       const std::array reasons{inference::StopReason::token_limit,
                                inference::StopReason::stop_token,
                                inference::StopReason::user_stop,
@@ -627,6 +653,62 @@ Json check_generation(gpu::Device& device,
       for (const auto& capture : result.captures) {
         tests::check(capture.positions.size() == consumed,
                      "stop/failure durable capture prefix");
+      }
+    }
+  }
+  if (!text_pair.protocol) {
+    struct CancellingObserver final : inference::GenerationObserver {
+      std::stop_source& stop;
+      bool fail;
+      explicit CancellingObserver(std::stop_source& source, bool failure)
+          : stop(source), fail(failure) {}
+      bool update(const inference::GenerationUpdate& update) noexcept override {
+        if (update.first_position >= update.prompt_tokens &&
+            !update.appended.empty()) {
+          stop.request_stop();
+          return !fail;
+        }
+        return true;
+      }
+    };
+    for (int scenario = 0; scenario < 4; ++scenario) {
+      auto plan =
+          inference::prepare_cached_forward(device, checkpoint, options);
+      auto bounded = settings;
+      auto request = prompt;
+      std::stop_source stop;
+      if (scenario == 0) {
+        bounded.max_new_tokens = 0;
+      } else if (scenario == 1) {
+        request.stop_ids = {tokens.at(prompt_count)};
+      }
+      CancellingObserver observer(stop, scenario == 3);
+      const auto result =
+          scenario < 2
+              ? inference::generate(plan, request, bounded, select, {500},
+                                    stop.get_token(),
+                                    inference::sampling::Execution::device)
+              : inference::generate(plan, request, bounded, select, {500},
+                                    observer, stop.get_token(),
+                                    inference::sampling::Execution::device);
+      const auto consumed = result.consumed_tokens;
+      const bool bounded_stop =
+          scenario < 2
+              ? consumed == prompt_count + (scenario == 0 ? 0 : 1)
+              : consumed >= prompt_count + 1 && consumed <= tokens.size();
+      const bool reason_ok =
+          scenario == 0 ? result.reason == inference::StopReason::token_limit
+          : scenario == 1
+              ? result.reason == inference::StopReason::stop_token
+              : result.reason == inference::StopReason::user_stop ||
+                    result.reason == inference::StopReason::token_limit;
+      tests::check(
+          result.failure_message.empty() && reason_ok && bounded_stop &&
+              result.tokens.size() == consumed,
+          "device stop/cancel lost a selected token or exceeded budget");
+      for (const auto& capture : result.captures) {
+        tests::check(capture.positions.size() == consumed,
+                     "device feedback discarded capture leaked into results");
       }
     }
   }

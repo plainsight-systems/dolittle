@@ -1,5 +1,9 @@
 # NLA experiment algorithmic overlay
 
+The accepted [GPU execution boundary](execution-boundary.md) defines device ownership,
+GPU normalization/injection and autonomous prefill through final-token
+consumption. Mathematical contracts and independent references remain fixed.
+
 **Reviewed and accepted — 2026-10-17.** This defines the planned computation
 and state flow for Dolittle. Change axes and file mapping precede engine
 implementation. The [transformer execution overlay](transformer-execution.md) expands
@@ -123,9 +127,9 @@ across backends or numerical implementations.
 
 Keep the AV resident while the user explores captures. Each request takes one
 raw capture and the AV checkpoint's trained prompt and injection contract.
-Compute the vector's L2 norm in FP32, normalize it, apply the trained scale,
-and replace the designated prompt token embedding. Reject non-finite or
-zero-norm input. Check the injection marker and its neighbors against metadata.
+On the GPU, compute the vector's L2 norm in FP32, normalize it, apply the
+trained scale, and replace the designated prompt token embedding. Device
+validation gates inference on non-finite or zero-norm input. Check the injection marker and its neighbors against metadata.
 The transformer overlay describes the remainder of AV execution.
 
 The visible thinking text is not appended to the AV prompt. It is presented
@@ -180,10 +184,11 @@ storage is `N × D × b`. At `D=4096` and BF16, that is 8 KiB per position or
 These are derived payload sizes, not an established 8K operating limit.
 Workspaces, allocations, transfer staging, and runtime overhead are additional.
 
-Keep captures in bounded staging storage and transfer them in batches where
-possible; avoid introducing a host synchronization per token. A copy must
-finish before its source buffer is reused. After target shutdown, retained
-captures must remain accessible without keeping target allocations alive.
+Keep captures in an independently owned device arena. Copy each raw hook value
+before scratch reuse and publish only its completion metadata. After target
+shutdown the arena remains valid while weights, KV and scratch are released.
+A later AV request reads the retained device row directly. Explicit diagnostics
+may export a completed vector; live interpretation does not require an export.
 Host weight caching and transfer strategy need their own measured budget;
 this design does not assume all three models remain in host RAM.
 

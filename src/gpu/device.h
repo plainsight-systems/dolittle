@@ -42,6 +42,20 @@
  * cpp-perf-guidelines COPY.5: ownership transfers, never implicit buffer
  * copies. Source:
  * guidelines/copy-move/COPY.5-resource-owning-types-are-move-only.md.
+ * Queue-completion design/implementation consultation, 2026-10-20:
+ * Core I.7 (#ri-post) and CP.3 (#rconc-data): collection establishes host
+ * readiness; in-flight slots have exclusive ownership until completion.
+ * Performance GPU.1 (guidelines/gpu/GPU.1-keep-data-on-device.md) keeps
+ * sampled IDs and RNG state on-device. GPU.7
+ * (guidelines/gpu/GPU.7-pipeline-cpu-and-gpu-work.md) separates submission
+ * from readback through explicit prefix completion. Live device-owned decode
+ * uses its own graph publication protocol instead of per-token events. Both
+ * local corpora were queried and the full rules read in both work phases.
+ * reserve_completion_points prepares event slots on an idle queue; it never
+ * shrinks storage. Synchronous prefill reserves a completion slot before
+ * submission; autonomous decode does not mark or wait per-token events. Waiting
+ * an older point retires only its prefix, leaving later work and its readback
+ * slot in flight.
  */
 #pragma once
 
@@ -132,6 +146,7 @@ class Queue {
   void upload(DeviceRegion destination, ConstHostRegion source);
   void download(HostRegion destination, ConstDeviceRegion source);
   void copy(DeviceRegion destination, ConstDeviceRegion source);
+  void reserve_completion_points(std::size_t count);
   [[nodiscard]] CompletionPoint mark();
   void wait(CompletionPoint point);
   void drain();

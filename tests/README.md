@@ -68,6 +68,24 @@ CUDA build. See [static-analysis setup and scope](../scripts/README.md#static-an
 for pinned versions, editor tasks, CUDA compatibility and reports. Its four
 command-adaptation unit tests use in-memory inputs, with no compiler or GPU.
 
+## Checked generation allocation contract
+
+Configure the CUDA verification build with `-DDOLITTLE_ALLOCATION_CHECKS=ON`.
+The existing device, generation and application scenarios then enforce zero C++
+heap and explicit GPU/staging allocations on successful device-generation
+iterations, including prompt publication, token decoding and event publication.
+A violation aborts the check. Prepared storage, final records, exceptional failure
+reporting and HTTP reader threads are outside this scope; arbitrary C allocation
+inside shared libraries is not intercepted. Normal builds leave this diagnostic
+off. No extra integration scenario is introduced.
+
+The device scenario also completes a prepared sequence before collecting any
+output, checks cancellation/EOS/final consumption, and verifies that invalid GPU
+normalization prevents inference. The existing tiny/8B target-to-AV scenarios
+compare GPU normalization on frozen source rows, export completed captures only
+for numerical diagnostics, and verify retained device ownership across model
+switches. Native and forced-PTX runs use the unchanged fixture hashes and limits.
+
 ## Host unit tests
 
 The root CMake build requires C++20, CMake 3.24+ and OpenSSL 3 development files.
@@ -143,9 +161,15 @@ The repository uses **all five integration slots**:
 | --- | --- |
 | Site publication | Real Hugo build and publication boundary under a deployment subpath |
 | `integration.application` | Source launcher, verified checkpoints, live token/capture stream, AV selection, idempotent retries and reconnect |
-| `integration.device` | CUDA resource ownership, queue completion and buffer transfers |
+| `integration.device` | CUDA resource ownership, queue completion, transfers, device selection and autonomous decode control |
 | `integration.generation_tiny` | Tiny FP32/BF16 target generation, retained captures, AV replacement and fresh-cache interpretations |
 | `integration.generation_8b` | Pinned tokenizer/protocol, Qwen3-8B target generation and matched AV interpretation |
+
+The device scenario also starts a bounded decode graph and drains it before any
+CPU collection. Exact seeded IDs, positions, budget, EOS and cancellation verify
+that output observation cannot be required for device progress. This remains part
+of the device resource/dispatch scenario; transformer numerics use the independent
+fixtures below.
 
 The device scenario requires a CUDA build and NVIDIA GPU. The two generation
 scenarios additionally require generated fixtures; CTest registers them when

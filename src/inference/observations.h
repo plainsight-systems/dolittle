@@ -1,75 +1,45 @@
 /*
- * Observation planning is implemented; device copies belong to the executor.
- * Axis: X1, observation preparation within forward execution planning.
+ * Axis X4: model-advertised observation selection and durable capture handles.
+ * Contract: ObservationPlan resolves unique advertised sites and ordered token
+ * positions within a fixed sequence, with checked byte/index budgets. Empty
+ * selections remain valid metadata. No hardcoded layer or interpretation law.
+ * CapturedRows borrows host diagnostic bytes; OwnedCapture holds either host
+ * diagnostic bytes or a DeviceCapture lease, never both for the same payload.
+ * DeviceCapture owns a shared immutable DeviceBuffer plus offset/byte extent;
+ * its Device outlives it. Positions expose only rows whose producer/copy has
+ * completed. An unused capacity suffix is never a valid captured position.
  *
- * Contract: prepare_observations consumes a model-advertised catalog, a
- * positive full-sequence length, requests and explicit limits. Empty requests
- * are valid and produce zero capture payload. An empty explicit position list
- * selects no rows; AllPositions selects [0, sequence_length). Explicit lists
- * must be strictly increasing and in range. Requested points must be unique,
- * advertised, and have positive widths and BF16 or FP32 storage. The catalog
- * is validated even when requests are empty; uint32 is index-only storage.
- * Reject malformed/unsupported inputs
- * with invalid_argument, overflow or exceeded limits with length_error, and
- * propagate allocation failure. Preparation never drops requests silently.
+ * Algorithm: execution-boundary.md H1/H4 and transformer-execution.md hooks.
+ * Resolve each requested site against the model catalog, validate selected
+ * positions, derive row_bytes=width*storage_bytes, and assign checked payload
+ * offsets. The executor copies the raw stored residual before source reuse.
+ * The generation collector associates completed ranges with absolute consumed
+ * positions. A record lookup creates a lease of one completed row. No widening,
+ * normalization or text interpretation occurs during capture.
+ * Cost: O(selected rows/sites) metadata and width*b per retained row. Live
+ * payload stays device-resident across target teardown; explicit diagnostics
+ * alone download bytes. Optimization: immutable subregions share a persistent
+ * arena separate from transformer scratch and KV.
  *
- * The returned plan owns all resolved metadata, retaining no borrowed input
- * spans. CapturedRows is a read-only view into its ForwardResult owner; both
- * positions and bytes become invalid on owner destruction or move. Payload is
- * contiguous [selected_positions, vector_width] in original storage dtype.
- * Input plan views likewise require a live, unmoved plan. Moved-from plans
- * support destruction/reassignment only. No GPU handles or callbacks escape.
- *
- * Algorithm: docs/architecture/transformer-execution.md, "Configurable
- * observation points" and "Storage lifetimes":
- * 1. Validate the catalog, unique requests and position selections.
- * 2. Count rows and checked byte products/sums; reject overflow/limits BEFORE
- *    allocating expanded metadata. No wraparound in any offset or extent.
- * 3. Resolve sites, expand position lists, assign non-overlapping byte ranges
- *    in request order, and retain immutable metadata for execution.
- * 4. The executor copies those rows before scratch reuse, preserves raw bits,
- *    and exposes CapturedRows only after host-copy completion.
- *
- * Design and cost: R requests and P total selected rows require O(R+P)
- * resolved metadata; payload bytes are sum(rows * width * element_bytes).
- * max_position_entries bounds P independently of max_payload_bytes. Estimate
- * metadata and allocator/staging overhead separately in overall admission.
- * Optimization: resolve/allocate once per prepared pass, batch row copies,
- * and issue no capture allocation/readback when R is zero. No cost is measured.
- *
- * Corpus guidance searched and full rules reread for implementation,
- * 2026-10-18: cpp-guidelines I.7 (#ri-post): state ready/owned-plan and
- * borrowed-view rules. cpp-guidelines R.1 (#rr-raii): plan metadata has
- * automatic resource lifetime. cpp-perf-guidelines COPY.5: plans are move-only;
- * noexcept moves transfer ownership. Source:
- * guidelines/copy-move/COPY.5-resource-owning-types-are-move-only.md.
- * cpp-perf-guidelines CDSA.32: pre-resolve immutable capture metadata.
- * Source:
- * guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
- * cpp-perf-guidelines GPU.1: batch required readbacks, preserve device
- * intermediates. Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
- *
- * Incremental results: OwnedCapture carries completed incremental rows in their
- * original storage type. For a chunk starting at S, resolve local row i to
- * absolute position S+i before publication. Append chunks in increasing
- * position order; failed chunks publish no rows. The executor copies each
- * completed chunk to owned host storage at its existing readback boundary, so a
- * later GPU failure cannot erase captures already delivered. AllPositions means
- * all consumed positions, not unused admitted capacity. Explicit future
- * positions remain unfulfilled on early stop and never receive fabricated data.
- * Corpus consultation, header design and implementation, 2026-10-18:
- * cpp-guidelines I.7 (#ri-post): owned rows have completed bytes and absolute
- * IDs. cpp-perf-guidelines GPU.1: batch row transfers with required step
- * readbacks. Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * Corpus consultation, header design and implementation, 2026-10-20: both local
+ * servers queried separately in each phase and the cited rules read in full.
+ * cpp-guidelines I.1 (#ri-explicit), R.1 (#rr-raii): explicit residency,
+ * completion, ownership and failure contracts. cpp-perf-guidelines GPU.1,
+ * GPU.6, GPU.7, GPU.9: keep tensor intermediates/decisions on device, batch
+ * dispatch, decouple observation and separate persistent from transient arenas.
+ * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * Related GPU.6/7/9 entries describe dispatch, staging and storage.
  */
 #pragma once
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <span>
 #include <variant>
 #include <vector>
 
+#include "gpu/device.h"
 #include "models/observation.h"
 
 namespace dolittle::inference {
@@ -101,12 +71,25 @@ struct CapturedRows {
   std::span<const std::byte> bytes;
 };
 
-// Owned incremental capture result. Unlike CapturedRows, this retains its bytes
-// and absolute positions across later steps and executor/device destruction.
+// An immutable leased device extent. Metadata is host-readable; values are
+// not. Device must outlive the owner; only the backend may dereference its
+// region.
+struct DeviceCapture {
+  std::shared_ptr<const gpu::DeviceBuffer> owner;
+  std::size_t offset{}, bytes{};
+  [[nodiscard]] gpu::ConstDeviceRegion region() const noexcept {
+    return {owner.get(), offset, bytes};
+  }
+};
+
+// Owned incremental capture result. Unlike CapturedRows, this retains its
+// bytes and absolute positions across later steps and executor destruction.
+// Device leases require Device to remain alive; host reference bytes do not.
 struct OwnedCapture {
   models::ObservationSite site;
   std::vector<models::TokenPosition> positions;
-  std::vector<std::byte> bytes;
+  std::vector<std::byte> bytes;  // Explicit host-reference/export payload only.
+  std::optional<DeviceCapture> device{};
 };
 
 class ObservationPlan {

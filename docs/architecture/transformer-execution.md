@@ -1,5 +1,9 @@
 # Transformer execution algorithmic overlay
 
+The accepted [GPU execution boundary and complete flow](execution-boundary.md) defines device ownership,
+GPU normalization/injection and autonomous prefill through final-token
+consumption. Mathematical contracts and independent references remain fixed.
+
 **Reviewed and accepted — 2026-10-17.** This expands the planned model computation used by
 the [NLA experiment overlay](logical-overview.md). It defines mathematical
 steps, observable boundaries, and state lifetimes before backend interfaces
@@ -64,6 +68,15 @@ plan's serial executions. Loading identity includes artifact hashes and the
 model's binding convention. Keeping files unchanged while mapped is a caller
 precondition; this design does not support concurrent mutation of weight files.
 
+Resident-model upload uses two disjoint pinned staging slots within the admitted
+host allowance (at most 2 MiB total). Before filling a slot, wait for its prior
+copy to complete; then copy checkpoint bytes into it, enqueue the device copy,
+record completion and rotate slots. This allows CPU staging to overlap the
+other slot's transfer on one ordered queue. Drain remaining uploads before
+exposing ready weights. A one-byte allowance uses one slot. No tensor arithmetic
+or representation changes occur; failures retain owners until pending work is
+drained. Diagnostic forward paths retain their separate loading lifecycle.
+
 ### Preparing the first execution recipe
 
 The model emits a finite, ordered recipe of the supported operations with typed
@@ -110,6 +123,18 @@ fixed FP32 reductions, with no TF32 or FP64 tensor accumulation:
   output width exceeds 1,024; otherwise 32. Partial `t` visits features `t+P*k` in ascending `k`, with one FP32 FMA
   per feature. Merge upper halves into lower halves at offsets `P/2,...,1`,
   then round to storage. These choices depend on feature widths, never row count.
+  CUDA decode can give two adjacent partials to each lane and load BF16 pairs
+  when alignment and dimensions permit. It reduces the even and odd chains
+  separately, then adds them, reproducing the original tree. Large output
+  projections retain scalar loads; packing is a dispatch choice, not a change
+  in arithmetic or checkpoint representation.
+  CUDA prefill with input width divisible by 128 stages eight prompt rows
+  by 128 features in shared memory. Each group of `P` lanes owns an output
+  column, reuses each weight across eight row accumulators, then merges each
+  row with the same fixed tree. Two barriers protect each input stage.
+  Other input widths retain the 16-feature tiled path and its original zero
+  padding. This dispatch changes operand delivery, not partial ownership,
+  rounding, or device-owned output positions.
 - RMSNorm: each of 32 lanes owns four sums. Component `c` in lane `t` sums
   squared features `4*t+c+128*k` for widths above 128, or `t+32*c`
   for widths at most 128, rounding squares and additions separately.
@@ -117,19 +142,31 @@ fixed FP32 reductions, with no TF32 or FP64 tensor accumulation:
   offsets 1, 2, 4, 8, 16. Multiply by FP32 `1/width`, add epsilon and use FP32
   reciprocal square root. Preserve both normalization/learned-scale storage
   boundaries.
+  For widths between 129 and 8,192, CUDA stages the input cooperatively in
+  shared memory. It gives each of the 128 component sums to a separate thread,
+  combines groups of four left to right, then performs the original 32-lane
+  reduction. The block writes the normalized features cooperatively.
 - Attention scores: eight contiguous feature ranges of `ceil(d/8)` features,
   each accumulated with FP32 FMA; merge at offsets 4, 2, 1. Multiply by the
-  inverse square root of head width, rounded once to FP32 on the host.
-- Attention softmax/value sum: visit visible keys in three passes to find the
-  maximum, sum exponentials, and accumulate probability-weighted values.
+  inverse square root of head width, computed on the GPU and rounded once to FP32
+  in a persistent scalar before graph execution.
+- Attention softmax/value sum: find the maximum score, sum exponentials,
+  then accumulate probability-weighted values.
   The exponential sum uses 32 strided partials and a descending half tree.
   **Divide each exponential by that sum in FP32 before multiplying V.**
   Accumulate values in two contiguous key ranges, the first containing
   `ceil(visible_keys/2)` keys; each range uses ascending FP32 FMA. Add the
-  two sums in FP32, then round to storage. Recomputing scores costs three
-  QK passes but retains O(d) state instead of a sequence-sized probability
-  buffer. Partition boundaries depend on the query's actual causal prefix,
+  two sums in FP32, then round to storage. The CUDA implementation retains
+  scores/probabilities in shared memory for up to 8,192 visible keys and head
+  widths up to 1,024, computing each QK dot once. Larger shapes use three QK
+  passes and O(d) state. Both preserve the same arithmetic. For widths up to
+  128, the two value ranges run concurrently before the final addition.
+  Partition boundaries depend on the query's actual causal prefix,
   which is identical for that query in full and cached execution.
+  For aligned BF16 heads of width 128, CUDA retains each lane's 16 query
+  features in registers and loads the matching key range with two 128-bit
+  loads. The same 16 FP32 FMAs consume the widened values in ascending order;
+  the score, softmax and value reductions are unchanged.
 
 
 These partitions remain independent of launch geometry, occupancy, batch size
@@ -234,7 +271,11 @@ materializing repeated KV heads or the full attention-score matrix.
 ## Prefill and decoding
 
 **Prefill:** embed a prompt span and evaluate its positions with a causal mask.
-Populate each block's cache for subsequent decoding. Capture all target
+Populate each block's cache for subsequent decoding. The contiguous cache
+implementation binds rotated-K and projected-V producers directly to the next
+reserved rows when the prepared chunk fits. Near capacity, it uses bounded
+scratch and copies only active rows. Both paths publish the new valid prefix
+only after successful queue completion. Capture all target
 positions at the observation boundary, but vocabulary logits are needed only
 for the last position when selecting the first continuation token. Chunked
 prefill must let each chunk attend to the prior cache and the causal prefix
@@ -300,7 +341,8 @@ Each result identifies its semantic site, consumed token positions, shape,
 dtype and model execution identity. Retain original activation bits; any FP32
 conversion for comparison or NLA normalization is a separate operation.
 An empty request list creates no capture buffers or readbacks. Requested
-copies complete before source reuse, and returned host bytes become readable
+copies complete before source reuse. Live captures remain device-owned;
+explicit diagnostic host exports become readable
 only after their completion. Compatible fusion must preserve requested sites.
 
 ### First forward pass
@@ -371,6 +413,13 @@ on chunking and fusion; the overlay does not require an `N × N` score buffer.
 Vocabulary projection adds approximately `2*B_logits*D*vocabulary_size`
 operations, where `B_logits` counts only positions whose logits are requested.
 
+Reading each projection weight once per decoded token costs
+`element_bytes * [L*(D*(Hq*d + 2*Hkv*d) + (Hq*d)*D + 3*D*F) + D*vocabulary_size]`.
+For the selected BF16 target/AV dimensions, that is 15,136,194,560 bytes
+(15.14 decimal GB) per token. This derived payload excludes embedding and
+normalization weights, cache traffic and redundant reads. Actual memory
+transactions and elapsed time depend on the kernel and cache behavior.
+
 Count weight reads, cache reads/writes, scratch traffic, capture copies,
 allocations, dispatches and synchronization separately. Derive peak memory
 from simultaneously live allocations. Shared memory on Metal changes transfer
@@ -394,3 +443,72 @@ Measure the NVIDIA path on the 3090 Ti and exercise retained PTX with
 `CUDA_FORCE_PTX_JIT=1`. Build success alone cannot establish numerical or
 performance behavior on NVIDIA or Metal. The next design step assigns the
 independent reasons for change; only then do interfaces and files follow.
+
+## Device selection and allocation-free generation
+
+The live CUDA path keeps the final vocabulary row on the device. A prepared
+categorical selector orders finite logits by descending value and ascending ID,
+normalizes/filter-selects with the same FP64 probability algorithm, and returns
+only a token ID and validation status. The live sampler owns its MT19937-64
+state on-device, initialized from the run seed once. Its standard sequence and
+53-bit draw conversion match the original host engine. Greedy consumes no draw.
+A device stop/error latch suppresses further draws and valid selections; a failed
+run cannot reuse its random state. The host selector remains the reference
+and explicit diagnostic path. Device transcendental implementations need not be
+bit-identical to host libm; ordering, ties, filtering and draw mapping are the
+same, and agreement is checked without modifying the tensor oracle.
+
+Device selection owns bounded, preallocated sort/weight/status scratch. CUDA
+uses stable byte-radix passes with per-block histograms, prefix offsets and
+warp-local ranks; kernel boundaries establish global ordering without spinning.
+The application's direct-computation requirement retains custom primitives;
+GDSA.1's library guidance informs the stability/storage contract, not a new
+runtime dependency. All 32 FP32 key bits are retained. Tensor precision is
+unchanged. FP64 weights use fixed 256-entry prefix tiles, with tile totals
+combined in index order. This is run-to-run deterministic, independent of
+batch and occupancy, but its rounding can differ from the CPU serial fold.
+Prefix/total and prefix/retained implement the same top-p and categorical law.
+No cross-backend bitwise sampling trajectory is promised.
+
+Live CUDA execution starts one graph after request admission. A WHILE body
+consumes full prompt chunks; an IF body handles the static remainder; an IF body
+selects the first token from the final prompt row. A decode WHILE then consumes
+each selected ID. Its conditional head/sampling tail runs only if another token
+is needed. Device state owns position, EOS, budget and cancellation throughout.
+
+Rotated K and projected V write directly into device-positioned cache rows;
+attention reads only the initialized prefix. Raw hook values copy D2D before
+scratch reuse into a separately owned capture arena. A consumed-range event
+publishes readiness after those copies. Every selected token, including EOS,
+is consumed before graceful termination. Cancellation may end prefill early.
+
+The CPU acquire-reads immutable 32-byte metadata events, decodes text and
+publishes observations. It may request cancellation through a separate atomic
+flag, but does not acknowledge slots, return IDs, rebuild cache windows or
+submit continuation work. Collection may lag until GPU completion without
+blocking the sequence. All selected/consumed events remain in the final record.
+The journal admits `P + 2*G + 2` slots plus aligned control words, independently
+of activation width. Capture storage costs `(P+G)*sum(row_bytes)` device bytes.
+Graph size scales with the model recipe rather than sequence length.
+
+The CUDA backend owns graph handles, system-scope release/acquire publication
+and device copies. Queue dependencies order scratch reuse. At the model switch,
+capture leases retain their independent arena. For an AV request, a GPU kernel
+validates, normalizes, scales and casts one selected row; its status gates all
+inference. A device copy replaces only the trained prompt marker embedding
+before block 0. No activation readback, CPU norm or injection upload is required.
+The host-reference path retains its explicitly selected synchronous contract.
+
+Token decoding
+and segmentation fill reusable caller-owned buffers. Before each stream, the
+session prepares bounded immutable event slots and their payload capacities.
+Publication takes an aliasing shared owner of a prepared slot, so readers may
+outlive the producer without per-token ownership allocation or slot reuse.
+HTTP response construction stays on reader threads outside the inference loop.
+
+A diagnostic allocation guard covers each generation-loop iteration, including
+observer decoding and publication. Preparation/finalization and exceptional
+failure reporting are outside that steady-state contract. No heap fallback is
+allowed on bounded-storage exhaustion; report failure and stop. GPU buffer
+allocation also obeys the guard. Public token/capture alignment, cancellation,
+retry/reconnect, record ownership and frozen numerical acceptance remain intact.

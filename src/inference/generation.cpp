@@ -1,94 +1,56 @@
 /*
- * Complete target-generation execution loop.
- * Axis R2: one sequence's token progression, stopping and capture finalization.
- * Inputs: a prepared prompt, compatible cached execution plan, sampler
- * settings, seed, maximum new tokens and a cooperative stop token. Output:
- * owned exact prompt/generated IDs, consumed length, raw captures, provenance
- * and stop reason. The caller establishes tokenizer/protocol pairing with the
- * verified model. Generate validates nonempty prompt IDs, fresh prefix,
- * capacity and sampler inputs before upload. The selector is borrowed for the
- * call, selected at composition, and obeys sampler.h; it is invoked once per
- * emitted token. No tokenizer, template, sampling law, cache layout or block 24
- * is hardcoded here.
+ * Axis R2: complete target/AV sequence generation and observed result assembly.
+ * Contract: borrow a fresh compatible CachedForwardPlan and validated prompt;
+ * admit P prompt IDs plus G generated IDs before starting. Live execution uses
+ * device sampling; the explicitly selected host_reference path uses the
+ caller's
+ * TokenSelector. Results own exact IDs, consumed positions, provenance and
+ * capture leases. Device must outlive those leases. No model/block constant is
+ * hardcoded here. One run is serial and cannot resume after finalization.
  *
- * Algorithm (P prompt tokens, G maximum new tokens):
- * 1. Cached-plan preparation admits capacity C, weights, cache, scratch and
- *    host outputs. Here require P+G <= C before uploading token IDs, including
- *    room to consume the final emitted token. Reject rather than truncate.
- * 2. Consume prompt chunks through cached execution, preserving absolute
- *    positions. Only the last prompt row needs logits for the first draw.
- * 3. If stopping is already requested or G=0, finish after consuming the prompt
- *    without drawing. Otherwise select one token from the latest logits and
- *    append its ID to the trace as emitted but not yet consumed.
- * 4. Consume that token at the next absolute position. Its capture belongs to
- *    this pass, not the pass whose logits selected it. Commit consumed length
- *    only after all block writes and required copies succeed.
- * 5. If its ID is a stop ID, the token budget is exhausted, or cooperative stop
- *    is requested, finish without another draw. Otherwise use its logits for
- *    step 3. Stop precedence is stop ID, then token limit, then user stop.
- * 6. Seal the completed plan and return an owned result. Stop IDs remain
- *    in the exact trace and receive captures even when hidden in display text.
- * A graceful stop is checked between completed calls. It never abandons an
- * emitted-but-unconsumed token; finalization performs no further sampling.
- * Execution failure drains work, invalidates the session and returns a failed
- * result containing only completed captures plus explicit consumed length.
- * An unconsumed emitted token may remain in that failed trace without a
- * capture. Preflight errors throw before a run starts. Resource exhaustion may
- * throw if no result can be materialized; it must not publish fabricated
- * completion. next_action is the pure progression rule used by the loop:
- * consume unfinished prompt first, then any pending emitted token, then finish
- * or sample. It rejects impossible counts (including more than one pending
- * generated token). Stopping never takes precedence over consuming a pending
- * token. It touches no GPU, tokenizer or RNG, allowing state invariants to be
- * tested as an isolated unit.
+ * Algorithm: execution-boundary.md sections 3-5; logical-overview.md
+ generation.
+ * 1. Validate IDs/settings/identity/capacity, reserve result metadata and
+ prepare
+ *    the device graph, journal and capture arenas. Upload the complete prompt.
+ * 2. Start once. The GPU consumes full prompt chunks and its remainder, then
+ *    selects the first ID from the final prompt row. Each decode consumes the
+ *    previously selected ID before deciding whether to select another.
+ * 3. Collect immutable metadata: selection appends an ID; consumed-range events
+ *    advance the capture watermark; injection events report a valid source
+ norm.
+ *    The collector never supplies input, acknowledges a slot or relaunches
+ work.
+ * 4. Terminal metadata supplies EOS, budget, cancellation or validation
+ failure.
+ *    Drain the graph and seal the result. Every selected token, including EOS,
+ *    receives its own forward pass/capture before graceful termination.
+ * Cancellation may end prefill with an unconsumed prompt suffix. An observer
+ * may lag until GPU completion; callback failure requests cancellation but
+ * collection still preserves all selected/consumed metadata. Borrow callback
+ * spans only for the call. Checked builds reject steady-state allocations.
+ * CUDA/transport failure drains and discards device capture leases rather than
+ * advertising invalid tensors. Device-side validation failure retains only the
+ * already completed prefix. Preparation failures throw before launch.
  *
- * Design and cost: one resident weight set, one admitted contiguous cache and
- * bounded prefill/decode scratch. Each draw downloads one vocabulary row and
- * waits once; captures join the same readback to preserve a durable host
- * prefix. Reserve trace/result metadata before the first emission. For C
- * admitted positions, each selected BF16 D=4096 site costs 8 KiB*C retained
- * host bytes. Device capture scratch scales with the admitted prompt chunk
- * size, not C; transfer staging and per-call result copies add explicit peak
- * bytes. Optimization: chunk prompt work, reuse the same bounded schedule for
- * decode, and avoid per-block waits or per-token GPU allocation. Finalization
- * may omit vocabulary projection; it must still execute every requested capture
- * site. Owned results survive plan/cache/weights teardown. The plan is serial,
- * single sequence, non-reentrant and not resumable after finish/stop/failure.
- * Overlay: docs/architecture/logical-overview.md, "2 Generate and capture"
- * and "Capture alignment"; transformer-execution.md, "Prefill and decoding".
- * Corpus consultation, implementation, 2026-10-18:
- * cpp-guidelines I.1 (#ri-explicit), I.7 (#ri-post), R.1 (#rr-raii): record
- * exact emitted/consumed state, completion, failure and resource ownership.
- * cpp-perf-guidelines GPU.1: retain KV on device; batch capture bytes with the
- * required logit readback/completion per draw.
+ * The host_reference path separately consumes chunks, downloads logits and
+ * captures, calls the supplied selector and consumes its final selected ID.
+ * This diagnostic mode does not satisfy the live execution boundary.
+ * Numerical laws belong to kernels/sampler and remain unchanged here.
+ * Cost: O(P+G) host IDs/positions and metadata journal; O((P+G)*sum(row_bytes))
+ * persistent device captures. No ordinary activation/logit readback, injection
+ * upload, host RNG or per-token GPU submission. Optimization: all successful
+ * publication writes use prepared capacity; GPU continuation has no consumer
+ * dependency. Capture owners survive plan/cache/model teardown.
+ *
+ * Corpus consultation, header design and implementation, 2026-10-20: both local
+ * servers queried separately in each phase and the cited rules read in full.
+ * cpp-guidelines I.1 (#ri-explicit), R.1 (#rr-raii): explicit residency,
+ * completion, ownership and failure contracts. cpp-perf-guidelines GPU.1,
+ * GPU.6, GPU.7, GPU.9: keep tensor intermediates/decisions on device, batch
+ * dispatch, decouple observation and separate persistent from transient arenas.
  * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
- * cpp-perf-guidelines GPU.9: admit/reserve persistent, transient and output
- * arenas. Source:
- * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
- *
- * The loop also runs AV prompts. Before any consume, an optional replacement
- * position must be inside the prompt; executor applies it once in the
- * containing prefill chunk. AV IDs, stop/failure and final consumed-token
- * semantics are the same as target generation, with role/alignment owned by the
- * experiment record. Corpus consultation, implementation (both servers queried,
- * full rules read), 2026-10-19: cpp-guidelines R.1 (#rr-raii) ties resources to
- * their owning phase; I.7 (#ri-post) makes completion, provenance and failure
- * effects explicit. cpp-perf-guidelines GPU.1 keeps intermediate embeddings on
- * device and budgets required transfers; source
- * guidelines/gpu/GPU.1-keep-data-on-device.md. cpp-perf-guidelines GPU.9
- * separates persistent weights from sequence storage; source
- * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
- *
- * Live publication (implementation corpus queried 2026-10-19): publish prompt
- * IDs once before consumption; publish a newly sampled ID after appending it;
- * publish the consumed watermark only after accept has copied completed
- * captures. Views borrow the result for the callback. A false result disables
- * callbacks and enters the same final-consumption/stop progression without
- * another draw. CP.22 (#rconc-unknown), callback outside locks; COPY.7, borrow
- * only new IDs (guidelines/copy-move/COPY.7-eliminate-hidden-copies.md); GPU.1,
- * reuse completed host readback (guidelines/gpu/GPU.1-keep-data-on-device.md).
- * No observer changes RNG state, arithmetic, GPU submission or the numerical
- * acceptance policy.
+ * Related GPU.6/7/9 entries describe dispatch, staging and storage.
  */
 #include "inference/generation.h"
 
@@ -97,6 +59,8 @@
 #include <limits>
 #include <stdexcept>
 
+#include "bounds.h"
+#include "diagnostics/allocation.h"
 #include "tensors/representations/bf16.h"
 #include "tensors/tensor.h"
 
@@ -107,9 +71,13 @@ GenerationResult generate_impl(CachedForwardPlan& plan,
                                GenerationSettings settings,
                                const sampling::TokenSelector& select,
                                ExecutionId id, const std::stop_token& stop,
-                               GenerationObserver* observer) {
+                               GenerationObserver* observer,
+                               sampling::Execution execution) {
   sampling::validate_settings(settings.sampling);
-  if (!select || !plan.prefix().usable || plan.prefix().committed_positions ||
+  if ((execution != sampling::Execution::host_reference &&
+       execution != sampling::Execution::device) ||
+      (execution == sampling::Execution::host_reference && !select) ||
+      !plan.prefix().usable || plan.prefix().committed_positions ||
       prompt.ids.empty() || prompt.tokenizer_identity.empty() ||
       prompt.protocol_identity.empty() || prompt.stop_ids.empty() ||
       prompt.ids.size() > plan.capacity() ||
@@ -147,6 +115,7 @@ GenerationResult generate_impl(CachedForwardPlan& plan,
   result.stop_ids = prompt.stop_ids;
   result.prompt_tokens = prompt.ids.size();
   result.consumed_tokens = 0;
+  const bool on_device = execution == sampling::Execution::device;
   const auto capacity = prompt.ids.size() + settings.max_new_tokens;
   result.tokens.reserve(capacity);
   result.tokens.assign(prompt.ids.begin(), prompt.ids.end());
@@ -159,9 +128,13 @@ GenerationResult generate_impl(CachedForwardPlan& plan,
     }
     OwnedCapture capture{site, {}, {}};
     capture.positions.reserve(capacity);
-    capture.bytes.reserve(capacity * row);
+    if (!on_device) {
+      capture.bytes.reserve(capacity * row);
+    }
     result.captures.push_back(std::move(capture));
   }
+  constexpr std::size_t failure_message_capacity = 128;
+  result.failure_message.reserve(failure_message_capacity);
   bool publication_failed = false;
   const auto notify = [&](std::size_t first) {
     if (observer && !publication_failed) {
@@ -170,14 +143,109 @@ GenerationResult generate_impl(CachedForwardPlan& plan,
                              result.prompt_tokens, result.consumed_tokens});
     }
   };
-  notify(0);
+  if (on_device) {
+    plan.prepare_device_generation({.sampling = settings.sampling,
+                                    .seed = settings.seed,
+                                    .prompt_ids = prompt.ids,
+                                    .stop_ids = prompt.stop_ids,
+                                    .max_new_tokens = settings.max_new_tokens});
+    const auto captures = plan.device_captures();
+    for (std::size_t i = 0; i < result.captures.size(); ++i) {
+      result.captures.at(i).device = dolittle::at(captures, i);
+    }
+    try {
+      if (stop.stop_requested()) {
+        plan.request_stop();
+      }
+      plan.start_sequence();
+      {
+        const diagnostics::AllocationScope scope(true, &publication_failed);
+        notify(0);
+      }
+      for (;;) {
+        const diagnostics::AllocationScope scope(true, &publication_failed);
+        const auto event = plan.collect_sequence(stop);
+        switch (event.kind) {
+          case DeviceSequence::Kind::selected:
+            if (event.position != result.tokens.size() ||
+                event.token >= plan.vocabulary_size()) {
+              throw std::runtime_error("invalid selected token publication");
+            }
+            result.tokens.push_back(event.token);
+            notify(result.tokens.size() - 1);
+            break;
+          case DeviceSequence::Kind::consumed:
+            if (event.position != result.consumed_tokens ||
+                event.count > result.tokens.size() - result.consumed_tokens) {
+              throw std::runtime_error(
+                  "invalid capture completion publication");
+            }
+            for (auto& capture : result.captures) {
+              for (std::size_t i = 0; i < event.count; ++i) {
+                capture.positions.push_back({event.position + i});
+              }
+            }
+            result.consumed_tokens += event.count;
+            notify(result.tokens.size());
+            break;
+          case DeviceSequence::Kind::injection:
+            if (!event.status) {
+              result.injection_norm = event.norm;
+            }
+            break;
+          case DeviceSequence::Kind::terminal:
+            switch (static_cast<DeviceSequence::Reason>(event.status)) {
+              case DeviceSequence::Reason::limit:
+                result.reason = StopReason::token_limit;
+                break;
+              case DeviceSequence::Reason::eos:
+                result.reason = StopReason::stop_token;
+                break;
+              case DeviceSequence::Reason::cancelled:
+                result.reason = StopReason::user_stop;
+                break;
+              case DeviceSequence::Reason::failure:
+                result.reason = StopReason::execution_failure;
+                break;
+            }
+            plan.finish();
+            if (result.reason == StopReason::execution_failure) {
+              result.failure_message =
+                  "device injection or sampling validation failed";
+            }
+            return result;
+        }
+        if (publication_failed) {
+          // Request cancellation without driving GPU scheduling; still drain
+          // the immutable journal so every selected token retains its
+          // consumed state.
+          plan.request_stop();
+        }
+      }
+    } catch (const std::exception& e) {
+      result.reason = StopReason::execution_failure;
+      result.failure_message = e.what();
+      // A device/transport failure cannot promise validity of leased
+      // tensors.
+      for (auto& capture : result.captures) {
+        capture.positions.clear();
+        capture.device.reset();
+      }
+      if (plan.prefix().usable) {
+        plan.finish();
+      }
+      return result;
+    }
+  }
+  // Explicit host reference execution begins here; the live branch returned.
   sampling::RandomStream rng(settings.seed);
   std::vector<float> logits(plan.vocabulary_size());
+  notify(0);
   bool have_logits = false, last_stop = false;
-  const auto accept = [&](ConsumedChunk chunk) {
+  const auto accept = [&](ConsumedView chunk) {
     for (std::size_t i = 0; i < chunk.captures.size(); ++i) {
       auto& into = result.captures.at(i);
-      const auto& from = chunk.captures.at(i);
+      const auto& from = dolittle::at(chunk.captures, i);
       into.positions.insert(into.positions.end(), from.positions.begin(),
                             from.positions.end());
       into.bytes.insert(into.bytes.end(), from.bytes.begin(), from.bytes.end());
@@ -198,6 +266,12 @@ GenerationResult generate_impl(CachedForwardPlan& plan,
       }
     }
   };
+  const auto consume = [&](std::span<const std::uint32_t> ids,
+                           bool need_logits) {
+    const auto view = plan.consume_view(ids, need_logits);
+    accept(view);
+  };
+
   try {
     for (;;) {
       Progress progress{result.prompt_tokens,
@@ -215,22 +289,22 @@ GenerationResult generate_impl(CachedForwardPlan& plan,
         plan.finish();
         return result;
       }
+
       if (decision.action == Action::consume_prompt) {
         const auto n = std::min(plan.max_prefill_chunk(),
                                 result.prompt_tokens - result.consumed_tokens);
         const bool final = result.consumed_tokens + n == result.prompt_tokens;
-        accept(
-            plan.consume(std::span<const std::uint32_t>(result.tokens)
-                             .subspan(result.consumed_tokens, n),
-                         final && settings.max_new_tokens &&
-                             !(stop.stop_requested() || publication_failed)));
+        consume(std::span<const std::uint32_t>(result.tokens)
+                    .subspan(result.consumed_tokens, n),
+                final && settings.max_new_tokens &&
+                    !(stop.stop_requested() || publication_failed));
       } else if (decision.action == Action::consume_pending) {
         const bool another =
             !last_stop && progress.generated_tokens < settings.max_new_tokens &&
             !(stop.stop_requested() || publication_failed);
-        accept(plan.consume(std::span<const std::uint32_t>(result.tokens)
-                                .subspan(result.consumed_tokens, 1),
-                            another));
+        consume(std::span<const std::uint32_t>(result.tokens)
+                    .subspan(result.consumed_tokens, 1),
+                another);
       } else {
         if (!have_logits) {
           throw std::logic_error(
@@ -241,9 +315,9 @@ GenerationResult generate_impl(CachedForwardPlan& plan,
           throw std::invalid_argument("sampler returned out-of-vocabulary ID");
         }
         result.tokens.push_back(token);
-        notify(result.tokens.size() - 1);
         last_stop = std::find(result.stop_ids.begin(), result.stop_ids.end(),
                               token) != result.stop_ids.end();
+        notify(result.tokens.size() - 1);
       }
     }
   } catch (const std::exception& e) {
@@ -260,15 +334,19 @@ GenerationResult generate(CachedForwardPlan& plan,
                           const text::PreparedPrompt& prompt,
                           GenerationSettings settings,
                           const sampling::TokenSelector& select, ExecutionId id,
-                          const std::stop_token& stop) {
-  return generate_impl(plan, prompt, settings, select, id, stop, nullptr);
+                          const std::stop_token& stop,
+                          sampling::Execution execution) {
+  return generate_impl(plan, prompt, settings, select, id, stop, nullptr,
+                       execution);
 }
 GenerationResult generate(CachedForwardPlan& plan,
                           const text::PreparedPrompt& prompt,
                           GenerationSettings settings,
                           const sampling::TokenSelector& select, ExecutionId id,
                           GenerationObserver& observer,
-                          const std::stop_token& stop) {
-  return generate_impl(plan, prompt, settings, select, id, stop, &observer);
+                          const std::stop_token& stop,
+                          sampling::Execution execution) {
+  return generate_impl(plan, prompt, settings, select, id, stop, &observer,
+                       execution);
 }
 }  // namespace dolittle::inference

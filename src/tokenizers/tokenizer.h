@@ -35,6 +35,18 @@
  * cpp-perf-guidelines CDSA.32: prepare immutable encode/decode lookup tables.
  * Source:
  * guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
+ * Steady-state design, 2026-10-20:
+ * decode_into fills caller-owned byte/token buffers; max_token_bytes bounds
+ * reservation before the stream. Borrow immutable vocabulary data, preserve
+ * unmapped IDs and exact raw ranges. Retain owned decode as a convenience
+ * wrapper.
+ * Overlay: transformer-execution.md, "Device selection and allocation-free
+ * generation". Core I.7 (#ri-post): borrowing, bounds and failure contracts.
+ * Performance GPU.1: device-resident decisions; MEM.9: prepare storage before
+ * steady state and check the invariant. Sources:
+ * guidelines/gpu/GPU.1-keep-data-on-device.md;
+ * guidelines/memory/MEM.9-embedded-allocate-at-init.md.
+ * Both corpora queried/read for header design and implementation, 2026-10-20.
  */
 #pragma once
 
@@ -70,6 +82,9 @@ class Tokenizer {
       std::string_view utf8) const = 0;
   [[nodiscard]] virtual DecodedBytes decode(
       std::span<const TokenId> ids) const = 0;
+  // Caller reserves both capacities; insufficient capacity fails before writes.
+  virtual void decode_into(std::span<const TokenId>, DecodedBytes&) const = 0;
+  [[nodiscard]] virtual std::size_t max_token_bytes() const noexcept = 0;
   [[nodiscard]] virtual bool contains(TokenId id) const noexcept = 0;
 };
 }  // namespace dolittle::tokenizers

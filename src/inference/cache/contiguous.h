@@ -12,8 +12,9 @@
  *    allocation; the returned estimate includes alignment, not driver overhead.
  * 2. Reserve one arena. Logical element (p,h,f) has element offset
  *    (p*Hkv+h)*d+f within that block's K or V range.
- * 3. Copy new rotated K and unrotated V rows into [S,S+B), preserving storage
- *    bits. A contiguous chunk is one copy per K/V range per block.
+ * 3. Expose checked writable windows for rotated K and unrotated V. Their
+ *    producers write active rows [S,S+B) directly; append also supports copying
+ *    from scratch, with one copy per K/V range if direct placement cannot fit.
  * 4. Attention uses the full-capacity strides but reads only j <= S+i for
  *    query i. Capacity and valid length are different quantities.
  * 5. After successful queue completion, the executor advances the shared
@@ -23,10 +24,11 @@
  * capacity is never included as an attention key. No reset-and-reuse for a new
  * identity.
  *
- * CUDA implementation design: queue-ordered device copies after K RoPE and V
- * projection; attention streams the persistent rows directly. A future Metal
+ * Implementation design: producers or ordered append copies initialize the
+ * cache rows; attention streams the persistent rows directly. A future Metal
  * backend uses the same logical layout through its own resource/copy
- * operations. Cost: two copies of B*Hkv*d elements per block, plus one reserved
+ * operations. Cost: append fallback copies 2*B*Hkv*d elements per block;
+ * direct placement avoids those copies. Both use one reserved
  * cache arena. For the selected BF16 36-block model, capacity costs 144 KiB per
  * position (576 MiB at C=4096); captures and scratch are additional
  * allocations. Optimization: no cache allocation or full-prefix copy during
@@ -41,9 +43,9 @@
  * representative runs before adding reuse, pooling or another storage strategy.
  * No optimality claim or measured benefit for those alternatives is implied by
  * this design. Errors and ownership follow cache.h and gpu/device.h. Regions
- * are read-only views for attention; only append destinations receive mutable
- * access. Overlay: docs/architecture/transformer-execution.md, "Prefill and
- * decoding" and "Storage lifetimes". Corpus consultation, header design and
+ * are read-only views for attention; only checked write windows receive
+ * mutable access. Overlay: docs/architecture/transformer-execution.md, "Prefill
+ * and decoding" and "Storage lifetimes". Corpus consultation, header design and
  * implementation, 2026-10-18: cpp-guidelines I.7 (#ri-post), R.1 (#rr-raii):
  * views borrow owned admitted storage; logical validity is separate from
  * physical capacity. cpp-guidelines Per.6 (#rper-measure): assess
@@ -53,6 +55,21 @@
  * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
  * cpp-perf-guidelines GPU.1: append and attend without host K/V transfers.
  * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * Direct-cache-write design and implementation, 2026-10-19:
+ * Borrow a checked mutable K/V window [S,S+Bmax) on the owning queue. Bind
+ * the recipe's rotated-key and value tensors to those destinations for their
+ * producers, later readers and captures. Kernels write only the B active rows;
+ * attention reads only [0,S+B). Successful completion still precedes commit.
+ * When fewer than Bmax capacity rows remain, retain scratch and append copies
+ * so prepared binding extents cannot overrun the cache. No allocation occurs
+ * during consume; the cache remains contiguous, BF16/FP32 and turn-owned.
+ * Optimization: direct placement removes two device copies per block per
+ * consumption when the prepared window fits, without changing tensor values.
+ * Existing scratch remains admitted for the bounded tail fallback.
+ * cpp-guidelines I.7 (#ri-post): mutable windows grant no prefix-commit right.
+ * cpp-perf-guidelines GPU.9: bind producers into persistent admitted storage;
+ * preserve lifetime and disjointness from transient scratch.
+ * Source: guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
  */
 #pragma once
 
@@ -68,6 +85,10 @@ struct ContiguousLayerView {
   std::size_t capacity;
   LayerShape shape;
 };
+struct ContiguousWriteWindow {
+  gpu::DeviceRegion keys;
+  gpu::DeviceRegion values;
+};
 class Contiguous {
  public:
   ~Contiguous();
@@ -77,6 +98,9 @@ class Contiguous {
   Contiguous& operator=(const Contiguous&) = delete;
   [[nodiscard]] const Specification& specification() const noexcept;
   [[nodiscard]] ContiguousLayerView layer(std::size_t block) const;
+  [[nodiscard]] ContiguousWriteWindow writable_window(
+      gpu::Queue&, std::size_t block, std::size_t first_position,
+      std::size_t count);
   void append(gpu::Queue&, std::size_t block, std::size_t first_position,
               std::size_t count, gpu::ConstDeviceRegion rotated_keys,
               gpu::ConstDeviceRegion values);

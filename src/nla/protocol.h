@@ -1,50 +1,38 @@
 /*
- * Target-to-verbalizer conversion and pairing contract.
- * Axis M7: trained target/AV compatibility, activation conversion and output
- * interpretation. Concrete pairs own conventions; execution owns no NLA names.
- * Contract: a Pair owns immutable, verified provenance and a prepared AV
- * prompt. Its source identities come from verified archives, not model-name
- * guesses. validate_model checks the role's source and mathematical
- * capabilities before upload. prepare_injection accepts exactly one completed
- * raw capture row from the declared site. No transcript text or neighboring
- * rows enter the AV prompt. Results own their bytes; inputs are borrowed for a
- * call. Invalid site, source, shape, dtype, nonfinite values or unsupported
- * semantics -> invalid_argument; checked limits -> length_error. Allocation
- * failure propagates without mutation.
+ * Axis M7: pairing, activation-injection descriptors and explanation
+ extraction.
+ * Contract: a Pair owns model/source identities and its exact trained AV
+ prompt.
+ * It validates the advertised target site and checkpoint convention. A live
+ * CaptureRow carries one completed device lease and no host span; a diagnostic
+ * row carries explicit host bytes. Device and source owner outlive injection.
+ * An Injection describes the marker, output storage, source type and trained
+ * scale. Its source norm is populated after successful GPU normalization.
  *
- * Algorithm: logical-overview.md, "4 Interpret selected positions", and
- * transformer-execution.md, "NLA entry and exit paths" (both under
- * docs/architecture/). Let h have D elements and p be its target-token
- * position.
- * 1. Validate h's site, width, storage and provenance against the selected
- * pair. Decode the original storage to FP32 without modifying the retained
- * bytes.
- * 2. The concrete pair computes its trained normalization/scale and casts once
- *    into the AV embedding storage. Return an owned replacement row and the
- *    normalization metadata, with the AV prompt position separate from p.
- * 3. The executor looks up the exact prepared AV IDs, replaces only that row,
- *    and generates with a fresh sequence/cache. It never treats h as token IDs.
- * 4. Decode generated IDs losslessly; locate the pair's explanation delimiters.
- *    Return a byte range only when the delimiter contract is satisfied.
- * Preserve complete raw output otherwise. Delimiters are formatting, not
- * confidence. Generation stop/failure status is independent of delimiter
- * status.
+ * Algorithm: execution-boundary.md H2/H3 and logical-overview.md
+ interpretation.
+ * The pair validates provenance and selects the trained marker. For a live row
+ * it returns a DeviceNormalization descriptor; the executor widens source
+ * values on GPU, computes FP32 L2, divides, scales and casts once, then gates
+ * inference with device status and replaces the marker embedding before block0.
+ * normalize_activation is the explicit host reference helper: eight interleaved
+ * FP32 square-sum lanes, left-to-right lane reduction, FP32 sqrt, divide then
+ * multiply, one final cast. It rejects malformed/nonfinite/zero-norm inputs.
+ * explanation_tags scans decoded bytes for exactly one ordered nonnested tag
+ * pair, trims ASCII whitespace and returns a borrowed byte range. All raw text
+ * remains available even when tags are missing/malformed.
+ * Cost: live preparation O(1) descriptor copying; numerical conversion O(D)
+ * on device. Host reference conversion owns O(D) FP32/output temporaries.
+ * Optimization: no live host vector materialization or per-token conversion.
  *
- * Cost: O(D) conversion and temporary storage, O(output bytes) extraction.
- * Optimization: prepare the fixed prompt once per pair and upload only one
- * D-element replacement per interpretation; no host copy of all AV embeddings.
- * Numerical reduction and rounding belong to the concrete pair, not this API.
- * Corpus consultation, header design and implementation, 2026-10-19 (full rules
- * read): cpp-guidelines I.7 (#ri-post): explicit owned replacement and
- * raw-output rules. cpp-guidelines R.1 (#rr-raii): pair and conversion payloads
- * own their resources. cpp-perf-guidelines GPU.1: count the single-row
- * transfer, keep embeddings on GPU. Source:
- * guidelines/gpu/GPU.1-keep-data-on-device.md. Normalization implementation:
- * accumulate squared FP32 values into eight interleaved lanes (i modulo 8),
- * reduce lanes left-to-right, then take FP32 sqrt. This matches the frozen CPU
- * norm on the tested vectors. Multiplication and addition are separately
- * rounded (-ffp-contract=off); no FP64 intermediate. One D-element FP32 buffer,
- * eight lane sums and one D-element output are owned.
+ * Corpus consultation, header design and implementation, 2026-10-20: both local
+ * servers queried separately in each phase and the cited rules read in full.
+ * cpp-guidelines I.1 (#ri-explicit), R.1 (#rr-raii): explicit residency,
+ * completion, ownership and failure contracts. cpp-perf-guidelines GPU.1,
+ * GPU.6, GPU.7, GPU.9: keep tensor intermediates/decisions on device, batch
+ * dispatch, decouple observation and separate persistent from transient arenas.
+ * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * Related GPU.6/7/9 entries describe dispatch, staging and storage.
  */
 #pragma once
 
@@ -71,8 +59,9 @@ struct PairIdentity {
 };
 struct CaptureRow {
   models::ObservationSite site;
-  models::TokenPosition position;  // Target consumed-token position.
-  std::span<const std::byte> bytes;
+  models::TokenPosition position;    // Target consumed-token position.
+  std::span<const std::byte> bytes;  // Host-reference path only.
+  std::optional<inference::DeviceCapture> device{};
 };
 struct Injection {
   inference::EmbeddingOverride embedding;
@@ -89,9 +78,10 @@ struct ExplanationRange {
   std::optional<ByteRange> content;
 };
 // Pure FP32 L2 conversion used by pairs with this trained normalization law.
-// Reject empty/malformed/nonfinite rows, unsupported storage and invalid scale.
+// Reject empty/malformed/nonfinite rows, unsupported storage and invalid
+// scale.
 [[nodiscard]] Injection normalize_activation(
-    CaptureRow, models::TokenPosition injection_position, float scale,
+    const CaptureRow&, models::TokenPosition injection_position, float scale,
     tensors::ElementType output_storage);
 [[nodiscard]] ExplanationRange explanation_tags(std::string_view raw_bytes);
 class Pair {

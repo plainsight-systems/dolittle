@@ -19,11 +19,11 @@
  *
  * Design and cost: host logits are an explicit transfer boundary. At vocabulary
  * 151936, one row costs 303872 bytes in BF16 or 607744 in FP32 before widening,
- * plus queue completion latency. This is the proposed inspectable baseline;
- * measure transfer, synchronization and selection separately before optimizing.
- * Optimization: retain logits/selection scratch capacity across draws; keep all
- * transformer intermediates and KV storage on device.
- * Overlay: docs/architecture/file-mapping.md, "Sampling without a class
+ * plus queue completion latency. This interface is the explicit host
+ * reference/diagnostic path. The live application uses device.h and downloads
+ * only its token/status pair. Optimization: retain logits/selection scratch
+ * capacity across draws; keep all transformer intermediates and KV storage on
+ * device. Overlay: docs/architecture/file-mapping.md, "Sampling without a class
  * hierarchy"; logical-overview.md, "2 Generate and capture". Corpus
  * consultation, header design and implementation, 2026-10-18: cpp-guidelines
  * I.1 (#ri-explicit), I.7 (#ri-post): explicit RNG ownership, filtering
@@ -40,6 +40,7 @@
 #include <span>
 
 namespace dolittle::inference::sampling {
+enum class Execution : std::uint8_t { host_reference, device };
 enum class SelectionMode : std::uint8_t { greedy, categorical };
 struct Settings {
   SelectionMode mode;

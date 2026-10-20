@@ -1,5 +1,32 @@
 # Project memory
 
+## Prefill projection strategy
+
+CUDA multi-row projections with input width divisible by 128 stage eight
+prompt rows by 128 features in shared memory. Coalesced weight loads feed
+eight independent row accumulators; fixed feature partials and the original
+FP32 merge tree preserve stored results across row/chunk schedules. Ragged
+input widths retain the original tiled path; single-row decode is unchanged.
+Device-positioned KV stores and the autonomous execution boundary are preserved.
+Independent review examined llama.cpp, vLLM and CUTLASS. Their operand reuse
+principles inform the mapping; tensor-core arithmetic is not interchangeable
+with the established reduction contract. No precision, oracle or limit changes.
+Native/PTX numerical verification, CUDA memory checks, application execution,
+formatting and host/CUDA static analysis pass. Performance evidence and the
+adversarial review remain in ignored local records; this is not a performance
+ceiling claim.
+
+## Resident-weight upload pipeline
+
+Resident-weight uploads use two reusable pinned staging slots within a 2 MiB
+total payload cap and the caller's host allowance. CPU filling overlaps the
+other slot's device transfer. Queue completion protects each slot before reuse;
+all uploads finish before the resident model is returned. One-byte allowances
+use one slot; odd allowances leave at most one byte unused. Resource owners
+drain pending uses on failure. This changes loading only: model residency,
+tensor precision, numerical references and the GPU execution boundary remain
+unchanged. Timing evidence stays in ignored local records.
+
 ## Identity
 
 - **Project:** Dolittle, named after Doctor Dolittle.
@@ -331,3 +358,108 @@ Container Toolkit remains a prerequisite for users' own Docker deployments.
   settings independent (256 output default, 512 total context). Admission rejects
   oversize requests rather than truncating them. Early model completion remains
   normal. This is application configuration, not a paper-derived model limit.
+
+## CUDA decode and attention execution
+
+Single-row projection uses cooperative GEMV: 16 or 32 adjacent lanes own the
+existing fixed FP32 partials and shuffle reduction. Multi-row projection keeps
+its tiled path. Dispatch may change lane ownership, but never the mathematical
+partition, reduction order or BF16 rounding contract. Attention retains scores
+on chip for up to 8,192 keys and head widths up to 1,024, with a shared-memory
+bound admitted during preparation. Parallel key dots and explicit FP32 softmax
+probabilities replace per-key block reductions and repeated score computation.
+For head widths up to 128, both existing contiguous value-reduction ranges run
+concurrently, then merge once. Larger shapes retain the bounded-memory
+recomputation path. Model precision, sampling semantics, independent oracles
+and limits remain unchanged. Quantization is explicitly out of scope for this
+optimization work.
+
+The contiguous cache exposes checked mutable windows on its owning queue.
+Cached execution directs rotated-K and projected-V producers into those rows,
+avoiding two append copies per block when the prepared window fits. A bounded
+scratch-and-copy fallback handles the capacity tail. Prefix commit still follows
+successful queue completion; allocation remains once per turn with no cross-turn
+pooling or reuse. This is a direct-write improvement to the existing layout.
+
+The host-reference categorical sampler encodes complete finite FP32 logits into descending integer
+keys and uses stable radix passes for larger vocabularies. Equal logits, including
+signed zero, retain ascending token IDs. Reserved scratch avoids allocation per
+draw. FP64 probabilities, nucleus boundaries and RNG advancement stay unchanged;
+small candidate sets use comparison sorting.
+
+Charlotte's decode/prefill separation and attention tiling, Vigil's optimized
+MLX dispatch, and llama.cpp's cooperative CUDA GEMV informed the implementation.
+The computation remains direct C++/CUDA; these references add no runtime
+library dependency. Detailed source comparisons and validation records stay local.
+
+Wide RMSNorm uses cooperative input staging and output writes. Its 128 component
+sums and original merge order remain fixed. BF16 decode uses paired loads for
+wide-input, bounded-output projections; full-model profiling retains scalar
+loads for attention and large-output projections. Aligned 128-wide BF16 attention
+keeps query features in registers and loads each key range with two 128-bit
+loads. These CUDA dispatch choices preserve the existing FP32 operations and
+BF16 rounding boundaries. Shared-memory admission includes RMS staging; no
+global workspace or per-token allocation is added.
+
+## Device selection and steady-state allocation
+
+Live target and NLA generation use device-resident categorical/greedy selection.
+CUDA uses stable radix ordering, FP64 weights and fixed 256-entry prefix tiles;
+tile totals combine in index order. Filtering, ties and RNG draw mapping retain
+the same mathematical law; rounding may differ from the CPU serial fold. The
+host sampler remains an explicit reference path. Live MT19937-64 state is seeded once on-device; its sequence and draw mapping
+remain compatible with the host reference. GPU stop/error latches prevent later
+queued draws from extending the stream. The sampler keeps its token/status pair on device; the sequence publishes
+small token/control events for observation.
+Tensor BF16/FP32 arithmetic and frozen numerical references remain unchanged.
+
+Live generation retains device capture leases and appends metadata into reserved
+results. Explicit host reference replay consumes borrowed plan views.
+Tokenizers and protocol cursors fill caller-reserved buffers; capacity exhaustion
+fails explicitly. The session prepares immutable event slots and payload
+capacities before each stream, then publishes aliasing shared owners without
+per-event control-block allocation. Readers may retain slots without reuse.
+`DOLITTLE_ALLOCATION_CHECKS` checks successful live generation iterations,
+including observer callbacks, for C++ new and explicit GPU/staging allocation.
+Preparation, finalization, failure reporting and HTTP reader threads are outside
+that contract; it does not intercept arbitrary C allocation in shared libraries.
+
+## Accepted GPU execution boundary
+
+The visual [execution boundary](../architecture/execution-boundary.md) is accepted.
+One GPU graph owns full-chunk prefill, its remainder, first selection and decode.
+GPU state supplies positions, cache addressing, RNG/selection and stop decisions;
+no CPU result, acknowledgement or continuation submission gates progress.
+CPU setup, tokenization, observation, detokenization and cancellation remain.
+Device execution is the default; host reference execution is explicitly selected.
+
+Raw captures copy D2D at advertised producer boundaries into independent leased
+arenas. They survive target KV/scratch/weight release. The current live API
+captures all consumed positions at selected sites; sparse position selection is
+available through explicit full-forward diagnostics. A record exposes only
+completed rows. Device must outlive its capture leases.
+
+The journal contains immutable 32-byte metadata events, with P+2G+2 admitted
+slots, plus aligned control words. Collection can lag until completion. Every
+selected token, including EOS, is consumed before graceful termination; prefill
+may stop early. Device/transport failure makes captured device rows unavailable.
+Graph owners retire before their queues and borrowed arenas.
+
+A live pair returns a normalization descriptor, not a CPU vector. GPU FP32 L2,
+divide, scale and final cast run before AV prefill; device validation gates all
+inference. H3 replaces the trained marker embedding before block0. The source
+norm exits only as provenance. No activation readback or injection upload is
+needed. Attention scale initialization also runs on GPU. Tensor precision,
+normalization order, independent references and acceptance limits are unchanged.
+
+Retained capture memory is included in AV admission. CUDA graph/runtime overhead
+is separate from explicit arena estimates. The existing five integration
+scenarios cover the boundary; detailed reports remain ignored. Native and
+forced-PTX numerical workflows pass on the RTX 3090 Ti. CUDA memory checks report
+zero errors; the application workflow passes retry/reconnect and interpretation.
+The target/AV trace records one graph submission per sequence, including prefill
+and final-token consumption, with exact output parity. Source review verifies
+device capture/injection storage and metadata-only mapped publication. Strict
+builds, 19 units (also under ASan/UBSan), formatting and all 74 static-analysis
+commands pass. Andrew accepted this optimization pass for integration on 2026-10-20. The
+existing live service is unchanged.

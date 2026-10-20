@@ -23,10 +23,20 @@
  * changing them can change the sampled trace even with identical logits.
  *
  * Implementation design: FP64 host weights/cumulative sums and stable ID tie
- * ordering. One reusable candidate buffer, O(V) scratch and O(V log V) sorting
- * in the baseline. No std::discrete_distribution dependency on vendor mapping.
- * Optimization: reuse scratch; measure partial selection before replacing the
- * full sort, preserving exactly the retained candidates and order.
+ * ordering. Optimization: encode each finite FP32 logit's complete bit pattern
+ * as a descending unsigned key; both signed zeros share one key. Four stable
+ * 8-bit radix passes preserve the initial ascending ID order on equal logits.
+ * Build all histograms in one scan and skip digits shared by every candidate.
+ * Small sets (<512 candidates) retain comparison sorting to avoid histogram
+ * setup. Two vocabulary-reserved candidate buffers provide O(V) scratch; large
+ * sorts take O(V) work without altering any probability or RNG arithmetic.
+ * No std::discrete_distribution dependency on vendor mapping.
+ * Corpus consultation, header design and implementation, 2026-10-19:
+ * cpp-guidelines NL.2
+ * (#rl-comments-intent): document exact ordering, including signed zero.
+ * cpp-perf-guidelines CDSA.20: use exact integer float keys, stable passes and
+ * reusable scratch; these small records can be sorted directly. Source:
+ * guidelines/cpu-dsa/CDSA.20-sort-integer-keys-not-records.md.
  * Invalid inputs or allocation failure leave the RNG unchanged. Commit the RNG
  * advance only after all validation/preparation succeeds. Objects are serial,
  * not reentrant; moved-from objects permit only destruction/reassignment.
@@ -41,14 +51,35 @@
 #include "inference/sampling/categorical.h"
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "bounds.h"
 
 namespace dolittle::inference::sampling {
+namespace {
+constexpr std::size_t radix_min_candidates = 512;
+constexpr unsigned digit_bits = 8;
+constexpr unsigned digit_count = 4;
+constexpr std::size_t bucket_count = 1U << digit_bits;
+static_assert(std::numeric_limits<float>::is_iec559 &&
+              sizeof(float) == sizeof(std::uint32_t));
+// Keep all 32 bits. Signed zeros compare equal in the public contract.
+std::uint32_t descending_key(float value) {
+  const auto bits = std::bit_cast<std::uint32_t>(value == 0 ? 0.0F : value);
+  const auto mask = (0U - (bits >> 31)) | 0x80000000U;
+  return ~(bits ^ mask);
+}
+std::size_t digit(std::uint32_t key, unsigned index) {
+  return (key >> (index * digit_bits)) & (bucket_count - 1);
+}
+}  // namespace
+
 void validate_settings(Settings s) {
   if ((s.mode != SelectionMode::greedy &&
        s.mode != SelectionMode::categorical) ||
@@ -62,11 +93,46 @@ void validate_settings(Settings s) {
 struct Categorical::Impl {
   struct Candidate {
     std::uint32_t id;
+    std::uint32_t key;
     double value;
   };
   std::size_t vocabulary;
   std::vector<Candidate> candidates;
-  explicit Impl(std::size_t n) : vocabulary(n) { candidates.reserve(n); }
+  std::vector<Candidate> scratch;
+  explicit Impl(std::size_t n) : vocabulary(n) {
+    candidates.reserve(n);
+    scratch.reserve(n);
+  }
+  void sort_candidates() {
+    if (candidates.size() < radix_min_candidates) {
+      std::sort(candidates.begin(), candidates.end(),
+                [](const Candidate& a, const Candidate& b) {
+                  return a.key != b.key ? a.key < b.key : a.id < b.id;
+                });
+      return;
+    }
+    std::array<std::array<std::size_t, bucket_count>, digit_count> counts{};
+    for (const auto& candidate : candidates) {
+      for (unsigned d = 0; d < digit_count; ++d) {
+        ++counts.at(d).at(digit(candidate.key, d));
+      }
+    }
+    scratch.resize(candidates.size());
+    for (unsigned d = 0; d < digit_count; ++d) {
+      auto& offsets = counts.at(d);
+      if (offsets.at(digit(candidates.front().key, d)) == candidates.size()) {
+        continue;
+      }
+      std::size_t offset = 0;
+      for (auto& bucket : offsets) {
+        offset += std::exchange(bucket, offset);
+      }
+      for (const auto& candidate : candidates) {
+        scratch.at(offsets.at(digit(candidate.key, d))++) = candidate;
+      }
+      candidates.swap(scratch);
+    }
+  }
 };
 Categorical::Categorical(std::size_t n) {
   if (!n || n - 1 > std::numeric_limits<std::uint32_t>::max()) {
@@ -91,7 +157,9 @@ std::uint32_t Categorical::select(std::span<const float> logits, Settings s,
       throw std::invalid_argument("nonfinite sampling logit");
     }
     if (std::isfinite(dolittle::at(logits, i))) {
-      c.push_back({static_cast<std::uint32_t>(i), dolittle::at(logits, i)});
+      const auto value = dolittle::at(logits, i);
+      c.push_back(
+          {static_cast<std::uint32_t>(i), descending_key(value), value});
     }
   }
   if (c.empty()) {
@@ -103,7 +171,7 @@ std::uint32_t Categorical::select(std::span<const float> logits, Settings s,
   if (s.mode == SelectionMode::greedy) {
     return std::min_element(c.begin(), c.end(), order)->id;
   }
-  std::sort(c.begin(), c.end(), order);
+  impl_->sort_candidates();
   if (s.top_k && c.size() > s.top_k) {
     c.resize(s.top_k);
   }

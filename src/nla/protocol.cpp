@@ -1,6 +1,7 @@
 /*
  * Pure activation normalization and explanation delimiter extraction.
- * Axis M7: shared conversion helpers called by a model-specific Pair.
+ * Axis M7: explicit host reference conversion and text delimiter extraction.
+ * Live device rows are rejected; their numerical path is DeviceInjection.
  * Contract: borrow one D-element FP32/BF16 row, a separate AV position and a
  * positive finite scale. Return owned replacement bytes and the original norm.
  * Reject empty/malformed/nonfinite rows, zero/overflowed norm, unsupported
@@ -26,8 +27,8 @@
  *
  * Cost: O(D) conversion, 4D FP32 + D*b output bytes and eight float sums;
  * delimiter scanning is O(output bytes), with no output-string copy.
- * Optimization: normalize only the selected host-owned row, then upload D*b
- * bytes. No neighboring captures or full embedding matrix are copied here.
+ * Optimization: diagnostics normalize only the explicitly exported row.
+ * No neighboring captures or full embedding matrix are copied here.
  * The eight-lane FP32 order matches the frozen CPU norm on the tested vectors;
  * reference arithmetic and acceptance limits remain unchanged.
  * Corpus consultation, implementation, 2026-10-19 (full rules read):
@@ -35,6 +36,9 @@
  * cpp-guidelines R.1 (#rr-raii): local conversion storage survives exceptions.
  * cpp-perf-guidelines GPU.1: one selected-row transfer, no GPU embedding
  * readback; source guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * Execution-boundary header/implementation consultation, 2026-10-20:
+ * Core I.1/R.1 and Performance GPU.1/GPU.9 (both local corpora queried/read)
+ * make this helper explicitly host-reference-only; device rows are rejected.
  */
 #include "nla/protocol.h"
 
@@ -50,12 +54,12 @@
 #include "tensors/tensor.h"
 
 namespace dolittle::nla {
-Injection normalize_activation(CaptureRow row, models::TokenPosition position,
-                               float scale,
+Injection normalize_activation(const CaptureRow& row,
+                               models::TokenPosition position, float scale,
                                tensors::ElementType output_storage) {
   using tensors::ElementType;
   const auto width = row.site.vector_width;
-  if (!width ||
+  if (row.device || !width ||
       width > std::numeric_limits<std::size_t>::max() / sizeof(float) ||
       (row.site.storage_type != ElementType::bfloat16 &&
        row.site.storage_type != ElementType::float32) ||

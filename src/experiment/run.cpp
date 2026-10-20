@@ -1,105 +1,49 @@
 /*
- * Sequential target/AV orchestration with retained records.
- * Axis R3: admission, one active experiment, model residency and cancellation.
- * Contract: Run owns its pair, model providers, text helpers and retained
- * record; it borrows one device that must outlive it. Public calls are
- * synchronous and serialized, not reentrant or concurrently polled. The device
- * is exclusively leased to this Run by composition; multiple Run objects are
- * not GPU scheduling. Providers open verified host checkpoints on demand, never
- * upload or cache GPU weights. LoadedModel source identity must describe the
- * returned checkpoint's verified backing archive; validate it against Pair
- * before device preparation. A pair's source metadata may be prepared
- * separately without retaining all model payloads. The host budget includes the
- * active loader's reported working allowance; mapped file address space and OS
- * page cache are reported separately.
+ * Axis R3: sequential target/AV phases with durable experiment records.
+ * Contract: Run owns pairing, providers, text helpers, records and optional
+ * resident AV weights; it borrows Device, which must outlive capture leases.
+ * Providers load only verified sources within their host allowance. Operations
+ * are serial. Target executes once; later interpretations use fresh sequence
+ * state and may reuse AV weights. Rejected preflight is retryable; unexpected
+ * target failure closes the run. close releases model resources, while the
+ * immutable record and its capture leases remain readable until destruction.
  *
- * Algorithm: docs/architecture/logical-overview.md, "1 Establish the run",
- * "2 Generate and capture", "3 Retain the experiment and change phases", and
- * "4 Interpret selected positions". Let P be prompt length, G target cap,
- * Q the fixed AV prompt length and A an interpretation's output cap.
- * 1. Before target upload, format/encode P tokens, validate settings and admit
- *    C=P+G capacity (including final emitted-token consumption), all capture
- *    bytes/indexes, decoded text bounds and transient/readback budgets. Load
- * and validate target provenance and the pair's capture site.
- * Overflow/unsupported inputs fail before generation; never shorten a request
- * to fit silently.
- * 2. Load one resident target weight owner, prepare one sequence plan, and call
- *    generate with the pair's dynamic observation site. Retain only completed
- *    captures on cancellation/failure; decode/classify and move into Record.
- * 3. Finish/drain all dependent work; destroy sequence KV/scratch/staging, then
- *    resident target weights and host checkpoint. Publish retained state only
- *    after this release. An allocation failure cannot erase an already
- * committed record; before one can be materialized, the call may throw without
- * a result.
- * 4. interpret(key,settings) validates the retained row and reserves an
- * attempt's record/temporary space. Normalize only that row through Pair. On
- * the first request, open/validate/upload AV after target release; keep its
- * weights resident between requests. No target rerun or target+AV GPU overlap
- * occurs.
- * 5. Admit Q+A capacity and a fresh cache/sequence ID. Install the owned
- * injection during preparation. Generate using the exact AV prompt, selected
- * sampler and seed; consume the final emitted token before sealing as in target
- * mode. No target observation hooks are requested on the AV. Decode output,
- * extract tags, append a variant, and release sequence resources while
- * retaining AV.
- * 6. A canceled request records partial output and returns to AV-ready after
- *    cleanup. A load failure returns to retained so a later request may retry.
- *    A device failure destroys the poisoned resident owner and closes this Run;
- *    in-place device recovery is outside this slice. Record data remains
- * available, with no automatic target rerun. close releases AV resources but
- * keeps the record and forbids further generation/interpretation. Destructor
- * drains before release. Invalid calls (second target generation, unknown
- * capture, closed Run, rejected admission) throw before an attempt is accepted.
- * Recoverable execution errors append a failed attempt. bad_alloc may prevent
- * recording an error and propagates; existing record entries remain intact. A
- * stop requested before interpret starts does no GPU work and creates a
- * canceled attempt if its record slot is admitted. Preflight rejection leaves
- * empty state retryable. Once target execution starts, failure to materialize
- * any record closes the Run; it cannot silently rerun. Execution/sequence IDs
- * are monotonic within Run, separate from RunId and VariantId. Reject counter
- * overflow; never reuse an ID after a failed attempt.
+ * Algorithm: logical-overview.md experiment phases; execution-boundary.md
+ H0-H4.
+ * 1. Prepare/tokenize target text, validate pairing and budgets, load target
+ *    weights, then prepare and execute the complete GPU sequence. The host
+ *    observer detokenizes/classifies metadata without scheduling GPU progress.
+ * 2. Build the retained record from completed device capture leases and exact
+ *    IDs. Release target sequence/cache/weights; retained captures remain
+ valid.
+ * 3. Resolve a selected consumed row, validate the trained pair convention and
+ *    construct a device normalization descriptor. Admit the AV model/sequence
+ *    alongside retained captures. Reuse AV weights on subsequent requests.
+ * 4. GPU normalization/status gates AV prefill; marker embedding replacement
+ *    precedes block0. Run the same GPU generation path, retain reported source
+ *    norm and exact AV IDs, decode them and extract explanation tags.
+ * 5. Append a completed/cancelled/failed interpretation with honest phase costs
+ *    and provenance. A load failure can be retried; device failure prevents
+ *    pretending execution succeeded. Cancellation is an external stop request.
+ * Host-reference selection remains an explicitly composed diagnostic path with
+ * host captures/conversion. It is not a live fallback.
+ * Cost: peak device=max(target phase, retained captures+AV phase), including
+ KV,
+ * scratch, sampler, constants, graph state and prepared journal allocations.
+ * Host estimates include metadata, verified loading and diagnostic staging.
+ * GPU normalization is included in generation duration; conversion_seconds
+ * applies only to CPU reference conversion. Estimates exclude driver overhead.
+ * Optimization: one model weight set resident at a time, capture arenas survive
+ * the switch, and repeated AV requests reuse weights without reloading target.
  *
- * Baseline: one target generation per Run; one row per interpretation. Callers
- * explore neighboring rows by successive calls, obtaining separate variants.
- * Explicit settings/seed are always recorded; initial exploration uses
- * temperature 1, while deterministic numerical fixtures use greedy selection.
- * No confidence score, AR, HTTP server or browser behavior belongs to this
- * slice.
- *
- * Cost: peak device arena bytes = max(target weights+target sequence,
- * AV weights+AV sequence), not their sum. Per-model KV is 2*L*C*Hkv*d*b;
- * L=36,Hkv=8,d=128,b=2 gives 147456*C bytes. Account separately for scratch,
- * weight upload staging, injection staging, readback and driver headroom.
- * Host peak includes retained captures 8192*(P+G), record/index/text
- * allowances, one pending variant, active loader, tokenizers, normalized row
- * and staging. Host estimates cover admitted payload/staging and supplied
- * loader/text metadata; recipe/kernel metadata, allocator overhead and mapped
- * address space are excluded. These are allocation estimates, not measured
- * process/device peaks. Optimization: retain AV weights once; fresh contiguous
- * KV per variant keeps isolation simple. Allocation pooling remains deferred,
- * as in target generation. Timings separate loading, target generation,
- * release/switch, AV generation and decoding; GPU completion bounds compute
- * time. No performance claim is made. Corpus consultation, implementation,
- * 2026-10-19 (full rules read): cpp-guidelines R.1 (#rr-raii): sequence dies
- * before resident owner/device. cpp-guidelines I.7 (#ri-post): retained state
- * means target GPU resources released. cpp-perf-guidelines GPU.9: separate
- * persistent weights from transient sequence arenas; source
- * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
- * cpp-perf-guidelines GPU.1: upload each model per phase and one row per
- * attempt; source guidelines/gpu/GPU.1-keep-data-on-device.md.
- *
- * Live progress adapter (implementation corpus queried 2026-10-19): decode each
- * newly appended ID into bounded raw bytes and token byte ranges. For target
- * output, feed only generated IDs to the model-owned segmentation cursor. Pass
- * borrowed deltas with role, absolute first position and consumed watermark to
- * RunObserver. Session copies what it retains; no Record view crosses threads.
- * Report loading before work and ready only after resource release/record
- * commit. Decode/publication failure signals the observer, disables token
- * callbacks and finalizes the current sequence gracefully; it is separate from
- * device failure. CP.22 (#rconc-unknown), no callback under locks; COPY.7,
- * bounded deltas rather than repeated prefix copies
- * (guidelines/copy-move/COPY.7-eliminate-hidden-copies.md); GPU.1, no
- * additional readback (guidelines/gpu/GPU.1-keep-data-on-device.md).
+ * Corpus consultation, header design and implementation, 2026-10-20: both local
+ * servers queried separately in each phase and the cited rules read in full.
+ * cpp-guidelines I.1 (#ri-explicit), R.1 (#rr-raii): explicit residency,
+ * completion, ownership and failure contracts. cpp-perf-guidelines GPU.1,
+ * GPU.6, GPU.7, GPU.9: keep tensor intermediates/decisions on device, batch
+ * dispatch, decouple observation and separate persistent from transient arenas.
+ * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * Related GPU.6/7/9 entries describe dispatch, staging and storage.
  */
 #include "experiment/run.h"
 
@@ -145,17 +89,10 @@ tokenizers::DecodedBytes decode_bounded(const tokenizers::Tokenizer& tokenizer,
                                         std::size_t limit) {
   tokenizers::DecodedBytes result;
   result.tokens.reserve(ids.size());
-  for (auto id : ids) {
-    const std::array one{id};
-    auto part = tokenizer.decode(one);
-    if (part.tokens.size() != 1 ||
-        part.bytes.size() > limit - result.bytes.size()) {
-      throw std::length_error("decoded byte budget");
-    }
-    const auto begin = result.bytes.size();
-    result.bytes += part.bytes;
-    result.tokens.push_back(
-        {id, begin, result.bytes.size(), part.tokens.at(0).mapped});
+  result.bytes.reserve(limit);
+  tokenizer.decode_into(ids, result);
+  if (result.tokens.size() != ids.size() || result.bytes.size() > limit) {
+    throw std::length_error("decoded byte budget");
   }
   return result;
 }
@@ -167,12 +104,25 @@ class ProgressAdapter final : public inference::GenerationObserver {
                   const tokenizers::Tokenizer& tokenizer,
                   const text::Protocol* protocol,
                   const text::PreparedPrompt& prompt, std::size_t byte_limit,
+                  std::size_t max_generated, std::size_t prefill_chunk,
                   std::optional<models::ObservationSite> site = {})
       : observer_(observer),
         role_(role),
         tokenizer_(tokenizer),
         remaining_(byte_limit),
         site_(site) {
+    if (observer) {
+      decoded_.bytes.reserve(byte_limit);
+      decoded_.tokens.reserve(std::max(prompt.ids.size(), std::size_t{1}));
+      segments_.reserve(1);
+      if (!observer->prepare_stream({prompt.ids.size(), max_generated,
+                                     prefill_chunk, tokenizer.max_token_bytes(),
+                                     byte_limit})) {
+        observer->publication_failed();
+        observer_ = nullptr;
+        failed_ = true;
+      }
+    }
     if (observer && protocol) {
       cursor_ = protocol->make_cursor(prompt.ids.size(), prompt.thinking);
       if (!cursor_) {
@@ -181,18 +131,23 @@ class ProgressAdapter final : public inference::GenerationObserver {
     }
   }
   bool update(const inference::GenerationUpdate& update) noexcept override {
-    if (!observer_) return true;
+    if (!observer_) {
+      return !failed_;
+    }
     try {
-      auto decoded =
-          decode_bounded(tokenizer_.get(), update.appended, remaining_);
-      auto segments =
-          cursor_ && update.first_position >= update.prompt_tokens
-              ? cursor_->append(update.appended, update.first_position)
-              : std::vector<text::TokenSegment>{};
-      remaining_ -= decoded.bytes.size();
+      tokenizer_.get().decode_into(update.appended, decoded_);
+      if (decoded_.bytes.size() > remaining_ ||
+          decoded_.tokens.size() != update.appended.size()) {
+        throw std::length_error("decoded byte budget");
+      }
+      segments_.clear();
+      if (cursor_ && update.first_position >= update.prompt_tokens) {
+        cursor_->append_into(update.appended, update.first_position, segments_);
+      }
+      remaining_ -= decoded_.bytes.size();
       return observer_->progress({role_, update.first_position,
                                   update.prompt_tokens, update.consumed_tokens,
-                                  std::cref(decoded), segments, site_});
+                                  std::cref(decoded_), segments_, site_});
     } catch (...) {
       observer_->publication_failed();
       return false;
@@ -200,6 +155,9 @@ class ProgressAdapter final : public inference::GenerationObserver {
   }
 
  private:
+  tokenizers::DecodedBytes decoded_;
+  std::vector<text::TokenSegment> segments_;
+  bool failed_ = false;
   RunObserver* observer_;
   StreamRole role_;
   std::reference_wrapper<const tokenizers::Tokenizer> tokenizer_;
@@ -255,7 +213,10 @@ struct Run::Impl {
                                             2 * sizeof(std::uint32_t) +
                                             2 * sizeof(CaptureKey) +
                                             2 * sizeof(std::size_t)));
-    bytes = add(bytes, multiply(tokens, capture_width));
+    if (inputs.selection_execution ==
+        inference::sampling::Execution::host_reference) {
+      bytes = add(bytes, multiply(tokens, capture_width));
+    }
     bytes = add(bytes, multiply(limits.record.max_variants,
                                 sizeof(std::unique_ptr<Variant>)));
     return bytes;
@@ -285,6 +246,24 @@ struct Run::Impl {
                                     : inputs.verbalizer_mode);
     return result;
   }
+  std::size_t retained_device_bytes() const {
+    std::size_t bytes = 0;
+    if (record) {
+      for (const auto& capture : record->target().generation.captures) {
+        if (capture.device) {
+          bytes = add(bytes, capture.device->bytes);
+        }
+      }
+    }
+    return bytes;
+  }
+  std::size_t available_device() const {
+    const auto used = retained_device_bytes();
+    if (used >= limits.max_device_bytes) {
+      throw std::length_error("retained device budget");
+    }
+    return limits.max_device_bytes - used;
+  }
   inference::CachedForwardOptions options(std::size_t capacity,
                                           inference::ExecutionId execution_id,
                                           bool target, std::size_t host) const {
@@ -298,7 +277,7 @@ struct Run::Impl {
             target ? std::vector<models::ObservationPoint>{site.point}
                    : std::vector<models::ObservationPoint>{},
             {target ? multiply(capacity, row) : 0, target ? capacity : 0},
-            limits.max_device_bytes,
+            target ? limits.max_device_bytes : available_device(),
             host};
   }
 };
@@ -306,7 +285,10 @@ Run::Run(gpu::Device& device, RunId id, RunInputs inputs, RunLimits limits)
     : impl_(std::make_unique<Impl>(device, id, std::move(inputs), limits)) {
   const auto& in = impl_->inputs;
   if (!in.pair || !in.target || !in.verbalizer || !in.target_tokenizer ||
-      !in.verbalizer_tokenizer || !in.target_protocol || !in.selector ||
+      !in.verbalizer_tokenizer || !in.target_protocol ||
+      (in.selection_execution ==
+           inference::sampling::Execution::host_reference &&
+       !in.selector) ||
       in.backend_identity.empty() || !limits.max_prefill_chunk ||
       !limits.max_target_tokens || !limits.max_verbalizer_tokens ||
       !limits.max_decoded_bytes || !limits.max_device_bytes ||
@@ -380,11 +362,16 @@ void Run::generate_impl(const text::Prompt& prompt,
        std::min(upload_allowance, host - working)});
   p.measurements.target_load_seconds = elapsed(started);
   const auto execution = p.next_id();
-  // Preflight failures above remain retryable. Once sequence execution begins,
-  // unexpected failure closes the run rather than silently repeating a target.
+  // Preflight failures above remain retryable. Once sequence execution
+  // begins, unexpected failure closes the run rather than silently repeating
+  // a target.
   try {
     auto plan = inference::prepare_cached_forward(
         *resident, p.options(capacity, execution, true, host - working));
+    if (p.inputs.selection_execution ==
+        inference::sampling::Execution::device) {
+      plan.prepare_sampling();
+    }
     p.measurements.estimated_peak_device_bytes =
         plan.estimated_peak_device_bytes();
     p.measurements.estimated_peak_host_bytes =
@@ -393,13 +380,20 @@ void Run::generate_impl(const text::Prompt& prompt,
                                   std::min(upload_allowance, host - working))));
     started = Clock::now();
     publication.phase(WorkPhase::generating_target);
-    ProgressAdapter adapter(publication.observer(), StreamRole::target,
-                            *p.inputs.target_tokenizer,
-                            p.inputs.target_protocol.get(), prepared,
-                            p.limits.max_decoded_bytes, site);
-    auto result = inference::generate(
-        plan, prepared, settings, p.inputs.selector, execution, adapter, stop);
+    ProgressAdapter adapter(
+        publication.observer(), StreamRole::target, *p.inputs.target_tokenizer,
+        p.inputs.target_protocol.get(), prepared, p.limits.max_decoded_bytes,
+        settings.max_new_tokens, plan.max_prefill_chunk(), site);
+    auto result = inference::generate(plan, prepared, settings,
+                                      p.inputs.selector, execution, adapter,
+                                      stop, p.inputs.selection_execution);
     p.measurements.target_generate_seconds = elapsed(started);
+    p.measurements.estimated_peak_device_bytes =
+        plan.estimated_peak_device_bytes();
+    p.measurements.estimated_peak_host_bytes =
+        add(add(p.inputs.metadata_host_bytes, retained),
+            add(working, std::max(plan.estimated_peak_host_bytes(),
+                                  std::min(upload_allowance, host - working))));
     started = Clock::now();
     auto decoded = decode_bounded(*p.inputs.target_tokenizer, result.tokens,
                                   p.limits.max_decoded_bytes);
@@ -415,8 +409,8 @@ void Run::generate_impl(const text::Prompt& prompt,
         p.limits.record);
     p.record = std::move(record);
     publication.phase(WorkPhase::releasing_target);
-    started = Clock::now();  // Include sequence teardown and resident release
-                             // in this phase.
+    started = Clock::now();  // Include sequence teardown and resident
+                             // release in this phase.
   } catch (...) {
     p.phase = Phase::closed;
     throw;
@@ -455,10 +449,13 @@ VariantId Run::interpret_impl(CaptureKey key,
           p.limits.record.max_retained_bytes - p.record->retained_bytes()) {
     throw std::length_error("AV retained budget");
   }
-  const auto conversion_bytes = multiply(
-      row->site.vector_width,
-      sizeof(float) + 2 * tensors::element_bytes(
-                              p.inputs.verbalizer_mode.activation_storage));
+  const auto conversion_bytes =
+      row->device
+          ? 0
+          : multiply(row->site.vector_width,
+                     sizeof(float) +
+                         2 * tensors::element_bytes(
+                                 p.inputs.verbalizer_mode.activation_storage));
   auto host = p.available_host(add(pending, conversion_bytes));
   Interpretation attempt{};
   attempt.capture = key;
@@ -470,10 +467,15 @@ VariantId Run::interpret_impl(CaptureKey key,
   try {
     auto start = Clock::now();
     auto injection = p.inputs.pair->prepare_injection(*row);
-    attempt.cost.conversion_seconds = elapsed(start);
-    attempt.injection = InjectionProvenance{
+    if (!row->device) {
+      attempt.cost.conversion_seconds = elapsed(start);
+    }
+    const InjectionProvenance provenance{
         injection.embedding.position, injection.source_l2_norm, injection.scale,
         injection.embedding.storage_type, p.inputs.pair->identity().convention};
+    if (!row->device) {
+      attempt.injection = provenance;
+    }
     attempt.stage = AttemptStage::loading;
     if (!p.verbalizer) {
       start = Clock::now();
@@ -484,7 +486,7 @@ VariantId Run::interpret_impl(CaptureKey key,
       }
       p.verbalizer = inference::load_resident_model(
           p.device, std::move(loaded.checkpoint),
-          {p.inputs.verbalizer_mode, p.limits.max_device_bytes,
+          {p.inputs.verbalizer_mode, p.available_device(),
            std::min(upload_allowance, host - loaded.host_working_bytes)});
       attempt.cost.load_seconds = elapsed(start);
       accumulate(p.measurements.verbalizer_load_seconds,
@@ -500,6 +502,10 @@ VariantId Run::interpret_impl(CaptureKey key,
       auto plan = inference::prepare_cached_forward(
           *p.verbalizer, p.options(capacity, execution, false, host),
           std::move(injection.embedding));
+      if (p.inputs.selection_execution ==
+          inference::sampling::Execution::device) {
+        plan.prepare_sampling();
+      }
       attempt.cost.prepare_seconds = elapsed(start);
       p.measurements.estimated_peak_device_bytes =
           std::max(p.measurements.estimated_peak_device_bytes,
@@ -516,9 +522,24 @@ VariantId Run::interpret_impl(CaptureKey key,
       publication.phase(WorkPhase::generating_verbalizer);
       ProgressAdapter adapter(publication.observer(), StreamRole::verbalizer,
                               *p.inputs.verbalizer_tokenizer, nullptr, prompt,
-                              p.limits.max_decoded_bytes);
+                              p.limits.max_decoded_bytes,
+                              settings.max_new_tokens,
+                              plan.max_prefill_chunk());
       attempt.generation = inference::generate(
-          plan, prompt, settings, p.inputs.selector, execution, adapter, stop);
+          plan, prompt, settings, p.inputs.selector, execution, adapter, stop,
+          p.inputs.selection_execution);
+      p.measurements.estimated_peak_device_bytes = std::max(
+          p.measurements.estimated_peak_device_bytes,
+          add(p.retained_device_bytes(), plan.estimated_peak_device_bytes()));
+      p.measurements.estimated_peak_host_bytes = std::max(
+          p.measurements.estimated_peak_host_bytes,
+          add(add(p.record->retained_bytes(), add(pending, conversion_bytes)),
+              add(add(p.inputs.metadata_host_bytes, p.verbalizer_host_bytes),
+                  plan.estimated_peak_host_bytes())));
+      if (attempt.generation->injection_norm) {
+        attempt.injection = provenance;
+        attempt.injection->source_l2_norm = *attempt.generation->injection_norm;
+      }
       attempt.cost.generate_seconds = elapsed(start);
       accumulate(p.measurements.verbalizer_generate_seconds,
                  *attempt.cost.generate_seconds);

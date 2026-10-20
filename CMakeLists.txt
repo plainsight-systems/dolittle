@@ -3,6 +3,10 @@ cmake_minimum_required(VERSION 3.24)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 project(dolittle LANGUAGES C CXX)
+option(DOLITTLE_ALLOCATION_CHECKS "Reject C++/GPU allocations in live generation iterations" OFF)
+if(DOLITTLE_ALLOCATION_CHECKS)
+    add_compile_definitions(DOLITTLE_ALLOCATION_CHECKS)
+endif()
 
 # Shared host preparation and verified checkpoint loading.
 include(FetchContent)
@@ -134,12 +138,19 @@ if(DOLITTLE_CUDA)
         src/gpu/cuda/device.cpp
         src/kernels/cuda/operations.cpp
         src/kernels/cuda/projection.cu
+        src/kernels/cuda/sampling.cu
+        src/kernels/cuda/decode.cu
+        src/kernels/cuda/injection.cu
         src/kernels/cuda/normalization.cu
         src/kernels/cuda/rotary.cu
         src/kernels/cuda/attention.cu
         src/kernels/cuda/embedding.cu
         src/kernels/cuda/elementwise.cu)
     target_link_libraries(dolittle_cuda PUBLIC dolittle_host CUDA::cudart)
+    # NVCC adds CCCL implicitly; expose the same SDK headers to Clang/editor tools.
+    foreach(cuda_include IN LISTS CUDAToolkit_INCLUDE_DIRS)
+        target_compile_options(dolittle_cuda PRIVATE "SHELL:-isystem ${cuda_include}/cccl")
+    endforeach()
     target_compile_features(dolittle_cuda PUBLIC cxx_std_20)
     set_target_properties(dolittle_cuda PROPERTIES
         CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED YES
@@ -151,16 +162,23 @@ if(DOLITTLE_CUDA)
         # rejects those compiler-generated files, so it is CXX-only.
         $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false;--Werror=all-warnings;-Xcompiler=-Wall,-Wextra,-Werror>)
     add_executable(dolittle src/main.cpp)
+    if(DOLITTLE_ALLOCATION_CHECKS)
+        target_sources(dolittle PRIVATE src/diagnostics/allocation.cpp)
+    endif()
     target_link_libraries(dolittle PRIVATE dolittle_execution dolittle_http dolittle_cuda)
     dolittle_warnings(dolittle)
     if(BUILD_TESTING)
         add_executable(test_device tests/gpu/test_device.cpp)
         target_include_directories(test_device PRIVATE "${PROJECT_SOURCE_DIR}")
-        target_link_libraries(test_device PRIVATE dolittle_cuda)
+        target_link_libraries(test_device PRIVATE dolittle_execution dolittle_cuda)
         dolittle_warnings(test_device)
         add_test(NAME integration.device COMMAND test_device)
         set_tests_properties(integration.device PROPERTIES LABELS integration RUN_SERIAL TRUE)
         add_executable(test_generation tests/gpu/test_generation.cpp tests/gpu/forward_reference.cpp tests/gpu/interpretation.cpp)
+        if(DOLITTLE_ALLOCATION_CHECKS)
+            target_sources(test_generation PRIVATE src/diagnostics/allocation.cpp)
+            target_sources(test_device PRIVATE src/diagnostics/allocation.cpp)
+        endif()
         target_include_directories(test_generation PRIVATE "${PROJECT_SOURCE_DIR}")
         target_link_libraries(test_generation PRIVATE dolittle_execution dolittle_numerical dolittle_cuda)
         dolittle_warnings(test_generation)

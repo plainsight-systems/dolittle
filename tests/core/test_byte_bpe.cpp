@@ -8,6 +8,11 @@
  * cpp-perf-guidelines GPU.1 (guidelines/gpu/GPU.1-keep-data-on-device.md):
  * host contract checks are separate from device timing or correctness claims.
  * Both corpora consulted for implementation, 2026-10-18.
+ * Prepared-buffer/device-selection contract consultation, 2026-10-20:
+ * Core I.7 (#ri-post) and MEM.9
+ * (guidelines/memory/MEM.9-embedded-allocate-at-init.md), both corpora queried
+ * and full rules read for design/implementation. Exercise public results and
+ * capacity/failure contracts; independent reference inputs remain unchanged.
  */
 #include <array>
 #include <nlohmann/json.hpp>
@@ -47,6 +52,20 @@ int main() try {
             bytes.tokens.at(1).begin == 1 && !bytes.tokens.at(2).mapped &&
             bytes.tokens.at(2).begin == bytes.tokens.at(2).end,
         "raw split UTF8 and unmapped provenance");
+  tokenizers::DecodedBytes reusable;
+  reusable.tokens.reserve(ids.size());
+  reusable.bytes.reserve(ids.size() * tokenizer->max_token_bytes());
+  tokenizer->decode_into(ids, reusable);
+  check(reusable.bytes == decoded.bytes && reusable.tokens.size() == ids.size(),
+        "prepared decode preserves raw bytes and provenance");
+  tokenizer->decode_into(std::span<const std::uint32_t>{}, reusable);
+  check(reusable.bytes.empty() && reusable.tokens.empty(),
+        "decode replaces previous delta");
+  tokenizers::DecodedBytes insufficient;
+  expect_throws<std::length_error>(
+      [&] { tokenizer->decode_into(ids, insufficient); });
+  check(insufficient.bytes.empty() && insufficient.tokens.empty(),
+        "capacity rejection leaves destination unchanged");
   const std::string zero("a\0b", 3);
   check(tokenizer->decode(tokenizer->encode(zero)).bytes == zero,
         "embedded NUL is preserved");

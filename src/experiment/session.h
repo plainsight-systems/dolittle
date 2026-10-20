@@ -73,6 +73,19 @@
  * guidelines/copy-move/COPY.7-eliminate-hidden-copies.md. GPU.1, publication
  * consumes completed host results without extra readback;
  * guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * Steady-state design, 2026-10-20:
+ * Prepare stable event slots and token/text/segment capacities before each
+ * stream. Publication fills the next unused slot and shares its existing
+ * owner by aliasing; no slot is reused while readers may reference it.
+ * Check count/byte budgets before publication, with explicit exhaustion and
+ * no heap fallback. HTTP response allocations remain on reader threads.
+ * Overlay: transformer-execution.md, "Device selection and allocation-free
+ * generation". Core I.7 (#ri-post): borrowing, bounds and failure contracts.
+ * Performance GPU.1: device-resident decisions; MEM.9: prepare storage before
+ * steady state and check the invariant. Sources:
+ * guidelines/gpu/GPU.1-keep-data-on-device.md;
+ * guidelines/memory/MEM.9-embedded-allocate-at-init.md.
+ * Both corpora queried/read for header design and implementation, 2026-10-20.
  */
 #pragma once
 
@@ -190,7 +203,7 @@ struct RequestFinished {
 using EventBody = std::variant<WorkPhase, TokenDelta, TargetAvailable,
                                AttemptAvailable, RequestFinished>;
 struct PublishedEvent {
-  EventCursor sequence;
+  EventCursor sequence{};
   RequestId request;
   EventBody body;
 };

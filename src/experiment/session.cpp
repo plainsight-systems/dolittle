@@ -75,6 +75,19 @@
  * guidelines/copy-move/COPY.7-eliminate-hidden-copies.md. GPU.1, publication
  * consumes completed host results without extra readback;
  * guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * Steady-state design, 2026-10-20:
+ * Prepare stable event slots and token/text/segment capacities before each
+ * stream. Publication fills the next unused slot and shares its existing
+ * owner by aliasing; no slot is reused while readers may reference it.
+ * Check count/byte budgets before publication, with explicit exhaustion and
+ * no heap fallback. HTTP response allocations remain on reader threads.
+ * Overlay: transformer-execution.md, "Device selection and allocation-free
+ * generation". Core I.7 (#ri-post): borrowing, bounds and failure contracts.
+ * Performance GPU.1: device-resident decisions; MEM.9: prepare storage before
+ * steady state and check the invariant. Sources:
+ * guidelines/gpu/GPU.1-keep-data-on-device.md;
+ * guidelines/memory/MEM.9-embedded-allocate-at-init.md.
+ * Both corpora queried/read for header design and implementation, 2026-10-20.
  */
 #include "experiment/session.h"
 
@@ -288,6 +301,11 @@ struct Session::Impl final : RunObserver {
   std::vector<std::size_t> event_sizes;
   std::shared_ptr<ReaderBudget> readers = std::make_shared<ReaderBudget>();
   std::size_t publication_bytes{};
+  struct StreamEvents {
+    std::vector<PublishedEvent> slots;
+  };
+  std::shared_ptr<StreamEvents> stream_events;
+  std::size_t next_stream_event{}, reserved_stream_bytes{};
   std::uint64_t next_run{};
   bool closing{};
   bool worker_failed{};
@@ -326,7 +344,9 @@ struct Session::Impl final : RunObserver {
     }();
     stop.request_stop();
     available.notify_all();
-    if (worker.joinable()) worker.join();
+    if (worker.joinable()) {
+      worker.join();
+    }
   }
   void publication_failed() noexcept override {
     observer_failed = true;
@@ -341,6 +361,15 @@ struct Session::Impl final : RunObserver {
     try {
       auto event = std::make_shared<PublishedEvent>(
           PublishedEvent{{0}, request, std::move(body)});
+      return publish(std::move(event), terminal);
+    } catch (...) {
+      publication_failed();
+      return false;
+    }
+  }
+  bool publish(std::shared_ptr<PublishedEvent> event,
+               bool terminal = false) noexcept {
+    try {
       const auto bytes =
           add(event_bound(event->body), text_bound(event->request.value));
       const auto& l = setup.session;
@@ -349,7 +378,8 @@ struct Session::Impl final : RunObserver {
         std::lock_guard lock(mutex);
         const auto reserve = terminal ? 0 : l.max_jobs + 2;
         if (journal.size() < l.max_events - reserve &&
-            bytes <= l.max_publication_bytes - publication_bytes &&
+            bytes <= l.max_publication_bytes - publication_bytes -
+                         reserved_stream_bytes &&
             bytes <= l.max_page_bytes - event_overhead &&
             (!state.publication_failed || terminal)) {
           event->sequence = {static_cast<std::uint64_t>(journal.size() + 1)};
@@ -360,7 +390,9 @@ struct Session::Impl final : RunObserver {
           accepted = true;
         }
       }
-      if (!accepted) publication_failed();
+      if (!accepted) {
+        publication_failed();
+      }
       return accepted;
     } catch (...) {
       publication_failed();
@@ -399,6 +431,57 @@ struct Session::Impl final : RunObserver {
     }
     return emit(phase_value);
   }
+  bool prepare_stream(StreamBounds bounds) noexcept override {
+    try {
+      const auto prompt_events =
+          (bounds.prompt_tokens + progress_chunk - 1) / progress_chunk;
+      const auto count = add(
+          add(prompt_events, (bounds.prompt_tokens + bounds.prefill_chunk - 1) /
+                                 bounds.prefill_chunk),
+          add(multiply(bounds.generated_tokens, 2), 1));
+      const auto token_bytes =
+          bounds.token_bytes ? bounds.token_bytes : bounds.decoded_bytes;
+      std::size_t bytes =
+          multiply(count, sizeof(PublishedEvent) + request.value.size() + 1);
+      bytes = add(bytes,
+                  multiply(prompt_events,
+                           add(std::min(bounds.decoded_bytes,
+                                        multiply(progress_chunk, token_bytes)),
+                               multiply(progress_chunk,
+                                        sizeof(tokenizers::TokenBytes) +
+                                            sizeof(text::TokenSegment)))));
+      bytes = add(bytes,
+                  multiply(count - prompt_events,
+                           add(token_bytes, sizeof(tokenizers::TokenBytes) +
+                                                sizeof(text::TokenSegment))));
+      if (count > setup.session.max_events ||
+          bytes > setup.session.max_publication_bytes - reserved_stream_bytes -
+                      publication_bytes) {
+        throw std::length_error(
+            "stream publication reservation exceeds budget");
+      }
+      auto pool = std::make_shared<StreamEvents>();
+      pool->slots.resize(count);
+      for (std::size_t i = 0; i < count; ++i) {
+        auto& event = pool->slots.at(i);
+        event.request = request;
+        event.body = TokenDelta{};
+        auto& delta = std::get<TokenDelta>(event.body);
+        const auto tokens = i < prompt_events ? progress_chunk : 1;
+        delta.decoded.bytes.reserve(
+            std::min(bounds.decoded_bytes, multiply(tokens, token_bytes)));
+        delta.decoded.tokens.reserve(tokens);
+        delta.segments.reserve(tokens);
+      }
+      reserved_stream_bytes += bytes;
+      next_stream_event = 0;
+      stream_events = std::move(pool);
+      return true;
+    } catch (...) {
+      publication_failed();
+      return false;
+    }
+  }
   bool progress(const RunProgress& update) noexcept override {
     try {
       const auto& data = update.delta.get();
@@ -406,14 +489,25 @@ struct Session::Impl final : RunObserver {
         const auto count = std::min(progress_chunk, data.tokens.size() - first);
         const auto begin = count ? data.tokens.at(first).begin : 0;
         const auto end = count ? data.tokens.at(first + count - 1).end : 0;
-        TokenDelta delta{{update.role, job_index},
-                         update.first_position + first,
-                         update.prompt_tokens,
-                         update.consumed_tokens,
-                         {},
-                         {}};
+        if (!stream_events ||
+            next_stream_event == stream_events->slots.size()) {
+          publication_failed();
+          return false;
+        }
+        auto& slot = stream_events->slots.at(next_stream_event++);
+        auto& delta = std::get<TokenDelta>(slot.body);
+        delta.stream = {update.role, job_index};
+        delta.first_position = update.first_position + first;
+        delta.prompt_tokens = update.prompt_tokens;
+        delta.consumed_tokens = update.consumed_tokens;
         delta.capture_site = update.capture_site;
-        delta.decoded.bytes = data.bytes.substr(begin, end - begin);
+        if (end - begin > delta.decoded.bytes.capacity() ||
+            count > delta.decoded.tokens.capacity() ||
+            update.segments.size() > delta.segments.capacity()) {
+          publication_failed();
+          return false;
+        }
+        delta.decoded.bytes.assign(data.bytes, begin, end - begin);
         for (std::size_t i = first; i < first + count; ++i) {
           auto token = data.tokens.at(i);
           token.begin -= begin;
@@ -426,8 +520,12 @@ struct Session::Impl final : RunObserver {
             delta.segments.push_back(segment);
           }
         }
-        if (!emit(std::move(delta))) return false;
-        if (!count) break;
+        if (!publish(std::shared_ptr<PublishedEvent>(stream_events, &slot))) {
+          return false;
+        }
+        if (!count) {
+          break;
+        }
         first += count;
       }
       return true;
@@ -439,11 +537,19 @@ struct Session::Impl final : RunObserver {
   void execute(const StartRequest& value, RunId id,
                const std::stop_token& stop) {
     run.reset();
-    if (stop.stop_requested() || !phase(WorkPhase::loading_target)) return;
-    if (!device) device = setup.open_device();
-    if (!device) throw std::runtime_error("device unavailable");
+    if (stop.stop_requested() || !phase(WorkPhase::loading_target)) {
+      return;
+    }
+    if (!device) {
+      device = setup.open_device();
+    }
+    if (!device) {
+      throw std::runtime_error("device unavailable");
+    }
     auto inputs = setup.make_inputs();
-    if (stop.stop_requested()) return;
+    if (stop.stop_requested()) {
+      return;
+    }
     run = std::make_unique<Run>(*device, id, std::move(inputs), setup.run);
     run->generate(value.prompt, value.settings, *this, stop);
     if (const auto* record = run->record()) {
@@ -499,7 +605,9 @@ struct Session::Impl final : RunObserver {
           done.variant = id;
           done.outcome = result.outcome;
           done.explanation = result.explanation;
-          if (result.generation) done.stop = result.generation->reason;
+          if (result.generation) {
+            done.stop = result.generation->reason;
+          }
           done.message =
               result.outcome == AttemptOutcome::failed
                   ? "Interpretation failed; inspect the local service log."
@@ -520,7 +628,9 @@ struct Session::Impl final : RunObserver {
         {
           std::unique_lock lock(mutex);
           available.wait(lock, [this] { return closing || !queue.empty(); });
-          if (closing) break;
+          if (closing) {
+            break;
+          }
           item = queue.front();
           queue.pop_front();
           state.queued_jobs -= jobs(item->command);
@@ -575,7 +685,9 @@ struct Session::Impl final : RunObserver {
       queue.clear();
       state.queued_jobs = 0;
       state.active_request.reset();
-      if (closing) state.phase = SessionPhase::closed;
+      if (closing) {
+        state.phase = SessionPhase::closed;
+      }
     }
   }
   Receipt submit(Command command) {
@@ -618,6 +730,8 @@ struct Session::Impl final : RunObserver {
         queue.swap(pending);
         ++next_run;
         journal.clear();
+        stream_events.reset();
+        reserved_stream_bytes = 0;
         event_sizes.clear();
         publication_bytes = 0;
         state = {SessionPhase::queued, item->run, {}, 1, {0}, false};
@@ -669,7 +783,9 @@ struct Session::Impl final : RunObserver {
       }
       result.run = item->run;
     }
-    if (stop) stop->request_stop();
+    if (stop) {
+      stop->request_stop();
+    }
     available.notify_one();
     return result;
   }
@@ -711,7 +827,9 @@ EventPage Session::read(RunId id, EventCursor after) const {
        i < p.journal.size() &&
        page->events.size() < p.setup.session.max_page_events;
        ++i) {
-    if (p.event_sizes.at(i) > p.setup.session.max_page_bytes - bytes) break;
+    if (p.event_sizes.at(i) > p.setup.session.max_page_bytes - bytes) {
+      break;
+    }
     bytes += p.event_sizes.at(i);
     page->events.push_back(p.journal.at(i));
     page->next = p.journal.at(i)->sequence;

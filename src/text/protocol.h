@@ -53,6 +53,17 @@
  * prefer unique cursor ownership because there is one stream consumer;
  * cpp-perf-guidelines COPY.7, borrow input spans and return owned deltas;
  * source guidelines/copy-move/COPY.7-eliminate-hidden-copies.md.
+ * Steady-state design, 2026-10-20:
+ * append_into fills a caller-owned segment vector, preserving contiguous
+ * position validation and transactional cursor state. Owned append remains
+ * a wrapper; streaming reserves output before decoding.
+ * Overlay: transformer-execution.md, "Device selection and allocation-free
+ * generation". Core I.7 (#ri-post): borrowing, bounds and failure contracts.
+ * Performance GPU.1: device-resident decisions; MEM.9: prepare storage before
+ * steady state and check the invariant. Sources:
+ * guidelines/gpu/GPU.1-keep-data-on-device.md;
+ * guidelines/memory/MEM.9-embedded-allocate-at-init.md.
+ * Both corpora queried/read for header design and implementation, 2026-10-20.
  */
 #pragma once
 
@@ -96,6 +107,8 @@ class SegmentCursor {
   SegmentCursor(SegmentCursor&&) = delete;
   SegmentCursor& operator=(SegmentCursor&&) = delete;
   virtual ~SegmentCursor() = default;
+  virtual void append_into(std::span<const tokenizers::TokenId>,
+                           std::size_t first, std::vector<TokenSegment>&) = 0;
   [[nodiscard]] virtual std::vector<TokenSegment> append(
       std::span<const tokenizers::TokenId> generated,
       std::size_t first_position) = 0;
