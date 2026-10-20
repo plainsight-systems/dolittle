@@ -20,6 +20,9 @@ Model weights are not bundled. The build fetches these source-pinned helpers:
 - Oniguruma 6.9.10: BSD 2-Clause, https://github.com/kkos/oniguruma
   Unicode regex matching only; full notice: docs/licenses/oniguruma-COPYING.
 
+- cpp-httplib 0.62.0: MIT, https://github.com/yhirose/cpp-httplib
+  HTTP transport only; full notice: docs/licenses/cpp-httplib-LICENSE.
+
 The host links OpenSSL 3 (Apache-2.0) for SHA-256. CUDA builds use NVIDIA's
 CUDA Toolkit under its own terms. Dependency source archives/toolkit packages
 retain their upstream licenses; these are not relicensed as project code.
@@ -39,7 +42,7 @@ License: docs/licenses/Qwen3-Apache-2.0.txt.
 IBM Plex fonts
 ==============
 
-web/static/fonts/ contains IBM Plex Serif and IBM Plex Mono font files.
+web/static/fonts/ and app/fonts/ contain IBM Plex Serif and IBM Plex Mono font files.
 Copyright 2017 IBM Corp. All rights reserved. Distributed under the SIL Open
 Font License 1.1; see web/static/fonts/OFL.txt. These fonts retain their own
 license and are not covered by the project code or artwork licenses.

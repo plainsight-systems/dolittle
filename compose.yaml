@@ -1,0 +1,18 @@
+services:
+  dolittle:
+    image: dolittle-local:runtime
+    init: true
+    ports:
+      - "${DOLITTLE_BIND:-127.0.0.1}:${DOLITTLE_PORT:-8787}:8787"
+    volumes:
+      - "${DOLITTLE_CACHE:?Run scripts/run.py}:/models:ro"
+      - "${DOLITTLE_TOKEN_FILE:?Run scripts/run.py}:/access-token:ro"
+    command: ["/opt/dolittle/build/dolittle", "--manifest", "/opt/dolittle/config/models.json", "--cache", "/models", "--assets", "/opt/dolittle/app", "--token-file", "/access-token", "--bind", "0.0.0.0", "--port", "8787", "--host", "${DOLITTLE_HOST:-127.0.0.1:8787}", "--device", "0", "--model-integrity", "${DOLITTLE_MODEL_INTEGRITY:-sha256}"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${DOLITTLE_DEVICE:-0}"]
+              capabilities: [gpu]
+    stop_grace_period: 120s

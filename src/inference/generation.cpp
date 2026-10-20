@@ -78,6 +78,17 @@
  * guidelines/gpu/GPU.1-keep-data-on-device.md. cpp-perf-guidelines GPU.9
  * separates persistent weights from sequence storage; source
  * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
+ *
+ * Live publication (implementation corpus queried 2026-10-19): publish prompt
+ * IDs once before consumption; publish a newly sampled ID after appending it;
+ * publish the consumed watermark only after accept has copied completed
+ * captures. Views borrow the result for the callback. A false result disables
+ * callbacks and enters the same final-consumption/stop progression without
+ * another draw. CP.22 (#rconc-unknown), callback outside locks; COPY.7, borrow
+ * only new IDs (guidelines/copy-move/COPY.7-eliminate-hidden-copies.md); GPU.1,
+ * reuse completed host readback (guidelines/gpu/GPU.1-keep-data-on-device.md).
+ * No observer changes RNG state, arithmetic, GPU submission or the numerical
+ * acceptance policy.
  */
 #include "inference/generation.h"
 
@@ -90,11 +101,13 @@
 #include "tensors/tensor.h"
 
 namespace dolittle::inference {
-GenerationResult generate(CachedForwardPlan& plan,
-                          const text::PreparedPrompt& prompt,
-                          GenerationSettings settings,
-                          const sampling::TokenSelector& select, ExecutionId id,
-                          const std::stop_token& stop) {
+namespace {
+GenerationResult generate_impl(CachedForwardPlan& plan,
+                               const text::PreparedPrompt& prompt,
+                               GenerationSettings settings,
+                               const sampling::TokenSelector& select,
+                               ExecutionId id, const std::stop_token& stop,
+                               GenerationObserver* observer) {
   sampling::validate_settings(settings.sampling);
   if (!select || !plan.prefix().usable || plan.prefix().committed_positions ||
       prompt.ids.empty() || prompt.tokenizer_identity.empty() ||
@@ -149,6 +162,15 @@ GenerationResult generate(CachedForwardPlan& plan,
     capture.bytes.reserve(capacity * row);
     result.captures.push_back(std::move(capture));
   }
+  bool publication_failed = false;
+  const auto notify = [&](std::size_t first) {
+    if (observer && !publication_failed) {
+      publication_failed =
+          !observer->update({std::span(result.tokens).subspan(first), first,
+                             result.prompt_tokens, result.consumed_tokens});
+    }
+  };
+  notify(0);
   sampling::RandomStream rng(settings.seed);
   std::vector<float> logits(plan.vocabulary_size());
   bool have_logits = false, last_stop = false;
@@ -161,6 +183,7 @@ GenerationResult generate(CachedForwardPlan& plan,
       into.bytes.insert(into.bytes.end(), from.bytes.begin(), from.bytes.end());
     }
     result.consumed_tokens += chunk.tokens.size();
+    notify(result.tokens.size());
     have_logits = chunk.next_logits.has_value();
     if (chunk.next_logits) {
       const auto& row = *chunk.next_logits;
@@ -182,7 +205,7 @@ GenerationResult generate(CachedForwardPlan& plan,
                         result.consumed_tokens,
                         settings.max_new_tokens,
                         last_stop,
-                        stop.stop_requested()};
+                        (stop.stop_requested() || publication_failed)};
       const auto decision = next_action(progress);
       if (decision.action == Action::finish) {
         if (!decision.reason) {
@@ -196,14 +219,15 @@ GenerationResult generate(CachedForwardPlan& plan,
         const auto n = std::min(plan.max_prefill_chunk(),
                                 result.prompt_tokens - result.consumed_tokens);
         const bool final = result.consumed_tokens + n == result.prompt_tokens;
-        accept(plan.consume(
-            std::span<const std::uint32_t>(result.tokens)
-                .subspan(result.consumed_tokens, n),
-            final && settings.max_new_tokens && !stop.stop_requested()));
+        accept(
+            plan.consume(std::span<const std::uint32_t>(result.tokens)
+                             .subspan(result.consumed_tokens, n),
+                         final && settings.max_new_tokens &&
+                             !(stop.stop_requested() || publication_failed)));
       } else if (decision.action == Action::consume_pending) {
         const bool another =
             !last_stop && progress.generated_tokens < settings.max_new_tokens &&
-            !stop.stop_requested();
+            !(stop.stop_requested() || publication_failed);
         accept(plan.consume(std::span<const std::uint32_t>(result.tokens)
                                 .subspan(result.consumed_tokens, 1),
                             another));
@@ -217,6 +241,7 @@ GenerationResult generate(CachedForwardPlan& plan,
           throw std::invalid_argument("sampler returned out-of-vocabulary ID");
         }
         result.tokens.push_back(token);
+        notify(result.tokens.size() - 1);
         last_stop = std::find(result.stop_ids.begin(), result.stop_ids.end(),
                               token) != result.stop_ids.end();
       }
@@ -229,5 +254,21 @@ GenerationResult generate(CachedForwardPlan& plan,
     }
     return result;
   }
+}
+}  // namespace
+GenerationResult generate(CachedForwardPlan& plan,
+                          const text::PreparedPrompt& prompt,
+                          GenerationSettings settings,
+                          const sampling::TokenSelector& select, ExecutionId id,
+                          const std::stop_token& stop) {
+  return generate_impl(plan, prompt, settings, select, id, stop, nullptr);
+}
+GenerationResult generate(CachedForwardPlan& plan,
+                          const text::PreparedPrompt& prompt,
+                          GenerationSettings settings,
+                          const sampling::TokenSelector& select, ExecutionId id,
+                          GenerationObserver& observer,
+                          const std::stop_token& stop) {
+  return generate_impl(plan, prompt, settings, select, id, stop, &observer);
 }
 }  // namespace dolittle::inference

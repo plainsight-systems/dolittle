@@ -83,6 +83,21 @@ int main() try {
         segments.at(i).position == 19 + i && segments.at(i).kind == kinds.at(i),
         "delimiter state and absolute provenance");
   }
+  // Chunking preserves the public classification and absolute-position
+  // contract.
+  for (std::size_t split = 0; split <= ids.size(); ++split) {
+    auto cursor = protocol->make_cursor(19, text::ThinkingMode::enabled);
+    auto prefix = cursor->append(std::span(ids).first(split), 19);
+    expect_throws<std::invalid_argument>(
+        [&] { (void)cursor->append({}, 20 + split); });
+    auto suffix = cursor->append(std::span(ids).subspan(split), 19 + split);
+    prefix.insert(prefix.end(), suffix.begin(), suffix.end());
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+      check(prefix.at(i).position == segments.at(i).position &&
+                prefix.at(i).kind == segments.at(i).kind,
+            "chunk-invariant segmentation");
+    }
+  }
   auto other =
       text::make_qwen3_chat({.tokenizer_config_json = qwen3_config_json,
                              .generation_config_json = qwen3_generation_json,

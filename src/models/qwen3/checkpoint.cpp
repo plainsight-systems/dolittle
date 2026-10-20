@@ -36,6 +36,16 @@
  * guidelines/gpu/GPU.1-keep-data-on-device.md. cpp-perf-guidelines GPU.9
  * separates persistent weights from sequence storage; source
  * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
+ *
+ * Archive reuse implementation, 2026-10-19: bind_causal_lm retains shared const
+ * ownership of an already verified source. Binding still validates the full
+ * schema and owns its model/parameter metadata, but neither reopens files nor
+ * hashes or copies payloads. The service and multiple bindings can release
+ * their references independently; the last owner releases the mapping.
+ * cpp-guidelines F.27 (#rf-shared_ptr): shared_ptr expresses that lifetime
+ * contract. cpp-perf-guidelines CDSA.32: reuse immutable preparation across
+ * consumers;
+ * guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
  */
 #include "models/qwen3/checkpoint.h"
 
@@ -152,10 +162,11 @@ std::string identity_part(std::string_view value) {
 
 class TargetCheckpoint final : public BoundCheckpoint {
  public:
-  TargetCheckpoint(std::unique_ptr<tensors::formats::TensorArchive> archive,
-                   std::unique_ptr<Model> model,
-                   const std::vector<ParameterBinding>& bindings,
-                   std::string_view configuration_artifact)
+  TargetCheckpoint(
+      std::shared_ptr<const tensors::formats::TensorArchive> archive,
+      std::unique_ptr<Model> model,
+      const std::vector<ParameterBinding>& bindings,
+      std::string_view configuration_artifact)
       : archive_(std::move(archive)), model_(std::move(model)) {
     const auto& source = archive_->identity();
     identity_ = "qwen3-target-binding-v1/" + identity_part(source.repository) +
@@ -202,7 +213,7 @@ class TargetCheckpoint final : public BoundCheckpoint {
   }
 
  private:
-  std::unique_ptr<tensors::formats::TensorArchive> archive_;
+  std::shared_ptr<const tensors::formats::TensorArchive> archive_;
   std::unique_ptr<Model> model_;
   std::vector<tensors::HostView> parameters_;
   std::string identity_;
@@ -352,7 +363,7 @@ std::vector<ParameterBinding> bind_parameters(
 }
 
 std::unique_ptr<BoundCheckpoint> bind_causal_lm(
-    std::unique_ptr<tensors::formats::TensorArchive> archive,
+    std::shared_ptr<const tensors::formats::TensorArchive> archive,
     std::string_view configuration_artifact) {
   if (!archive || archive->tensors().empty()) {
     throw std::invalid_argument("empty checkpoint archive");

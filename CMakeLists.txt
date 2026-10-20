@@ -30,6 +30,7 @@ FetchContent_Declare(oniguruma
 FetchContent_MakeAvailable(utf8proc oniguruma)
 
 add_library(dolittle_host STATIC
+    src/server/wire.cpp
     src/nla/protocol.cpp
     src/nla/pairs/qwen3_8b.cpp
     src/experiment/record.cpp
@@ -67,6 +68,32 @@ function(dolittle_warnings target)
 endfunction()
 dolittle_warnings(dolittle_host)
 
+find_package(Threads REQUIRED)
+target_link_libraries(dolittle_host PUBLIC Threads::Threads)
+FetchContent_Declare(httplib
+    URL https://codeload.github.com/yhirose/cpp-httplib/tar.gz/refs/tags/v0.62.0
+    URL_HASH SHA256=7bba5949c56e772236432f69da03197fd4c12dc443455b9d81f6a05575431fc8
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+set(HTTPLIB_COMPILE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_REQUIRE_OPENSSL OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_ZLIB_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_BROTLI_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_ZSTD_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(httplib)
+add_library(dolittle_http STATIC src/server/http.cpp)
+target_link_libraries(dolittle_http PUBLIC dolittle_host httplib::httplib Threads::Threads)
+dolittle_warnings(dolittle_http)
+
+# Shared execution compiles in the host preset as well. Only final composition
+# links a backend; this prevents platform headers leaking into orchestration.
+add_library(dolittle_execution STATIC
+    src/inference/executor.cpp src/inference/cache/contiguous.cpp
+    src/inference/generation.cpp src/experiment/run.cpp src/experiment/session.cpp)
+target_link_libraries(dolittle_execution PUBLIC dolittle_host Threads::Threads)
+target_compile_features(dolittle_execution PUBLIC cxx_std_20)
+dolittle_warnings(dolittle_execution)
+
 include(CTest)
 if(BUILD_TESTING)
     add_library(dolittle_numerical STATIC tests/support/numerical.cpp)
@@ -75,7 +102,7 @@ if(BUILD_TESTING)
     set_target_properties(dolittle_numerical PROPERTIES CXX_EXTENSIONS OFF)
     dolittle_warnings(dolittle_numerical)
 
-    foreach(unit IN ITEMS nla record bounds sampling progression byte_bpe qwen3_chat tensor bf16 observations storage_plan numerical
+    foreach(unit IN ITEMS wire nla record bounds sampling progression byte_bpe qwen3_chat tensor bf16 observations storage_plan numerical
                           operations model_recipe qwen3_model safetensors qwen3_checkpoint)
         add_executable(test_${unit} tests/core/test_${unit}.cpp)
         target_include_directories(test_${unit} PRIVATE "${PROJECT_SOURCE_DIR}")
@@ -96,13 +123,7 @@ if(BUILD_TESTING)
     dolittle_warnings(test_forward_reference)
     add_test(NAME unit.forward_reference COMMAND test_forward_reference)
     set_tests_properties(unit.forward_reference PROPERTIES LABELS unit)
-    add_executable(test_checkpoint_archive tests/integration/test_checkpoint_archive.cpp)
-    target_include_directories(test_checkpoint_archive PRIVATE "${PROJECT_SOURCE_DIR}")
-    target_link_libraries(test_checkpoint_archive PRIVATE dolittle_host)
-    set_target_properties(test_checkpoint_archive PROPERTIES CXX_EXTENSIONS OFF)
-    dolittle_warnings(test_checkpoint_archive)
-    add_test(NAME integration.checkpoint_archive COMMAND test_checkpoint_archive)
-    set_tests_properties(integration.checkpoint_archive PROPERTIES LABELS integration)
+
 endif()
 
 option(DOLITTLE_CUDA "Build native CUDA forward execution" OFF)
@@ -117,11 +138,7 @@ if(DOLITTLE_CUDA)
         src/kernels/cuda/rotary.cu
         src/kernels/cuda/attention.cu
         src/kernels/cuda/embedding.cu
-        src/kernels/cuda/elementwise.cu
-        src/inference/executor.cpp
-        src/inference/cache/contiguous.cpp
-        src/inference/generation.cpp
-        src/experiment/run.cpp)
+        src/kernels/cuda/elementwise.cu)
     target_link_libraries(dolittle_cuda PUBLIC dolittle_host CUDA::cudart)
     target_compile_features(dolittle_cuda PUBLIC cxx_std_20)
     set_target_properties(dolittle_cuda PROPERTIES
@@ -133,6 +150,9 @@ if(DOLITTLE_CUDA)
         # NVCC emits GNU line markers in generated host stubs; -Wpedantic
         # rejects those compiler-generated files, so it is CXX-only.
         $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false;--Werror=all-warnings;-Xcompiler=-Wall,-Wextra,-Werror>)
+    add_executable(dolittle src/main.cpp)
+    target_link_libraries(dolittle PRIVATE dolittle_execution dolittle_http dolittle_cuda)
+    dolittle_warnings(dolittle)
     if(BUILD_TESTING)
         add_executable(test_device tests/gpu/test_device.cpp)
         target_include_directories(test_device PRIVATE "${PROJECT_SOURCE_DIR}")
@@ -142,8 +162,16 @@ if(DOLITTLE_CUDA)
         set_tests_properties(integration.device PROPERTIES LABELS integration RUN_SERIAL TRUE)
         add_executable(test_generation tests/gpu/test_generation.cpp tests/gpu/forward_reference.cpp tests/gpu/interpretation.cpp)
         target_include_directories(test_generation PRIVATE "${PROJECT_SOURCE_DIR}")
-        target_link_libraries(test_generation PRIVATE dolittle_cuda dolittle_numerical)
+        target_link_libraries(test_generation PRIVATE dolittle_execution dolittle_numerical dolittle_cuda)
         dolittle_warnings(test_generation)
+        set(DOLITTLE_APPLICATION_CACHE "" CACHE PATH "Verified revision cache for live application integration")
+        if(DOLITTLE_APPLICATION_CACHE)
+            find_package(Python3 REQUIRED COMPONENTS Interpreter)
+            add_test(NAME integration.application COMMAND "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tests/integration/test_application.py"
+                --binary "$<TARGET_FILE:dolittle>" --cache "${DOLITTLE_APPLICATION_CACHE}")
+            set_tests_properties(integration.application PROPERTIES LABELS integration RUN_SERIAL TRUE)
+        endif()
         set(DOLITTLE_GENERATION_FIXTURES "" CACHE PATH "Independent generation fixture root")
         if(DOLITTLE_GENERATION_FIXTURES)
             add_test(NAME integration.generation_tiny COMMAND test_generation

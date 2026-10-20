@@ -9,14 +9,16 @@
  * overlay, "Checkpoint loading and binding":
  * 1. Validate explicit artifact/shard/index paths and expected digests; reject
  *    escapes/duplicates and open only the declared artifacts.
- * 2. Check actual byte counts and hashes; decode the 8-byte little-endian
- * header length only after checking framing. Bound all file-offset arithmetic.
+ * 2. Check actual byte counts and hashes (unless admitted by prepared setup);
+ * decode the 8-byte little-endian header length only after checking framing.
+ * Bound all file-offset arithmetic.
  * 3. Call parse_header on the bounded JSON span; check dense ranges, dtypes and
  *    complete payload coverage. Reject duplicate JSON keys rather than
  * last-wins.
  * 4. Match the supplied index to actual shard contents, construct canonical
  *    source identity, retain backing owners and publish only the complete
- * archive. Design and cost: one verification read per file, O(tensors) owned
+ * archive. Design and cost: sha256 mode reads each file; prepared mode reads
+ * only metadata. Both keep O(tensors) owned
  * metadata, mapped payload views and bounded staging later. Optimization: no
  * eager host copy/conversion of full weights. nlohmann/json 3.12.0 parses
  * bounded metadata; OpenSSL EVP computes SHA-256. SAX preflight rejects
@@ -38,6 +40,29 @@
  * host access explicit and confine necessary native API operations.
  * cpp-perf-guidelines COPY.7: borrow spans/references without hidden payload
  * copies. Source: guidelines/copy-move/COPY.7-eliminate-hidden-copies.md.
+ *
+ * Parallel integrity implementation, 2026-10-19: after mapping/size checks,
+ * hash immutable file views in batches of at most verification_workers. Each
+ * task owns a digest; the caller alone mutates archive metadata. Drain the
+ * batch before scheduling another, then parse only after all checks succeed.
+ * Async futures join on both success and unwinding before mappings die.
+ * SHA-256 bytes/order per artifact and sorted manifest identity are unchanged.
+ * Optimization: overlap independent full-file hashes without payload copies;
+ * total O(bytes) work and O(workers) transient digest/thread state.
+ * cpp-guidelines CP.23 (#rconc-join): scoped tasks retain valid borrowed spans.
+ * cpp-perf-guidelines CDSA.32: parallel one-time source preparation;
+ * guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
+ * Prepared installation design/implementation, 2026-10-19: setup hashes pinned
+ * artifacts and atomically records their manifest and file fingerprints. The
+ * trusted launcher admits unchanged installations without reading weight
+ * payloads. Full hash checking remains the default for direct archive/service
+ * callers. Both modes preserve size, path, header, index and extent checks and
+ * canonical identity. Optimization: move O(weight bytes) integrity work to
+ * setup/repair; normal startup maps payloads and reads bounded metadata only.
+ * No numerical change. cpp-guidelines I.1 (#ri-explicit): name the trusted
+ * preparation precondition. cpp-perf-guidelines CDSA.32: persist versioned
+ * preparation for immutable data;
+ * guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
  */
 #include "tensors/formats/safetensors.h"
 
@@ -50,6 +75,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <future>
 #include <limits>
 #include <map>
 #include <set>
@@ -408,6 +434,15 @@ std::vector<TensorRange> parse_header(std::span<const std::byte> header_json,
 }
 
 std::unique_ptr<TensorArchive> open(const OpenRequest& request) {
+  if (request.integrity != Integrity::sha256 &&
+      request.integrity != Integrity::prepared_setup) {
+    throw std::invalid_argument("unknown integrity policy");
+  }
+  constexpr std::size_t max_verification_workers = 8;
+  if (request.verification_workers == 0 ||
+      request.verification_workers > max_verification_workers) {
+    throw std::invalid_argument("verification worker limit");
+  }
   if (request.artifacts.empty() || request.shards.empty() ||
       request.repository.empty() || request.revision.empty()) {
     throw std::invalid_argument("archive request is incomplete");
@@ -446,20 +481,37 @@ std::unique_ptr<TensorArchive> open(const OpenRequest& request) {
   auto archive = std::make_unique<Archive>();
   Digest manifest;
   manifest.text("dolittle-artifacts-v1");
+  // Declared after archive so async readers join before mapping destruction.
+  std::vector<std::future<void>> checks;
+  checks.reserve(request.verification_workers);
   for (const auto& [path, expected] : artifacts) {
     auto mapping =
         std::make_unique<Mapping>(inside_root(root, path), expected.byte_size);
-    Digest actual;
-    actual.update(mapping->bytes());
-    if (actual.finish() != expected.sha256) {
-      throw std::runtime_error("artifact SHA-256 mismatch");
-    }
+    const auto bytes = mapping->bytes();
     manifest.number(path.size());
     manifest.text(path);
     manifest.number(expected.byte_size);
     manifest.text(expected.sha256);
     archive->mappings.emplace(path, std::move(mapping));
+    if (request.integrity == Integrity::prepared_setup) continue;
+    const auto verify = [bytes, expected_hash = expected.sha256] {
+      Digest actual;
+      actual.update(bytes);
+      if (actual.finish() != expected_hash) {
+        throw std::runtime_error("artifact SHA-256 mismatch");
+      }
+    };
+    if (request.verification_workers == 1) {
+      verify();
+    } else {
+      checks.push_back(std::async(std::launch::async, verify));
+      if (checks.size() == request.verification_workers) {
+        for (auto& check : checks) check.get();
+        checks.clear();
+      }
+    }
   }
+  for (auto& check : checks) check.get();
   archive->source = {request.repository, request.revision, manifest.finish()};
   for (const auto& shard : shards) {
     const auto bytes = archive->artifact(shard);

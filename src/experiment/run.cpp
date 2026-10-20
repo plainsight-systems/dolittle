@@ -87,6 +87,19 @@
  * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
  * cpp-perf-guidelines GPU.1: upload each model per phase and one row per
  * attempt; source guidelines/gpu/GPU.1-keep-data-on-device.md.
+ *
+ * Live progress adapter (implementation corpus queried 2026-10-19): decode each
+ * newly appended ID into bounded raw bytes and token byte ranges. For target
+ * output, feed only generated IDs to the model-owned segmentation cursor. Pass
+ * borrowed deltas with role, absolute first position and consumed watermark to
+ * RunObserver. Session copies what it retains; no Record view crosses threads.
+ * Report loading before work and ready only after resource release/record
+ * commit. Decode/publication failure signals the observer, disables token
+ * callbacks and finalizes the current sequence gracefully; it is separate from
+ * device failure. CP.22 (#rconc-unknown), no callback under locks; COPY.7,
+ * bounded deltas rather than repeated prefix copies
+ * (guidelines/copy-move/COPY.7-eliminate-hidden-copies.md); GPU.1, no
+ * additional readback (guidelines/gpu/GPU.1-keep-data-on-device.md).
  */
 #include "experiment/run.h"
 
@@ -146,6 +159,74 @@ tokenizers::DecodedBytes decode_bounded(const tokenizers::Tokenizer& tokenizer,
   }
   return result;
 }
+}  // namespace
+namespace {
+class ProgressAdapter final : public inference::GenerationObserver {
+ public:
+  ProgressAdapter(RunObserver* observer, StreamRole role,
+                  const tokenizers::Tokenizer& tokenizer,
+                  const text::Protocol* protocol,
+                  const text::PreparedPrompt& prompt, std::size_t byte_limit,
+                  std::optional<models::ObservationSite> site = {})
+      : observer_(observer),
+        role_(role),
+        tokenizer_(tokenizer),
+        remaining_(byte_limit),
+        site_(site) {
+    if (observer && protocol) {
+      cursor_ = protocol->make_cursor(prompt.ids.size(), prompt.thinking);
+      if (!cursor_) {
+        throw std::invalid_argument("protocol lacks incremental segmentation");
+      }
+    }
+  }
+  bool update(const inference::GenerationUpdate& update) noexcept override {
+    if (!observer_) return true;
+    try {
+      auto decoded =
+          decode_bounded(tokenizer_.get(), update.appended, remaining_);
+      auto segments =
+          cursor_ && update.first_position >= update.prompt_tokens
+              ? cursor_->append(update.appended, update.first_position)
+              : std::vector<text::TokenSegment>{};
+      remaining_ -= decoded.bytes.size();
+      return observer_->progress({role_, update.first_position,
+                                  update.prompt_tokens, update.consumed_tokens,
+                                  std::cref(decoded), segments, site_});
+    } catch (...) {
+      observer_->publication_failed();
+      return false;
+    }
+  }
+
+ private:
+  RunObserver* observer_;
+  StreamRole role_;
+  std::reference_wrapper<const tokenizers::Tokenizer> tokenizer_;
+  std::unique_ptr<text::SegmentCursor> cursor_;
+  std::size_t remaining_;
+  std::optional<models::ObservationSite> site_;
+};
+class Publication {
+ public:
+  Publication(RunObserver* observer, const std::stop_token& external)
+      : observer_(observer),
+        callback_(external, [this] { stopped_.request_stop(); }) {}
+  void phase(WorkPhase value) {
+    if (observer_ && !observer_->phase(value)) {
+      observer_->publication_failed();
+      observer_ = nullptr;
+      stopped_.request_stop();
+    }
+  }
+  [[nodiscard]] std::stop_token token() const { return stopped_.get_token(); }
+  [[nodiscard]] RunObserver* observer() const { return observer_; }
+
+ private:
+  RunObserver* observer_;
+  std::stop_source stopped_;
+  std::stop_callback<std::function<void()>> callback_;
+};
 }  // namespace
 struct Run::Impl {
   std::reference_wrapper<gpu::Device> device;
@@ -258,9 +339,12 @@ void Run::close() {
   impl_->verbalizer_host_bytes = 0;
   impl_->phase = Phase::closed;
 }
-void Run::generate(const text::Prompt& prompt,
-                   inference::GenerationSettings settings,
-                   const std::stop_token& stop) {
+void Run::generate_impl(const text::Prompt& prompt,
+                        inference::GenerationSettings settings,
+                        RunObserver* observer,
+                        const std::stop_token& external_stop) {
+  Publication publication(observer, external_stop);
+  const auto stop = publication.token();
   auto& p = *impl_;
   if (p.phase != Phase::empty) {
     throw std::logic_error("target generation already started or run closed");
@@ -284,6 +368,7 @@ void Run::generate(const text::Prompt& prompt,
   }
   const auto host = p.available_host(retained);
   auto started = Clock::now();
+  publication.phase(WorkPhase::loading_target);
   auto loaded = p.load(nla::ModelRole::target, host);
   const auto working = loaded.host_working_bytes;
   if (working >= host) {
@@ -307,8 +392,13 @@ void Run::generate(const text::Prompt& prompt,
             add(working, std::max(plan.estimated_peak_host_bytes(),
                                   std::min(upload_allowance, host - working))));
     started = Clock::now();
-    auto result = inference::generate(plan, prepared, settings,
-                                      p.inputs.selector, execution, stop);
+    publication.phase(WorkPhase::generating_target);
+    ProgressAdapter adapter(publication.observer(), StreamRole::target,
+                            *p.inputs.target_tokenizer,
+                            p.inputs.target_protocol.get(), prepared,
+                            p.limits.max_decoded_bytes, site);
+    auto result = inference::generate(
+        plan, prepared, settings, p.inputs.selector, execution, adapter, stop);
     p.measurements.target_generate_seconds = elapsed(started);
     started = Clock::now();
     auto decoded = decode_bounded(*p.inputs.target_tokenizer, result.tokens,
@@ -324,6 +414,7 @@ void Run::generate(const text::Prompt& prompt,
                      p.inputs.backend_identity},
         p.limits.record);
     p.record = std::move(record);
+    publication.phase(WorkPhase::releasing_target);
     started = Clock::now();  // Include sequence teardown and resident release
                              // in this phase.
   } catch (...) {
@@ -336,9 +427,14 @@ void Run::generate(const text::Prompt& prompt,
                     inference::StopReason::execution_failure
                 ? Phase::closed
                 : Phase::retained;
+  publication.phase(WorkPhase::target_retained);
 }
-VariantId Run::interpret(CaptureKey key, inference::GenerationSettings settings,
-                         const std::stop_token& stop) {
+VariantId Run::interpret_impl(CaptureKey key,
+                              inference::GenerationSettings settings,
+                              RunObserver* observer,
+                              const std::stop_token& external_stop) {
+  Publication publication(observer, external_stop);
+  const auto stop = publication.token();
   auto& p = *impl_;
   if (p.phase != Phase::retained && p.phase != Phase::verbalizer_ready) {
     throw std::logic_error("run cannot interpret");
@@ -381,6 +477,7 @@ VariantId Run::interpret(CaptureKey key, inference::GenerationSettings settings,
     attempt.stage = AttemptStage::loading;
     if (!p.verbalizer) {
       start = Clock::now();
+      publication.phase(WorkPhase::loading_verbalizer);
       auto loaded = p.load(nla::ModelRole::verbalizer, host);
       if (loaded.host_working_bytes >= host) {
         throw std::length_error("no host allowance for AV upload");
@@ -416,8 +513,12 @@ VariantId Run::interpret(CaptureKey key, inference::GenerationSettings settings,
           std::max(p.measurements.estimated_peak_host_bytes, estimated_host);
       attempt.stage = AttemptStage::generation;
       start = Clock::now();
+      publication.phase(WorkPhase::generating_verbalizer);
+      ProgressAdapter adapter(publication.observer(), StreamRole::verbalizer,
+                              *p.inputs.verbalizer_tokenizer, nullptr, prompt,
+                              p.limits.max_decoded_bytes);
       attempt.generation = inference::generate(
-          plan, prompt, settings, p.inputs.selector, execution, stop);
+          plan, prompt, settings, p.inputs.selector, execution, adapter, stop);
       attempt.cost.generate_seconds = elapsed(start);
       accumulate(p.measurements.verbalizer_generate_seconds,
                  *attempt.cost.generate_seconds);
@@ -455,6 +556,27 @@ VariantId Run::interpret(CaptureKey key, inference::GenerationSettings settings,
     p.verbalizer_host_bytes = 0;
     p.phase = Phase::closed;
   }
-  return p.record->append(std::move(attempt));
+  const auto id = p.record->append(std::move(attempt));
+  publication.phase(p.phase == Phase::closed ? WorkPhase::closed
+                                             : WorkPhase::verbalizer_ready);
+  return id;
+}
+void Run::generate(const text::Prompt& prompt,
+                   inference::GenerationSettings settings,
+                   const std::stop_token& stop) {
+  generate_impl(prompt, settings, nullptr, stop);
+}
+void Run::generate(const text::Prompt& prompt,
+                   inference::GenerationSettings settings,
+                   RunObserver& observer, const std::stop_token& stop) {
+  generate_impl(prompt, settings, &observer, stop);
+}
+VariantId Run::interpret(CaptureKey key, inference::GenerationSettings settings,
+                         const std::stop_token& stop) {
+  return interpret_impl(key, settings, nullptr, stop);
+}
+VariantId Run::interpret(CaptureKey key, inference::GenerationSettings settings,
+                         RunObserver& observer, const std::stop_token& stop) {
+  return interpret_impl(key, settings, &observer, stop);
 }
 }  // namespace dolittle::experiment

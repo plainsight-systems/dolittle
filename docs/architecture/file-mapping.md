@@ -86,7 +86,8 @@ dolittle/
 │   │       └── cosine.{h,cpp}       # Initial raw-cosine diagnostic
 │   ├── experiment/
 │   │   ├── run.{h,cpp}              # Admission, phase scheduling and residency
-│   │   └── record.{h,cpp}           # Owned tokens, captures and variants
+│   │   ├── record.{h,cpp}           # Owned tokens, captures and variants
+│   │   └── session.{h,cpp}          # Proposed live worker, commands and publication journal
 │   ├── gpu/
 │   │   ├── device.h                 # Device resources and completion contract
 │   │   └── cuda/
@@ -286,7 +287,7 @@ files. Qwen3 checkpoint naming and Qwen3 mathematics are an example.
 | M7 NLA conversion | `src/nla/protocol.h` | `src/nla/pairs/qwen3_8b.*` |
 | R1 Sampling | `src/inference/sampling/sampler.h` | `src/inference/sampling/categorical.*` |
 | R2 Sequence progression | `src/inference/generation.*` | One sequence loop using selected contracts |
-| R3 Experiment scheduling | `src/experiment/run.*` | One-run sequential-residency policy |
+| R3 Experiment scheduling | `src/experiment/run.*`, `session.*` | One-run residency; session adds bounded worker/commands |
 | R4 Observation records | `src/experiment/record.*` | Owned observations and variants |
 | R5 Reconstruction diagnostics | `src/nla/metrics/metric.h` | `src/nla/metrics/cosine.*` |
 | X1 Execution planning | `src/inference/executor.*` | `src/inference/observations.*`, `src/inference/storage_plan.*`; forward preparation and capability selection |
@@ -581,6 +582,25 @@ weight switching. Native/PTX execution and memory checking remain required.
 Sampled prose agreement with target thinking is not a correctness gate. Freeze
 the AV baseline before debugging and locate the engine's first divergence;
 never change reference arithmetic or precision to match the engine.
+
+### Live application
+
+The accepted [application design](live-application.md) covers source launch,
+target progress, retained capture selection, AV requests, reconnect and browser
+presentation. `experiment/session.*` owns the single worker, admission and bounded
+immutable journal. `server/http.*` owns transport; `server/wire.cpp` implements pure
+wire translation. Generation/Run observers publish borrowed deltas; the concrete
+text protocol owns incremental classification. No CUDA objects cross these seams.
+
+`main.cpp` selects the CUDA device and pinned model providers. `dolittle_execution`
+contains backend-neutral execution/session sources; `dolittle_cuda` contains the
+runtime and kernels for this build. A Metal port adds its backend/composition/build
+path and numerical validation while retaining the application contracts.
+
+The source launcher, revision-aware model cache and browser files follow the
+application document. The application integration replaces the standalone archive
+scenario, keeping the inventory at five; adversarial archive filesystem coverage
+from the retired executable is not claimed as preserved.
 
 ### Subsequent work
 

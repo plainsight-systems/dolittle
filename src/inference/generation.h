@@ -85,6 +85,26 @@
  * replacement is restricted to the prompt. cpp-perf-guidelines GPU.1: no
  * repeated injection transfer during decode; source
  * guidelines/gpu/GPU.1-keep-data-on-device.md.
+ *
+ * Live application extension: IMPLEMENTED CONTRACT, 2026-10-19.
+ * Overlay: docs/architecture/live-application.md, "Progress, segmentation and
+ * exact positions". An optional borrowed GenerationObserver sees initial
+ * prompt IDs once, each newly emitted ID once, and completed consumed-count
+ * advances (possibly with an empty appended span). first_position identifies
+ * appended IDs in the same absolute sequence as GenerationResult. Counts are
+ * monotonic; emission can precede consumption by one token. Updates occur only
+ * after existing host-visible completion boundaries, with no extra GPU work.
+ * Views expire when update returns; observer is non-owning and cannot reenter
+ * the plan. No network/file I/O, mutex-held callback or RNG change is allowed.
+ * false means publication failed: disable further observer calls and request
+ * graceful stop through the ordinary progression rule. Final-token consumption
+ * and owned GenerationResult remain required; no fabricated CUDA failure.
+ * No-observer overload retains existing behavior. Reserve metadata before first
+ * emission; work is O(new IDs), never O(total prefix) per update.
+ * Header corpus: cpp-guidelines CP.22 (#rconc-unknown), callbacks run outside
+ * locks; cpp-perf-guidelines GPU.1, use existing completed readback only;
+ * source guidelines/gpu/GPU.1-keep-data-on-device.md. COPY.7, borrow update
+ * spans; source guidelines/copy-move/COPY.7-eliminate-hidden-copies.md.
  */
 #pragma once
 
@@ -142,6 +162,29 @@ struct GenerationResult {
   StopReason reason{};
   std::string failure_message;
 };
+// Optional observer contract; callback values are borrowed for the call.
+struct GenerationUpdate {
+  std::span<const tokenizers::TokenId> appended;
+  std::size_t first_position;
+  std::size_t prompt_tokens;
+  std::size_t consumed_tokens;
+};
+class GenerationObserver {
+ public:
+  GenerationObserver() = default;
+  GenerationObserver(const GenerationObserver&) = delete;
+  GenerationObserver& operator=(const GenerationObserver&) = delete;
+  GenerationObserver(GenerationObserver&&) = delete;
+  GenerationObserver& operator=(GenerationObserver&&) = delete;
+  virtual ~GenerationObserver() = default;
+  [[nodiscard]] virtual bool update(const GenerationUpdate&) noexcept = 0;
+};
+[[nodiscard]] GenerationResult generate(CachedForwardPlan&,
+                                        const text::PreparedPrompt&,
+                                        GenerationSettings,
+                                        const sampling::TokenSelector&,
+                                        ExecutionId, GenerationObserver&,
+                                        const std::stop_token& stop = {});
 [[nodiscard]] GenerationResult generate(CachedForwardPlan&,
                                         const text::PreparedPrompt&,
                                         GenerationSettings,

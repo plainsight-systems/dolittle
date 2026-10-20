@@ -51,6 +51,16 @@
  * host access explicit and confine necessary native API operations.
  * cpp-perf-guidelines COPY.7: borrow spans/references without hidden payload
  * copies. Source: guidelines/copy-move/COPY.7-eliminate-hidden-copies.md.
+ *
+ * Incremental classification (implementation corpus queried 2026-10-19): a
+ * cursor starts at the first generated absolute position. Require the next
+ * contiguous span, check position overflow, reserve its output, then apply the
+ * same classify transition to every ID and advance the absolute watermark.
+ * Reserve before mutation so allocation failure permits retry. Batch segment
+ * uses this same cursor. Work is O(new IDs), state O(1); no text prefix
+ * rescans. CP.22 (#rconc-unknown), independent cursor state with no external
+ * callbacks; COPY.7, borrow ID spans
+ * (guidelines/copy-move/COPY.7-eliminate-hidden-copies.md).
  */
 #include "text/qwen3_chat.h"
 
@@ -93,7 +103,54 @@ std::string sha256(std::string_view text) {
   }
   return out.str();
 }
+SegmentKind classify(SegmentKind& state, tokenizers::TokenId id) {
+  auto kind = state;
+  if (id == think_begin) {
+    state = state == SegmentKind::unclassified ? SegmentKind::reasoning
+                                               : SegmentKind::unclassified;
+    kind = SegmentKind::control;
+  } else if (id == think_end) {
+    state = state == SegmentKind::reasoning ? SegmentKind::answer
+                                            : SegmentKind::unclassified;
+    kind = SegmentKind::control;
+  } else if (id == end_message || id == end_text) {
+    kind = SegmentKind::control;
+  }
+  return kind;
+}
+struct Qwen3Cursor final : SegmentCursor {
+  std::size_t next;
+  SegmentKind state;
+  Qwen3Cursor(std::size_t start, ThinkingMode mode)
+      : next(start),
+        state(mode == ThinkingMode::enabled ? SegmentKind::unclassified
+                                            : SegmentKind::answer) {
+    if (mode != ThinkingMode::enabled && mode != ThinkingMode::disabled) {
+      throw std::invalid_argument("unknown thinking mode");
+    }
+  }
+  std::vector<TokenSegment> append(std::span<const tokenizers::TokenId> ids,
+                                   std::size_t first) override {
+    if (first != next ||
+        ids.size() > std::numeric_limits<std::size_t>::max() - next) {
+      throw std::invalid_argument("noncontiguous segment input");
+    }
+    std::vector<TokenSegment> result;
+    result.reserve(ids.size());
+    auto after = state;
+    for (auto id : ids) {
+      result.push_back({first + result.size(), classify(after, id)});
+    }
+    next += ids.size();
+    state = after;
+    return result;
+  }
+};
 struct Qwen3Chat final : Protocol {
+  std::unique_ptr<SegmentCursor> make_cursor(std::size_t first,
+                                             ThinkingMode mode) const override {
+    return std::make_unique<Qwen3Cursor>(first, mode);
+  }
   std::string source;
   std::size_t budget{};
   PreparedPrompt prepare(
@@ -146,33 +203,8 @@ struct Qwen3Chat final : Protocol {
   std::vector<TokenSegment> segment(std::span<const tokenizers::TokenId> ids,
                                     std::size_t start,
                                     ThinkingMode mode) const override {
-    if (mode != ThinkingMode::enabled && mode != ThinkingMode::disabled) {
-      throw std::invalid_argument("unknown thinking mode");
-    }
-    if (ids.size() > std::numeric_limits<std::size_t>::max() - start) {
-      throw std::length_error("segment position overflow");
-    }
-    std::vector<TokenSegment> result;
-    result.reserve(ids.size());
-    auto state = mode == ThinkingMode::enabled ? SegmentKind::unclassified
-                                               : SegmentKind::answer;
-    for (std::size_t i = 0; i < ids.size(); ++i) {
-      auto kind = state;
-      if (dolittle::at(ids, i) == think_begin) {
-        state = state == SegmentKind::unclassified ? SegmentKind::reasoning
-                                                   : SegmentKind::unclassified;
-        kind = SegmentKind::control;
-      } else if (dolittle::at(ids, i) == think_end) {
-        state = state == SegmentKind::reasoning ? SegmentKind::answer
-                                                : SegmentKind::unclassified;
-        kind = SegmentKind::control;
-      } else if (dolittle::at(ids, i) == end_message ||
-                 dolittle::at(ids, i) == end_text) {
-        kind = SegmentKind::control;
-      }
-      result.push_back({start + i, kind});
-    }
-    return result;
+    Qwen3Cursor cursor(start, mode);
+    return cursor.append(ids, start);
   }
 };
 }  // namespace

@@ -4,9 +4,9 @@
 
 - **Project:** Dolittle, named after Doctor Dolittle.
 - **Parent entity:** Plainsight Systems LLC; no separate operating brand.
-- **Status:** project site, CUDA forward/generation and target-to-AV interpretation
-  are implemented. Bounded independent numerical checks run on the 3090 Ti.
-  Reconstruction and the live browser/API remain later slices.
+- **Status:** project site, CUDA forward/generation, target-to-AV interpretation
+  and the live browser/API are implemented. Bounded independent numerical checks
+  and the Docker application flow run on the 3090 Ti. Reconstruction remains later work.
 - **Remote:** `origin` is https://github.com/plainsight-systems/dolittle.git.
   The site’s Code link points to this repository. Andrew authorized the first
   push and Pages deployment on 2026-10-16.
@@ -49,7 +49,7 @@
 - Serve `app/` through the engine deployment. A browser on another machine,
   including a Mac, can access the Linux deployment. `web/` is the separate
   public project site, now implemented as a local static build. The live
-  inference interface remains unimplemented.
+  inference interface is implemented under the accepted live-application design.
 - Prioritize the project site before engine architecture. Follow Cradle’s
   explanatory format and family styling, with explanations, explorations, and
   Serenity-style milestones sharing a Writing index. Milestones support the
@@ -97,8 +97,9 @@
   turn the project into a novel interpretability research effort.
 - The reference uses PyTorch/Transformers/PEFT only for verification. The direct
   C++/CUDA implementation decision is unchanged.
-- Docker is installed but NVIDIA Container Toolkit/GPU access is missing.
-  Host administrator setup is required before container execution checks.
+- Docker initially lacked NVIDIA Container Toolkit/GPU access. Host setup was
+  completed with Toolkit 1.20.1; the Docker application flow now passes on the
+  3090 Ti, including target generation, AV interpretation, reconnect and shutdown.
 - Source revisions, manifests, full outputs, costs, and caveats live in the
   [feasibility note](../research/2026-10-16-nla-validation/README.md).
 
@@ -275,3 +276,58 @@ resolver for VS Code and `scripts/check.py format`. C/C++/CUDA format on save vi
 the existing Microsoft C/C++ extension. CI checks formatting on PRs and `main`
 pushes. Tool installation is explicit; no machine-specific path or automatic
 download on save. clang-tidy remains a separate static-analysis gate.
+
+## Live application
+
+Andrew accepted the complete source-launch/browser slice. Session owns one
+persistent worker, Run and device; HTTP threads only submit typed commands and
+read bounded immutable pages. Incremental classification stays with the model
+text protocol. Backend-neutral execution now compiles under the host preset;
+CUDA links only at executable composition. A Metal port supplies its runtime,
+kernels, build/composition and numerical evidence without replacing session,
+transport or presentation contracts. No alternate backend is implemented yet.
+
+The implementation uses source-pinned cpp-httplib for HTTP and the existing JSON
+library for wire translation. The launcher builds locally, verifies revision-aware
+model caches and starts the service. It never downloads an application executable.
+Loopback is the default; LAN requires explicit configuration. API access tokens,
+Host/Origin checks and server epochs protect the single-user boundary. Retries keep
+both request identity and the originating epoch. Records remain in memory only.
+
+The browser preserves exact IDs/raw byte ranges, supports selection/windows and
+separate AV variants, and reconnects by cursor without regenerating. Publication
+failures are explicit and stop gracefully. Each AV sequence gets fresh KV while
+resident AV weights are reused. Setup hashes every model artifact and saves a
+receipt; unchanged installations launch without repeating that scan. The service
+retains shared const archive mappings across turns and target/AV switches;
+metadata/binding and GPU upload use the prepared bytes. Direct service calls
+still default to full verification. Files must remain unchanged while the service
+runs. Only the active model occupies VRAM. Mapped pages remain OS-reclaimable,
+and both archives' metadata allowances are included in host admission.
+
+The application integration explicitly replaces standalone archive integration,
+keeping five scenarios. Successful real-file verification/binding remains covered;
+the retired adversarial filesystem cases are not claimed as preserved. Pure
+parser and byte/state contracts remain units. Frozen numerical oracles, fixtures
+and limits are unchanged. Reconstruction remains optional later work. Verification
+status is recorded in the queue. The existing application integration supports
+native and Docker execution modes; container verification uses the default source
+launcher, read-only model mounts and a localhost-published service. Host NVIDIA
+Container Toolkit remains a prerequisite for users' own Docker deployments.
+
+## Model setup and platform decisions, 2026-10-19
+
+- Full model SHA-256 belongs to setup/download/repair, not every application
+  launch. Persist a versioned receipt bound to the manifest and file metadata;
+  unchanged installations launch without scanning weight payloads. Changed or
+  missing artifacts require setup again. Explicit verification remains available.
+  Prepared mode is a trusted launcher precondition; standalone archive/service
+  calls default to SHA-256. Keep cache files unchanged during service lifetime.
+- Linux/NVIDIA builds and runs inside Docker. Future macOS/Metal uses the native
+  Apple toolchain; Windows/NVIDIA uses native MSVC/CUDA without requiring WSL2.
+  Only Linux/NVIDIA is currently implemented and validated.
+- Exploration budgets: target output defaults to 4,096 tokens shared by thinking
+  and answer; total target context is 8,192 including formatted prompt. Keep AV
+  settings independent (256 output default, 512 total context). Admission rejects
+  oversize requests rather than truncating them. Early model completion remains
+  normal. This is application configuration, not a paper-derived model limit.

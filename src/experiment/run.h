@@ -87,6 +87,34 @@
  * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
  * cpp-perf-guidelines GPU.1: upload each model per phase and one row per
  * attempt; source guidelines/gpu/GPU.1-keep-data-on-device.md.
+ *
+ * Live application extension: IMPLEMENTED CONTRACT, 2026-10-19.
+ * Overlay: docs/architecture/live-application.md, "Algorithm and ownership".
+ * Borrow RunObserver for one synchronous call. Translate GenerationUpdate with
+ * the role's tokenizer and segmentation cursor, decoding only appended IDs.
+ * Prompt IDs are marked separately; classify only generated target IDs. AV
+ * stream bytes remain raw/unclassified until the pair extracts final tags.
+ * Token ranges in a delta refer to that delta's raw byte buffer; positions
+ * remain absolute in its own target or AV sequence. The session supplies
+ * operation/job identity outside Run, so AV positions cannot be mistaken for
+ * target captures. Notify loading/generating/releasing boundaries before work,
+ * but publish retained or ready only after resources and Record satisfy their
+ * existing postconditions. Observer data expires on callback return. false
+ * disables notifications for that call and requests graceful stop, preserving a
+ * completed Record/attempt when possible. Observer failure does not change
+ * numerical error classification. Calls remain serialized; observer must not
+ * poll/reenter Run. Session transfers owned presentation values outside Run; no
+ * Record reference crosses threads. Budget transient decoded delta bytes
+ * separately from retained record output; no full-prefix decode or
+ * capture-payload copy. Normal generation and variant ownership remain
+ * unchanged. Decode/publication failures signal publication_failed before
+ * graceful finalization; this does not fabricate a device execution error.
+ * Implementation corpus queried 2026-10-19: cpp-guidelines CP.22
+ * (#rconc-unknown), no callback under locks; cpp-perf-guidelines COPY.7, borrow
+ * callback data and move owned publication chunks; source
+ * guidelines/copy-move/COPY.7-eliminate-hidden-copies.md. GPU.1, no extra
+ * device readback for presentation; source
+ * guidelines/gpu/GPU.1-keep-data-on-device.md.
  */
 #pragma once
 
@@ -129,6 +157,40 @@ struct RunLimits {
   RecordLimits record;
 };
 enum class Phase : std::uint8_t { empty, retained, verbalizer_ready, closed };
+// Live progress contract: borrowed values expire when the callback returns.
+enum class StreamRole : std::uint8_t { target, verbalizer };
+enum class WorkPhase : std::uint8_t {
+  loading_target,
+  generating_target,
+  releasing_target,
+  target_retained,
+  loading_verbalizer,
+  generating_verbalizer,
+  verbalizer_ready,
+  closed
+};
+struct RunProgress {
+  StreamRole role;
+  std::size_t first_position;
+  std::size_t prompt_tokens;
+  std::size_t consumed_tokens;
+  std::reference_wrapper<const tokenizers::DecodedBytes> delta;
+  std::span<const text::TokenSegment> segments;
+  std::optional<models::ObservationSite> capture_site;
+};
+class RunObserver {
+ public:
+  RunObserver() = default;
+  RunObserver(const RunObserver&) = delete;
+  RunObserver& operator=(const RunObserver&) = delete;
+  RunObserver(RunObserver&&) = delete;
+  RunObserver& operator=(RunObserver&&) = delete;
+  virtual ~RunObserver() = default;
+  [[nodiscard]] virtual bool phase(WorkPhase) noexcept = 0;
+  [[nodiscard]] virtual bool progress(const RunProgress&) noexcept = 0;
+  // Idempotent failure signal, including failures while decoding a delta.
+  virtual void publication_failed() noexcept = 0;
+};
 class Run {
  public:
   Run(gpu::Device&, RunId, RunInputs, RunLimits);
@@ -141,6 +203,10 @@ class Run {
                 const std::stop_token& = {});
   [[nodiscard]] VariantId interpret(CaptureKey, inference::GenerationSettings,
                                     const std::stop_token& = {});
+  void generate(const text::Prompt&, inference::GenerationSettings,
+                RunObserver&, const std::stop_token& = {});
+  [[nodiscard]] VariantId interpret(CaptureKey, inference::GenerationSettings,
+                                    RunObserver&, const std::stop_token& = {});
   [[nodiscard]] Phase phase() const noexcept;
   [[nodiscard]] const Record* record()
       const noexcept;  // Null until target result retained.
@@ -149,6 +215,11 @@ class Run {
   void close();
 
  private:
+  void generate_impl(const text::Prompt&, inference::GenerationSettings,
+                     RunObserver*, const std::stop_token&);
+  [[nodiscard]] VariantId interpret_impl(CaptureKey,
+                                         inference::GenerationSettings,
+                                         RunObserver*, const std::stop_token&);
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

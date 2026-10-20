@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Dolittle — live experiment</title>
+  <link rel="stylesheet" href="/app.css"><script type="module" src="/view.js"></script>
+</head>
+<body>
+<header class="masthead"><a class="wordmark" href="/">Dolittle<span>Plainsight Systems</span></a><nav aria-label="Project"><a href="https://dolittle.plainsight-systems.com" target="_blank" rel="noreferrer">About the experiment ↗</a><a href="https://github.com/plainsight-systems/dolittle" target="_blank" rel="noreferrer">Code ↗</a></nav></header>
+<main>
+  <div class="intro"><div><h1>Two views into one generation.</h1><p>Read the model’s thinking, then explore an activation behind it.</p></div><span id="connection" class="connection" role="status">Connecting…</span></div>
+  <section id="error" class="notice error" role="alert" hidden><span></span><button id="retry" hidden>Retry request</button></section>
+  <details id="composer" class="composer" open>
+    <summary><span class="step" aria-hidden="true">01</span><span>Prompt</span><span id="prompt-preview" class="summary-preview">Start with a question or a small puzzle.</span><span id="composer-action" class="edit-label">Collapse</span></summary>
+    <form id="prompt-form" class="prompt-area">
+      <label for="prompt" class="sr-only">Your prompt</label><textarea id="prompt" rows="2" maxlength="16000" required placeholder="What would you like to explore?"></textarea>
+      <div class="prompt-actions"><div class="prompt-options"><label class="check"><input id="thinking" type="checkbox" checked> Enable thinking</label><label class="budget">Output budget <input id="target-cap" type="number" value="4096" min="1" max="8192" aria-describedby="budget-help"><span>tokens</span></label></div><button id="generate" class="primary" disabled>Generate</button></div>
+      <p id="budget-help" class="hint">Thinking and the answer share this budget. Prompt plus output must fit within 8,192 tokens; generation can finish sooner.</p>
+      <details class="settings"><summary>Sampling & system message</summary><div class="settings-grid"><label>Sampling<select id="target-mode"><option value="categorical">Sampled</option><option value="greedy">Greedy</option></select></label><label>Temperature<input id="target-temperature" type="number" value="0.6" min="0.01" max="10" step="0.01"></label><label>Top p<input id="target-top-p" type="number" value="0.95" min="0.01" max="1" step="0.01"></label><label>Seed<input id="target-seed" inputmode="numeric" value="42" pattern="[0-9]+"></label></div><label class="system-label">System message <span class="hint">(optional)</span><textarea id="system" rows="2" maxlength="8000"></textarea></label></details>
+      <p id="replace-note" class="hint" hidden>Generating again replaces the current output and its interpretations.</p>
+    </form>
+  </details>
+  <div class="workspace">
+    <section class="transcript" aria-labelledby="transcript-title">
+      <div class="section-heading"><h2 id="transcript-title"><span class="step" aria-hidden="true">02</span>Model output</h2><button id="stop" class="quiet" type="button" hidden disabled>Stop generation</button></div>
+      <div class="output-toolbar"><div class="output-progress"><p id="target-status" class="hint" role="status">Your output will appear here.</p><a id="answer-link" href="#answer-section" hidden>Jump to answer ↓</a></div><label class="check"><input id="show-controls" type="checkbox"> Show prompt & control tokens</label></div>
+      <p id="empty-target" class="empty">Ask a question above. The model’s thinking and answer appear separately here.</p>
+      <div id="generation-notice" class="notice" role="status" hidden></div>
+      <div id="transcript-content">
+        <section id="prompt-section" class="output-section" hidden><h3>Prompt & control tokens</h3><div id="prompt-tokens" class="token-text control-text"></div></section>
+        <details id="reasoning-section" class="output-section thinking-section" open hidden><summary class="output-heading"><h3>Thinking</h3><span id="reasoning-status" class="hint"></span></summary><div id="reasoning" class="token-text"></div></details>
+        <section id="answer-section" class="output-section answer-section" hidden><div class="output-heading"><h3>Answer</h3><span id="answer-status" class="hint"></span></div><p id="answer-placeholder" class="hint" hidden></p><div id="answer" class="token-text"></div></section>
+        <section id="unclassified-section" class="output-section" hidden><h3>Unclassified output</h3><p class="hint">This text arrived outside the recognized thinking and answer boundaries.</p><div id="unclassified" class="token-text"></div></section>
+      </div>
+      <p id="selection-guide" class="hint" hidden>Click a text fragment to inspect it. Shift-click to select a range; use arrow keys to move between fragments.</p>
+    </section>
+    <a id="selection-jump" class="selection-jump" href="#inspector-title" hidden>Inspect selected text →</a>
+    <aside class="inspector" aria-labelledby="inspector-title"><div class="inspector-inner">
+      <h2 id="inspector-title" tabindex="-1"><span class="step" aria-hidden="true">03</span>Activation interpretation</h2><p class="section-intro">What does the NLA describe at this point?</p>
+      <div id="selection-help" class="empty"><span class="empty-marker" aria-hidden="true">↖</span><p>Select a fragment in the model output.</p><p class="hint">Then ask the NLA to describe the captured activation. You can compare it with the model’s own words.</p></div>
+      <div id="selection-controls" hidden>
+        <div class="selection-heading"><span class="eyebrow">Selected text</span><button id="clear-selection" class="text-button" type="button">Clear</button></div>
+        <blockquote id="selection-text"></blockquote><p id="capture-status" class="hint"></p>
+        <button id="interpret" class="primary" disabled>Interpret this token</button>
+        <details class="settings"><summary>Token positions & variants</summary><div class="position-nav"><button id="previous" type="button" aria-label="Previous token">←</button><label>First position<input id="position" type="number" min="0" value="0"></label><button id="next" type="button" aria-label="Next token">→</button></div><div class="selection-options"><label>Last position<input id="end-position" type="number" min="0" value="0"></label><label>Variants per token<input id="variant-count" type="number" min="1" max="4" value="1"></label></div><p id="token-detail" class="hint"></p></details>
+      </div>
+      <details class="settings"><summary>Interpretation settings</summary><div class="settings-grid"><label>Sampling<select id="av-mode"><option value="categorical">Sampled</option><option value="greedy">Greedy</option></select></label><label>Temperature<input id="av-temperature" type="number" value="1" min="0.01" max="10" step="0.01"></label><label>Output budget<input id="av-cap" type="number" value="256" min="1" max="512"></label><label>Seed<input id="av-seed" inputmode="numeric" value="100" pattern="[0-9]+"></label></div></details>
+      <section id="live-interpretation" class="interpretation" hidden aria-labelledby="live-title"><h3 id="live-title">Preparing interpretation…</h3><p id="live-output" class="live-output"></p></section>
+      <div id="interpretations"></div><p class="caveat">The NLA describes an activation; it does not read a definitive inner monologue. Agreement with the thinking text is not a confidence score.</p>
+    </div></aside>
+  </div>
+</main>
+<footer><span id="pair">Qwen3-8B / Qwen3-8B-nla</span><span id="run-label">No active experiment</span></footer>
+</body></html>

@@ -5,8 +5,10 @@
  * Contract: an archive owns the backing storage for its immutable entries and
  * metadata artifacts. Names are unique; payload layout/extent has been checked.
  * tensor() and artifact() borrow data valid until archive destruction. Missing
- * names throw invalid_argument. Implementations must verify size and SHA-256
- * against supplied expected artifacts before exposing any bytes as verified.
+ * names throw invalid_argument. Sizes are checked at open. SHA-256 must have
+ * been checked against expected artifacts either at open or by trusted setup
+ * whose unchanged installation the caller admits explicitly. A setup receipt
+ * is remembered verification, not a fresh cryptographic check of content.
  * SourceIdentity records repository/revision plus a deterministic digest of
  * the sorted (relative path, byte size, SHA-256) list, not a caller's label.
  * Metadata such as config/index is part of that same identity. No GPU work.
@@ -25,6 +27,17 @@
  * cpp-guidelines I.7 (#ri-post): verified identity and borrowed lifetime
  * stated. cpp-perf-guidelines CDSA.32: resolve stable named metadata once at
  * load. Source:
+ * guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
+ * Prepared installation design/implementation, 2026-10-19: setup hashes pinned
+ * artifacts and atomically records their manifest and file fingerprints. The
+ * trusted launcher admits unchanged installations without reading weight
+ * payloads. Full hash checking remains the default for direct archive/service
+ * callers. Both modes preserve size, path, header, index and extent checks and
+ * canonical identity. Optimization: move O(weight bytes) integrity work to
+ * setup/repair; normal startup maps payloads and reads bounded metadata only.
+ * No numerical change. cpp-guidelines I.1 (#ri-explicit): name the trusted
+ * preparation precondition. cpp-perf-guidelines CDSA.32: persist versioned
+ * preparation for immutable data;
  * guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
  */
 #pragma once

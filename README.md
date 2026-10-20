@@ -10,20 +10,21 @@ activations. One prompt, one generation, two views of the model working
 through it.
 
 The first engine targets Linux with CUDA and source builds in a pinned Docker
-environment. Metal on macOS is planned next; AMD support is undecided. A future
-browser interface will let you follow the thinking text and inspect activations
+environment. Metal on macOS is planned next; AMD support is undecided. The
+browser interface lets you follow the thinking text and inspect activations
 captured at selected positions. The first hardware target is a
 24 GB Ampere GPU, with reference measurements on an RTX 3090 Ti. The selected
 pairing is **Qwen3 8B with marco-bazzani's natural language autoencoder**,
 interpreting activations at block 24 (zero-based).
 
-**Status: target generation and AV interpretation are implemented.** The
+**Status: target generation, AV interpretation and the live interface are implemented.** The
 C++20/CUDA engine loads verified checkpoints, formats and tokenizes Qwen3 prompts,
 generates with a contiguous KV cache, and retains configurable raw captures.
 It releases the target before loading the AV, normalizes a selected capture and
 replaces one AV embedding row, then retains each interpretation as a separate
 variant. AV weights stay resident between requests; each gets a fresh cache.
-The browser/API and reconstruction remain later work. Numerical fixture checks
+A bounded HTTP session streams exact token progress, retains captures and
+serves the browser interface. Reconstruction remains later work. Numerical fixture checks
 are separate from whether the generated interpretations are faithful.
 
 CUDA 13.2 builds retain native Ampere code and PTX. Use the
@@ -32,9 +33,24 @@ Container GPU execution requires the NVIDIA Container Toolkit. The current
 numerical scenarios cover short sequences; they do not establish full-context
 behavior or performance on other NVIDIA hardware.
 
+On Linux/NVIDIA, build and launch from source:
+
+```sh
+python3 scripts/run.py
+```
+
+See [application setup](app/README.md) for driver/Container Toolkit requirements,
+persistent model storage, the native developer path and remote browser access.
+The runtime image builds locally; no prebuilt application executable is fetched.
+Setup downloads and hash-verifies models once. Later launches reuse the prepared
+cache; `--verify-models` forces a full verification and repair.
+The Docker application flow is verified on the RTX 3090 Ti with NVIDIA
+Container Toolkit 1.20.1, including target generation and AV interpretation.
+
+Development checks:
+
 ```sh
 python3 scripts/check.py host
-python3 scripts/check.py archive
 # On Linux: build CUDA sources in the pinned Docker environment.
 python3 scripts/check.py cuda-build
 ```
@@ -63,7 +79,7 @@ name from that idea: making an unfamiliar intelligence understandable.
 
 A natural language autoencoder translates an internal activation vector into
 text, then reconstructs a vector from that text. Its descriptions are
-interpretations that can be wrong. Dolittle will distinguish those
+interpretations that can be wrong. Dolittle distinguishes those
 interpretations from the reasoning text the target model generates itself.
 
 The purpose is to understand the machinery by implementing it and making it

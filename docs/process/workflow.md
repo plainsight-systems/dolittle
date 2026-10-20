@@ -174,7 +174,7 @@ publication boundary under a deployment subpath. Negative publication guards
 run separately as in-memory unit tests against `check_site_snapshot`; they do
 not touch files or launch Hugo. The site therefore occupies one of the five
 repository-wide integration slots. The current five-scenario inventory is site
-publication, checkpoint archive integrity, CUDA device resources, tiny CUDA
+publication, live application, CUDA device resources, tiny CUDA
 target-to-AV comparison and pinned 8B CUDA target-to-AV comparison; see `tests/README.md`
 for registration and execution requirements. The budget is full. Update the
 inventory and replace or remove existing coverage before adding a scenario.

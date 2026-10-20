@@ -16,6 +16,12 @@
  * cpp-perf-guidelines CDSA.32: resolve serialized names into semantic model
  * roles. Source:
  * guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
+ * Shared binding ownership, design/implementation 2026-10-19: two bindings and
+ * their source owner can die independently; payloads remain valid until the
+ * last binding releases the archive. Failed binding preserves other source
+ * owners. cpp-guidelines F.27 (#rf-shared_ptr) defines this shared lifetime
+ * invariant; cpp-perf-guidelines CDSA.32 supports reusing one immutable
+ * prepared source.
  */
 #include <algorithm>
 #include <array>
@@ -269,12 +275,34 @@ void ownership_contracts() {
   expect_throws<std::invalid_argument>(
       [] { (void)qwen::bind_target(nullptr, "config.json"); });
 }
+void shared_ownership_contracts() {
+  int destroyed = 0;
+  auto source = std::make_shared<MemoryArchive>(destroyed);
+  auto first = qwen::bind_causal_lm(source, "config.json");
+  auto second = qwen::bind_causal_lm(source, "config.json");
+  source.reset();
+  first.reset();
+  check(destroyed == 0, "remaining binding retains shared source");
+  const auto view = second->parameter({0});
+  tensors::validate_view(view);
+  check(view.bytes.front() == std::byte{0x3f}, "shared payload remains live");
+  second.reset();
+  check(destroyed == 1, "last binding releases shared source once");
+  auto invalid = std::make_shared<MemoryArchive>(destroyed, true);
+  expect_throws<std::invalid_argument>(
+      [&] { (void)qwen::bind_causal_lm(invalid, "config.json"); });
+  check(destroyed == 1 && !invalid->tensors().empty(),
+        "failed binding preserves external archive owner");
+  invalid.reset();
+  check(destroyed == 2, "external owner releases failed binding source");
+}
 }  // namespace
 
 int main() try {
   config_contracts();
   binding_contracts();
   ownership_contracts();
+  shared_ownership_contracts();
 } catch (const std::exception& error) {
   return dolittle::tests::report_failure(error.what());
 } catch (...) {

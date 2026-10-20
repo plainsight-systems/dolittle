@@ -48,8 +48,10 @@ layout are implementation choices that must preserve these operations.
 ### Checkpoint loading and binding
 
 The setup path supplies an explicit artifact list with pinned sizes and hashes.
-The format reader verifies those files, checks named tensor layouts and extents,
-and owns immutable backing storage. Model configuration and shard-index bytes
+The format reader verifies those files by default. The application may instead
+admit an unchanged installation already hash-verified during setup, through the
+explicit prepared integrity mode. In both cases the reader checks file sizes,
+named tensor layouts and extents, and owns immutable backing storage. Model configuration and shard-index bytes
 belong to the same verified source identity. Acquisition remains separate from
 loading; the reader does not discover extra weights or download replacements.
 

@@ -49,4 +49,9 @@ The pinned pair owns its source checks, trained prompt, normalization and output
 tags. Shared execution owns resident weights, fresh sequence caches and explicit
 embedding replacement. Run coordinates target release before AV loading; Record
 owns exact tokens, raw captures and separately retained interpretation attempts.
-Reconstruction, serving and the browser application remain subsequent work.
+Reconstruction remains subsequent work.
+
+The accepted [live experiment application](live-application.md) implements
+source launch, live target progress, selection, AV variants and reconnect.
+Session owns the worker and bounded publication; HTTP owns transport; the
+browser owns presentation. These boundaries preserve the backend change axis.

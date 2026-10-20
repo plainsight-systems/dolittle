@@ -35,10 +35,29 @@
  * cpp-perf-guidelines CDSA.32: resolve protocol token identities once.
  * Source:
  * guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
+ *
+ * Live application extension: IMPLEMENTED CONTRACT, 2026-10-19.
+ * Overlay: docs/architecture/live-application.md, "Progress, segmentation and
+ * exact positions". A new cursor owns the protocol's classification state for
+ * one generated stream. append accepts contiguous newly emitted IDs, returns
+ * absolute segments and advances once. Splitting an input into arbitrary chunks
+ * must produce exactly the existing segment result, including malformed control
+ * delimiters. Reject gaps/overlap/overflow before mutating cursor state;
+ * allocation failure leaves the cursor retryable. Empty input is an identity
+ * operation. The concrete Qwen3 cursor and batch segment share one transition
+ * rule. Tokens are not decoded or copied into the cursor; it owns validated
+ * control metadata and remains valid independently of the Protocol factory
+ * owner. Returned segments own their storage. Optimization: O(new IDs) per
+ * append, O(1) cursor state; no prefix rescanning. HTTP/browser never own model
+ * control-token rules. Header corpus: cpp-guidelines F.27 (#rf-shared_ptr),
+ * prefer unique cursor ownership because there is one stream consumer;
+ * cpp-perf-guidelines COPY.7, borrow input spans and return owned deltas;
+ * source guidelines/copy-move/COPY.7-eliminate-hidden-copies.md.
  */
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 
 #include "tokenizers/tokenizer.h"
@@ -68,6 +87,19 @@ struct TokenSegment {
   std::size_t position;
   SegmentKind kind;
 };
+// Proposed streaming contract; the existing batch API remains authoritative.
+class SegmentCursor {
+ public:
+  SegmentCursor() = default;
+  SegmentCursor(const SegmentCursor&) = delete;
+  SegmentCursor& operator=(const SegmentCursor&) = delete;
+  SegmentCursor(SegmentCursor&&) = delete;
+  SegmentCursor& operator=(SegmentCursor&&) = delete;
+  virtual ~SegmentCursor() = default;
+  [[nodiscard]] virtual std::vector<TokenSegment> append(
+      std::span<const tokenizers::TokenId> generated,
+      std::size_t first_position) = 0;
+};
 class Protocol {
  public:
   Protocol() = default;
@@ -76,6 +108,12 @@ class Protocol {
   Protocol(Protocol&&) = delete;
   Protocol& operator=(Protocol&&) = delete;
   virtual ~Protocol() = default;
+  // A protocol without streaming support returns null; batch behavior remains
+  // available. Callers reject streaming before starting inference in that case.
+  [[nodiscard]] virtual std::unique_ptr<SegmentCursor> make_cursor(
+      std::size_t, ThinkingMode) const {
+    return {};
+  }
   [[nodiscard]] virtual PreparedPrompt prepare(
       const Prompt&, const tokenizers::Tokenizer&) const = 0;
   [[nodiscard]] virtual std::vector<TokenSegment> segment(

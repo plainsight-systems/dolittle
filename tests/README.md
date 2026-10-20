@@ -8,10 +8,10 @@ across the repository. A test runner's name does not determine test scope.
 
 The full-forward, cached generation and target-to-AV interpretation paths are implemented. Builds and
 unit checks alone do not establish transformer equivalence: use the independent
-GPU scenarios below. Reconstruction and the browser/API remain later work.
+GPU scenarios below. The browser/API use the live application integration below; reconstruction remains later work.
 
-The suite contains **eighteen C++ unit executables, sixteen Python unit tests and
-five integration scenarios**. Fixtures and full weights stay in ignored caches
+The suite contains **nineteen C++ unit executables, twenty Python unit tests, five browser-controller
+unit tests and five integration scenarios**. Fixtures and full weights stay in ignored caches
 with recorded revisions, hashes and reference environment details.
 
 [gpu/forward_reference.h](gpu/forward_reference.h) compares completed results:
@@ -142,7 +142,7 @@ The repository uses **all five integration slots**:
 | Scenario | Interaction |
 | --- | --- |
 | Site publication | Real Hugo build and publication boundary under a deployment subpath |
-| `integration.checkpoint_archive` | Real file integrity, root containment, mapped storage and Qwen3 binding |
+| `integration.application` | Source launcher, verified checkpoints, live token/capture stream, AV selection, idempotent retries and reconnect |
 | `integration.device` | CUDA resource ownership, queue completion and buffer transfers |
 | `integration.generation_tiny` | Tiny FP32/BF16 target generation, retained captures, AV replacement and fresh-cache interpretations |
 | `integration.generation_8b` | Pinned tokenizer/protocol, Qwen3-8B target generation and matched AV interpretation |
@@ -154,16 +154,27 @@ fixture root directly and runs the three GPU scenarios. This inventory records
 scope, not a claim that every scenario has passed. Replace existing coverage
 before adding another integration workflow.
 
-The archive scenario creates only owned temporary files, verifies a complete
-tiny safetensors/config/index set, binds the model and checks mapped-data
-lifetime. Size/hash/index/path failures must prevent publication. It runs
-without CUDA after a host build:
+The application scenario replaces the standalone archive integration. It verifies
+setup receipt publication/reuse, invalidation for changed or missing files,
+forced verification, successful production checkpoint acquisition/binding, and
+one actual prompt through AV interpretation, retry/reconnect and orderly shutdown. It does not preserve all
+adversarial filesystem cases from the retired executable. Parser/bounds units remain.
+Use an existing pinned revision cache with either the source-built Linux/CUDA
+executable or Docker Compose (which builds the application from source):
 
 ```sh
-python3 scripts/check.py archive
-# Or select its registered CTest entry.
-ctest --test-dir build/host --output-on-failure -R integration.checkpoint_archive
+python3 tests/integration/test_application.py --binary build/cuda/dolittle --cache models
+python3 tests/integration/test_application.py --container --cache models
+node --test tests/app/controller.test.mjs
 ```
+
+CTest registers the application scenario when `DOLITTLE_APPLICATION_CACHE` is
+configured. CTest uses the native developer path. The script uses `--offline`
+in both modes and writes logs only under `.local/`; its report identifies the
+execution mode. Only a successful `--container` run establishes Docker application
+GPU execution; it requires host NVIDIA Container Toolkit configuration.
+Browser visual/interaction inspection follows this same application flow; no
+separate mock-backend integration suite is introduced.
 
 ## CUDA build and numerical verification
 
@@ -236,10 +247,12 @@ part of the image. The CUDA build emits sm86 native code and retained PTX; no
 successful execution on later NVIDIA architectures is implied. An installed
 CUDA 13.2+ toolchain can build directly with `cuda-build --native`.
 
-The Docker image builds successfully. The development host currently lacks
-NVIDIA Container Toolkit configuration, so GPU verification uses native Linux
-execution. Container GPU execution is unverified. With independent fixtures
-prepared in the pinned reference environment, run both paths:
+The Docker image builds successfully. On the 3090 Ti, NVIDIA Container Toolkit
+1.20.1 enables the verified Docker application flow: target generation, capture
+selection, AV interpretation, retry/reconnect and clean shutdown. Independent
+numerical comparisons have passed through native Linux execution and forced PTX;
+those results are distinct from the container application check. With independent
+fixtures prepared in the pinned reference environment, run both paths:
 
 ```sh
 python3 scripts/check.py gpu --fixtures .cache/generation-fixtures

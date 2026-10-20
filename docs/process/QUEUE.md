@@ -49,7 +49,7 @@
   bytes and final cached/full AV logits match exactly. Independent AV output
   comparisons pass the fixed per-row limits, without a bit-exactness claim.
   The integration inventory remains five; former generation workflows include AV.
-  Implementation is committed as `8c1fc19`; publication remains pending. See the
+  Implementation is committed as `8c1fc19` and pushed to origin/main. See the
   [slice mapping](../architecture/file-mapping.md#target-to-av-interpretation-header-design).
 
 - Google formatting now has a repository config, pinned editor/CLI formatter,
@@ -58,7 +58,7 @@
   host/CUDA builds, 18 host units and host/CUDA clang-tidy pass (39/61 commands).
   A mechanical comparison confirms source changes are formatting and comment
   layout only, including three relocated tokenizer lint annotations. Formatting
-  changes are accepted as a separate commit; publication remains pending.
+  changes are committed as `fa2668d` and pushed to origin/main.
 
 - The project site is deployed at `dolittle.plainsight-systems.com`. The first
   build and deployment passed; HTTP content, Code link, and share metadata are
@@ -66,19 +66,61 @@
   Engine architecture follows this site work; preserve the selected 8B pair
   and block 24 reference contract.
 
+- The accepted [live application slice](../architecture/live-application.md)
+  is implemented: source launcher, pinned cache acquisition, single-worker session,
+  strict HTTP boundary, live byte/token progress, capture selection, AV variants,
+  scoped cancellation and cursor reconnect. Shared execution compiles without
+  CUDA under the host preset. The real pinned 8B application flow passes.
+  Strict host/CUDA builds, Google formatting, host/CUDA clang-tidy (46/65
+  entries), 19 C++ units and Linux ASan/UBSan pass. Twenty Python units, five
+  browser-controller units, site publication and the real application flow pass.
+  Native/PTX tiny and 8B numerical checks pass with frozen references unchanged;
+  tiny CUDA memcheck reports zero errors. Desktop/mobile selection, AV variants,
+  scoped stop and refresh recovery are verified in the real browser. The source
+  runtime image builds; Docker GPU execution passes on the 3090 Ti with Toolkit
+  1.20.1. The container application flow verifies target generation, capture
+  selection, AV interpretation, idempotent retries, exact reconnect and shutdown.
+  The integration inventory remains five, replacing standalone archive coverage
+  explicitly. Accepted for commit and push.
+
+- The load-cost fix retains shared verified host archives across turns and
+  model switches. Setup now persists verification receipts; unchanged launches
+  check file metadata without full hashing. Explicit repair forces SHA-256. Strict builds,
+  host/CUDA static analysis, ownership units and sanitizers pass. Repeated real
+  8B requests are substantially faster with exact pre-change target/AV token
+  IDs. Container retry/reconnect/shutdown and corrupt-cache rejection pass.
+  Device, tiny and pinned 8B numerical comparisons also pass inside Docker
+  using native GPU code, with frozen references and limits unchanged.
+  Prepared-cache admission and archive opening now take milliseconds; full
+  SHA-256 runs during initial setup or forced repair. Receipt contract units
+  and the Docker application flow cover reuse, invalidation and verification.
+  Detailed timings remain in ignored local validation records.
+
+- The live interface now separates thinking/answer completion states, exposes
+  their shared budget, streams NLA output, and keeps selection excerpts beside
+  interpretations. Desktop/mobile review and seven controller units pass.
+  Detailed UI validation remains in ignored local records; accepted for commit and push.
+
+- Exploration budgets now default to 4,096 target output tokens with an 8,192
+  total context ceiling; AV remains independently adjustable. Strict CUDA build,
+  19 C++ units, seven browser units, Google formatting and all 65 CUDA/host
+  clang-tidy entries pass. The Docker application flow passes. A longer live
+  generation crossed the former context limit; full 8,192-token capacity was
+  allocated successfully on the 3090 Ti. These runtime checks do not extend
+  the frozen short-sequence numerical oracle evidence. Changes are uncommitted.
+
 ## Next
 
-1. Configure host NVIDIA Container Toolkit access before claiming Docker GPU
-   execution. The digest-pinned source build and native Linux execution work;
-   this setup limitation does not invalidate the recorded native checks.
-2. Continue toward the server and synchronized browser interface, with complete slice boundaries and at most five integration
-   scenarios across the repository. Long-context and additional GPU validation
-   remain explicit future evidence rather than inferred compatibility.
+1. Measure time to first generated token and generation throughput after the
+   live-application push. Keep performance records local.
+2. Add the public workflow walkthrough when requested. Long-context numerical
+   comparison and additional GPU validation remain future evidence.
 
 ## Later platform work
 
 - Implement Metal on macOS after Linux/NVIDIA. Design its native build path
   and verify hardware requirements in that phase.
+- Add native Windows/NVIDIA builds with MSVC/CUDA, without requiring WSL2.
 - Decide whether to support AMD.
 
 ## Deferred

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build/check entry point; inference application launch remains a later slice.
+"""Build/check entry point; source application launch is scripts/run.py.
 
 Host units need CMake, a C++20 compiler and OpenSSL 3 development files.
 CUDA source builds default to the digest-pinned Docker environment. GPU checks
@@ -55,8 +55,6 @@ def main():
     gpu.add_argument("--container", action="store_true", help="requires working Docker GPU access")
     gpu.add_argument("--force-ptx", action="store_true")
     gpu.add_argument("--report-dir", type=Path, default=ROOT / ".cache/checks")
-    archive = sub.add_parser("archive", help="run real checkpoint file integrity integration")
-    archive.add_argument("--build-dir", type=Path, default=ROOT / "build/host")
     args = parser.parse_args()
     if args.action == "format":
         try:
@@ -93,8 +91,6 @@ def main():
             command(compile_command)
         if args.action == "host":
             command(["ctest", "--test-dir", build_dir, "--label-regex", "^unit$", "--output-on-failure"])
-    elif args.action == "archive":
-        command([build_dir / "test_checkpoint_archive"])
     else:
         fixtures = args.fixtures.resolve(strict=True)
         av_fixtures = fixtures.parent / "av-fixtures"

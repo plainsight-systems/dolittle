@@ -66,6 +66,18 @@
  * complete regardless of the caller's model role. cpp-perf-guidelines GPU.1:
  * retain mapped views for bounded weight upload; source
  * guidelines/gpu/GPU.1-keep-data-on-device.md.
+ *
+ * Service-lifetime archive design, 2026-10-19: bind_causal_lm shares const
+ * archive ownership with the service so a new binding does not reopen or hash
+ * weights. The binding retains its own model/parameter metadata; every borrowed
+ * payload stays valid until its last archive owner dies. bind_target still
+ * accepts unique ownership and transfers it into this same implementation.
+ * Backing files must remain unchanged throughout archive lifetime (format.h).
+ * Optimization: O(1) shared ownership per binding, no copied weight payloads.
+ * cpp-guidelines R.21 (#rr-unique): sharing is required across service and
+ * independently destroyed bindings. cpp-perf-guidelines CDSA.32: share one
+ * immutable prepared source;
+ * guidelines/cpu-dsa/CDSA.32-transform-static-data-into-the-consumer-layout.md.
  */
 #pragma once
 
@@ -78,7 +90,7 @@
 
 namespace dolittle::models::qwen3 {
 [[nodiscard]] std::unique_ptr<BoundCheckpoint> bind_causal_lm(
-    std::unique_ptr<tensors::formats::TensorArchive> archive,
+    std::shared_ptr<const tensors::formats::TensorArchive> archive,
     std::string_view configuration_artifact);
 struct ParameterBinding {
   ParameterId parameter;

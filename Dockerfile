@@ -23,3 +23,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl gnupg pyth
 
 # Preserve the original default build environment.
 FROM build AS default
+
+# Local source build: this image is produced by the launcher, not distributed
+# as an application executable. Model cache mounts are supplied only at runtime.
+FROM build AS runtime
+WORKDIR /opt/dolittle
+COPY CMakeLists.txt ./
+COPY src ./src
+RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DDOLITTLE_CUDA=ON -DBUILD_TESTING=OFF \
+    && cmake --build build -j 4
+COPY app ./app
+COPY config ./config
+COPY LICENSE LICENSE-CODE NOTICE ./
+COPY docs/licenses ./docs/licenses
+CMD ["/opt/dolittle/build/dolittle"]
+
+# Keep ordinary `docker build` compatible with the established build tooling.
+FROM build AS final

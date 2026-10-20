@@ -2,11 +2,10 @@
 
 [`check.py`](check.py) is the current source-build and verification entry point.
 It uses Python's standard library and keeps host checks, CUDA compilation,
-checkpoint integration and GPU execution separate:
+application integration and GPU execution separate:
 
 ```sh
 python3 scripts/check.py host
-python3 scripts/check.py archive
 python3 scripts/check.py cuda-build
 python3 scripts/check.py gpu --fixtures .cache/generation-fixtures
 python3 scripts/check.py gpu --fixtures .cache/generation-fixtures --force-ptx
@@ -14,15 +13,16 @@ python3 scripts/check.py gpu --fixtures .cache/generation-fixtures --force-ptx
 
 `host` needs CMake 3.24+, a C++20 compiler and OpenSSL 3 development files. Initial
 CMake configuration fetches hash-pinned nlohmann/json 3.12.0, utf8proc 2.10.0
-and Oniguruma 6.9.10 unless already cached; a C compiler builds the Unicode
+Oniguruma 6.9.10 and cpp-httplib 0.62.0 unless already cached; a C compiler builds the Unicode
 helpers. BPE and model computation remain direct implementations.
-It builds the host targets and runs isolated C++ units. `archive` runs the real
-file-integrity/binding scenario from that build; run `host` first.
+It builds the host targets and runs isolated C++ units. The live application
+scenario replaces the former standalone archive integration; see tests/README.md.
 
 `cuda-build` builds a Linux/amd64 CUDA 13.2.0 development image pinned by manifest
 digest in the root [Dockerfile](../Dockerfile), then compiles the CUDA targets.
-The Docker context contains only that Dockerfile: source and build output are
-mounted for compilation, while weights remain outside the image. CMake, Ninja
+The default build target supplies a toolchain; source and output are mounted
+for development compilation. The explicit runtime target copies source and
+assets and builds the service inside the image. Weights remain outside both. CMake, Ninja
 and OpenSSL development package versions are explicit in the image. Native
 CUDA 13.2+ builds are also available with `cuda-build --native`.
 
@@ -181,3 +181,16 @@ loopback, independently of the GPU application. It requires Python 3.11+ and
 Hugo 0.154.2. See [site setup](../web/README.md) for publication rules and URLs.
 The same tooling validates generated files through a pure in-memory snapshot
 checker, with a filesystem wrapper used after actual Hugo builds.
+
+## Application launch
+
+`python3 scripts/run.py` builds the runtime image locally, checks Docker GPU
+access, prepares pinned artifacts once, then starts Compose and opens its
+private browser link. Subsequent launches reuse the setup receipt when the
+manifest and file metadata match, without hashing weight payloads.
+`--verify-models` forces full verification/repair before launch.
+`scripts/models.py --offline` fully verifies an existing cache
+without downloads. Python 3.11+ is required. See [application setup](../app/README.md)
+for options and the explicit native execution path. Model acquisition uses bounded
+streaming downloads, declared sizes/SHA256 and atomic publication. It never
+executes downloaded model code or fetches an application binary.

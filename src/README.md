@@ -11,7 +11,9 @@ for workloads, reference policy and limits.
 The host library owns checked tensor layouts, BF16 conversion, observation and
 scratch planning, operation/recipe validation, Qwen3 model recipes, safetensors
 loading and checkpoint binding. Safetensors payloads use read-only mappings;
-size/hash/index/path checks precede publication. Shared bounded JSON parsing
+size/index/path checks precede publication. SHA-256 is checked at open by
+default; the application explicitly admits an unchanged installation verified
+during setup, avoiding full weight scans at each launch. Shared bounded JSON parsing
 rejects duplicate keys. Metadata parsing uses nlohmann/json 3.12.0, and OpenSSL 3
 supplies SHA-256. Byte BPE is implemented directly, using source-pinned utf8proc
 2.10.0 for NFC and Oniguruma 6.9.10 for Unicode regex matching. These helpers
@@ -42,6 +44,9 @@ The contiguous cache is the deliberately simple initial strategy: allocate
 once per turn, reuse within that turn, and release after completion. Pooling,
 cross-turn prefix reuse and alternative cache strategies are later work.
 
-The current executable entry points are verification drivers. NLA verbalizer/
-reconstructor execution, serving and the browser application remain later slices.
-Metal is planned after NVIDIA; AMD support is undecided.
+The `dolittle` executable composes the single-worker experiment session,
+HTTP boundary and CUDA backend. `scripts/run.py` builds and launches it from
+source. Session and transport use shared execution contracts; CUDA selection
+lives in `main.cpp` and the backend build target. The browser lives in `app/`.
+Target-to-AV interpretation is implemented; reconstruction remains later work.
+Metal is planned after NVIDIA, and AMD support is undecided.
