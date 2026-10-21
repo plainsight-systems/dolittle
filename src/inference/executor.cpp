@@ -1,4 +1,14 @@
 /*
+ * X1 backend admission update (metal-port.md, Metal scheduling): after
+ * complete, compare actual prepared sequence owners with the initial allowance,
+ * charge the difference once, and reject before start if either budget is
+ * exceeded. No borrowed model/KV/capture storage is counted again. Core
+ * I.7/ES.103
+ * (#ri-post/#res-overflow), performance GPU.9
+ * (guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md), queried
+ * and read for implementation, require complete lifetimes/costs at admission.
+ */
+/*
  * Steering/AR execution, X1 (steering.md): prepare explicit residual mutation
  * at its declared producer, before copies/consumers. A device kernel uses S/B
  * to update only p-S, retaining direction/status owners through completion.
@@ -1519,8 +1529,7 @@ void CachedForwardPlan::prepare_device_generation(
   if (forward_only) {
     extra_device = add(extra_device, p.logit_bytes);
   }
-  const auto extra_host =
-      add(DeviceSequence::host_bytes(shape), prompt.size_bytes());
+  auto extra_host = add(DeviceSequence::host_bytes(shape), prompt.size_bytes());
   if (extra_host > p.options.max_host_bytes - p.host_bytes ||
       extra_device > p.options.max_device_bytes - p.peak) {
     throw std::length_error("sequence resources exceed admitted budget");
@@ -1677,6 +1686,25 @@ void CachedForwardPlan::prepare_device_generation(
     }
     p.decode->end_stage();
     p.decode->complete();
+    // Replace the preliminary sequence allowance with prepared native storage
+    // before submission. Metal reports actual command allocators; CUDA reports
+    // owned application storage (driver graph memory has no per-graph query).
+    const auto resources = p.decode->prepared_resources();
+    const auto additional_device =
+        resources.owned.device_bytes > DeviceSequence::device_bytes()
+            ? resources.owned.device_bytes - DeviceSequence::device_bytes()
+            : 0;
+    const auto estimated_host = DeviceSequence::host_bytes(shape);
+    const auto additional_host =
+        resources.owned.host_bytes > estimated_host
+            ? resources.owned.host_bytes - estimated_host
+            : 0;
+    extra_device = add(extra_device, additional_device);
+    extra_host = add(extra_host, additional_host);
+    if (extra_device > p.options.max_device_bytes - p.peak ||
+        extra_host > p.options.max_host_bytes - p.host_bytes) {
+      throw std::length_error("prepared sequence exceeds admitted budget");
+    }
   } catch (...) {
     p.decode.reset();
     p.poison();

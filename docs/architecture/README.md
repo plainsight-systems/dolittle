@@ -1,5 +1,11 @@
 # Architecture
 
+The accepted [native Metal port](metal-port.md) draws on Vigil, Serenity's
+Metal-to-CUDA port, llama.cpp and vLLM-Metal. It covers execution, memory
+retention, native residency, kernels and file ownership. Its execution foundation
+is implemented and verified on the M3. Full transformer kernels and the native
+inference application follow.
+
 The [steering design](steering.md) covers edited-explanation reconstruction,
 a GPU residual update and matched unsteered/steered continuations.
 

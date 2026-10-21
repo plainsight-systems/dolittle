@@ -1,4 +1,13 @@
 /*
+ * Prepared-resource reporting (metal-port.md, Metal scheduling): after graph
+ * preparation, report owned device state and host journal/metadata bytes for
+ * shared admission. Borrowed model/KV/capture arenas are excluded. CUDA exposes
+ * no per-executable graph allocation query; driver storage needs separate
+ * headroom. This is O(1) setup, with no device work or allocation. Core I.7
+ * (#ri-post) and GPU.9
+ * (guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md), read
+ * from both local corpora for implementation, require explicit byte ownership.
+ *
  * AR/steering control extension, X1/X4: forward_only performs all fixed input
  * chunks followed by one vector head, publishing no sampled IDs. Null sampler
  * regions are valid only in that mode. Mutation status is latched at chunk and
@@ -351,6 +360,15 @@ std::size_t DeviceSequence::host_bytes(Shape s) {
     throw std::length_error("sequence journal bytes");
   }
   return sizeof(Publication) + n * sizeof(Event);
+}
+PreparedSequenceResources DeviceSequence::prepared_resources() const {
+  if (!impl_->executable) throw std::logic_error("sequence not prepared");
+  // CUDA does not expose per-executable driver graph allocation size. These
+  // are owned application allocations; native graph overhead remains covered
+  // by admission headroom and the driver free-memory snapshot.
+  return {{impl_->state.size_bytes(),
+           impl_->output.bytes().size() + sizeof(Impl), 0},
+          0};
 }
 DeviceSequence::DeviceSequence(gpu::Device& d, gpu::Queue& q, Shape s)
     : impl_(std::make_unique<Impl>(d, q, s)) {}

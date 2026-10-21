@@ -1,4 +1,29 @@
 /*
+ * Metal and CUDA execution implement the same interface. Metal uses a
+ * bounded prepared timeline (kernels/metal/sequence_plan.h), reusable ICB
+ * bodies and device control (kernels/metal/decode.h). Its host metadata and
+ * command storage scale with the admitted sequence, unlike CUDA's conditional
+ * graph. The public sequence semantics, dynamic hooks and collector-independent
+ * progress remain identical. Metal output is published through completed,
+ * separately owned windows; CUDA's mapped release/acquire mechanism below is
+ * CUDA-specific. Static device_bytes/host_bytes must not masquerade as total
+ * Metal admission: the backend exposes prepared command/storage
+ * costs through prepared_resources() after complete() and before start().
+ * That result excludes borrowed model/KV/capture owners; command_bytes is a
+ * diagnostic subset already included in owned, never added to it again.
+ * Costs include private state, publication buffers, native command allocation
+ * and host metadata. Exceeding admission rejects the prepared request before
+ * start, releasing its unused resources. Earlier estimates bound preparation
+ * itself; querying the actual cost is not permission to allocate unboundedly.
+ * Cancellation uses a separate device
+ * control command, never host iteration over sampled tokens.
+ * Overlay: metal-port.md, Metal scheduling. Both corpora queried/read for this
+ * design: cpp-guidelines I.1 (#ri-explicit), I.7 (#ri-post); performance GPU.1
+ * (guidelines/gpu/GPU.1-keep-data-on-device.md), GPU.6
+ * (guidelines/gpu/GPU.6-batch-tiny-gpu-work.md), GPU.7
+ * (guidelines/gpu/GPU.7-pipeline-cpu-and-gpu-work.md): preserve the device
+ * execution boundary while exposing each backend's real costs and ordering.
+ *
  * Forward-only and intervention control, X1/X4: forward_only executes prefill
  * and the final output stage once, then completes without random draws or
  * decode. Mutation status/count are borrowed device words; stage transitions
@@ -49,8 +74,13 @@
 #include <stop_token>
 
 #include "gpu/device.h"
+#include "gpu/memory.h"
 
 namespace dolittle::inference {
+struct PreparedSequenceResources {
+  gpu::MemoryFootprint owned;
+  std::size_t command_bytes{};
+};
 class DeviceSequence {
  public:
   enum class Stage : std::uint8_t { prefill, tail, first_selection, decode };
@@ -91,6 +121,11 @@ class DeviceSequence {
   void replace(gpu::ConstDeviceRegion row, gpu::DeviceRegion embeddings,
                std::size_t prompt_position, std::size_t rows);
   void complete();
+  // Prepared application-owned footprint. Metal includes native command
+  // allocators; CUDA cannot query per-executable driver graph bytes
+  // (command_bytes=0). Driver/pipeline opaque allocations require separate
+  // admission headroom.
+  [[nodiscard]] PreparedSequenceResources prepared_resources() const;
   void start();
   void request_stop() noexcept;
   void drain();

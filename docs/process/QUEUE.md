@@ -207,10 +207,22 @@ remains private.
    documentation change on 2026-10-21. Long-context numerical comparison and
    additional GPU validation remain future work.
 
+## Metal port
+
+- The [Metal port architecture](../architecture/metal-port.md) is accepted,
+  following site publication as `b7ca2d8` on 2026-10-21. It compares Vigil,
+  Serenity's Metal-to-CUDA port, llama.cpp and vLLM-Metal source and proposes
+  autonomous execution, efficient kernels and shared residency policy.
+  The complete foundation is implemented: native resource/views, reusable
+  commands, autonomous GPU control, immutable publication, cancellation and
+  shared model retention. M3 device integration, 22 host units, Linux ASan/UBSan,
+  tiny CUDA comparisons and native/forced-PTX pinned 8B comparisons pass with
+  unchanged references. Strict builds, Google formatting and both static-analysis
+  passes are clean. Andrew approved committing this phase. Complete Metal target
+  kernels and frozen numerical comparison follow; no Metal inference app yet.
+
 ## Later platform work
 
-- Implement Metal on macOS after Linux/NVIDIA. Design its native build path
-  and verify hardware requirements in that phase.
 - Add native Windows/NVIDIA builds with MSVC/CUDA, without requiring WSL2.
 - Decide whether to support AMD.
 

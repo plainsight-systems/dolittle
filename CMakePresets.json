@@ -1,6 +1,10 @@
 {
   "version": 5,
-  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "host-debug",
@@ -20,21 +24,60 @@
       "description": "Full CUDA engine and tests. Configure in the Linux environment containing CUDA 13.2+ and OpenSSL 3 development files.",
       "inherits": "host-debug",
       "binaryDir": "${sourceDir}/build/cuda-debug",
-      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
-      "cacheVariables": { "DOLITTLE_CUDA": true }
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "DOLITTLE_CUDA": true
+      }
+    },
+    {
+      "name": "metal-debug",
+      "displayName": "Native Metal foundation (Debug)",
+      "inherits": "host-debug",
+      "binaryDir": "${sourceDir}/build/metal-debug",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "cacheVariables": {
+        "DOLITTLE_METAL": true,
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "26.0"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "host-debug", "configurePreset": "host-debug" },
-    { "name": "cuda-debug", "configurePreset": "cuda-debug" }
+    {
+      "name": "host-debug",
+      "configurePreset": "host-debug"
+    },
+    {
+      "name": "cuda-debug",
+      "configurePreset": "cuda-debug"
+    },
+    {
+      "name": "metal-debug",
+      "configurePreset": "metal-debug"
+    }
   ],
   "testPresets": [
     {
       "name": "host-units",
       "configurePreset": "host-debug",
-      "filter": { "include": { "label": "^unit$" } },
-      "output": { "outputOnFailure": true },
-      "execution": { "noTestsAction": "error" }
+      "filter": {
+        "include": {
+          "label": "^unit$"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
     }
   ]
 }

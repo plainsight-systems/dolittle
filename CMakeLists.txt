@@ -38,6 +38,9 @@ add_library(dolittle_host STATIC
     src/nla/protocol.cpp
     src/nla/pairs/qwen3_8b.cpp
     src/experiment/record.cpp
+    src/experiment/model_retention.cpp
+    src/gpu/metal/buffer_views.cpp
+    src/kernels/metal/sequence_plan.cpp
     src/tokenizers/byte_bpe.cpp
     src/text/qwen3_chat.cpp
     src/inference/sampling/categorical.cpp
@@ -106,7 +109,7 @@ if(BUILD_TESTING)
     set_target_properties(dolittle_numerical PROPERTIES CXX_EXTENSIONS OFF)
     dolittle_warnings(dolittle_numerical)
 
-    foreach(unit IN ITEMS wire nla record bounds sampling progression byte_bpe qwen3_chat tensor bf16 observations storage_plan numerical
+    foreach(unit IN ITEMS model_retention buffer_views sequence_plan wire nla record bounds sampling progression byte_bpe qwen3_chat tensor bf16 observations storage_plan numerical
                           operations model_recipe qwen3_model safetensors qwen3_checkpoint)
         add_executable(test_${unit} tests/core/test_${unit}.cpp)
         target_include_directories(test_${unit} PRIVATE "${PROJECT_SOURCE_DIR}")
@@ -201,5 +204,52 @@ if(DOLITTLE_CUDA)
             set_tests_properties(integration.generation_tiny integration.generation_8b
                 PROPERTIES LABELS integration RUN_SERIAL TRUE WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
         endif()
+    endif()
+endif()
+
+option(DOLITTLE_METAL "Build native Metal execution foundation" OFF)
+if(DOLITTLE_METAL)
+    if(NOT APPLE OR DOLITTLE_CUDA)
+        message(FATAL_ERROR "Metal requires macOS and cannot share a binary with CUDA")
+    endif()
+    set(CMAKE_OSX_DEPLOYMENT_TARGET 26.0)
+    FetchContent_Declare(metal_cpp
+        GIT_REPOSITORY https://github.com/apple/metal-cpp.git
+        GIT_TAG f567ed836e4cbb85788c42115a2682bbe68097ee)
+    FetchContent_MakeAvailable(metal_cpp)
+    add_library(dolittle_metal STATIC
+        src/gpu/metal/metal_cpp.cpp src/gpu/metal/device.cpp
+        src/gpu/metal/submission.cpp src/gpu/metal/commands.cpp
+        src/kernels/metal/decode.cpp)
+    target_include_directories(dolittle_metal SYSTEM PUBLIC "${metal_cpp_SOURCE_DIR}")
+    target_link_libraries(dolittle_metal PUBLIC dolittle_host "-framework Metal" "-framework Foundation")
+    target_compile_options(dolittle_metal PUBLIC -fblocks)
+    find_program(XCRUN xcrun REQUIRED)
+    set(METAL_LIBRARY "${CMAKE_CURRENT_BINARY_DIR}/dolittle.metallib")
+    add_custom_command(OUTPUT "${METAL_LIBRARY}"
+        COMMAND "${XCRUN}" -sdk macosx metal -std=metal4.0 -Wall -Wextra -Werror
+            -c "${PROJECT_SOURCE_DIR}/src/kernels/metal/decode.metal" -o "${CMAKE_CURRENT_BINARY_DIR}/decode.air"
+        COMMAND "${XCRUN}" -sdk macosx metallib "${CMAKE_CURRENT_BINARY_DIR}/decode.air" -o "${METAL_LIBRARY}"
+        DEPENDS src/kernels/metal/decode.metal VERBATIM)
+    add_custom_target(dolittle_metallib DEPENDS "${METAL_LIBRARY}")
+    add_dependencies(dolittle_metal dolittle_metallib)
+    target_compile_definitions(dolittle_metal PRIVATE DOLITTLE_METAL_LIBRARY="${METAL_LIBRARY}")
+    dolittle_warnings(dolittle_metal)
+    if(BUILD_TESTING)
+        set(METAL_TEST_LIBRARY "${CMAKE_CURRENT_BINARY_DIR}/device-test.metallib")
+        add_custom_command(OUTPUT "${METAL_TEST_LIBRARY}"
+            COMMAND "${XCRUN}" -sdk macosx metal -std=metal4.0 -Wall -Wextra -Werror
+                -c "${PROJECT_SOURCE_DIR}/tests/gpu/device_metal.metal" -o "${CMAKE_CURRENT_BINARY_DIR}/device-test.air"
+            COMMAND "${XCRUN}" -sdk macosx metallib "${CMAKE_CURRENT_BINARY_DIR}/device-test.air" -o "${METAL_TEST_LIBRARY}"
+            DEPENDS tests/gpu/device_metal.metal VERBATIM)
+        add_custom_target(dolittle_test_metallib DEPENDS "${METAL_TEST_LIBRARY}")
+        add_executable(test_device tests/gpu/test_device_metal.cpp)
+        add_dependencies(test_device dolittle_test_metallib)
+        target_include_directories(test_device PRIVATE "${PROJECT_SOURCE_DIR}")
+        target_compile_definitions(test_device PRIVATE DOLITTLE_METAL_TEST_LIBRARY="${METAL_TEST_LIBRARY}")
+        target_link_libraries(test_device PRIVATE dolittle_metal)
+        dolittle_warnings(test_device)
+        add_test(NAME integration.device COMMAND test_device)
+        set_tests_properties(integration.device PROPERTIES LABELS integration RUN_SERIAL TRUE TIMEOUT 120)
     endif()
 endif()

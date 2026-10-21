@@ -1,5 +1,5 @@
 /*
- * CUDA implements these resource, transfer and completion contracts.
+ * CUDA and Metal implement these resource, transfer and completion contracts.
  * Axis X4: byte storage and ordering only, not transformer mathematics.
  * Contract: Device is stable/noncopyable and outlives every resource and queue
  * it creates. Owning buffer/queue handles are move-only; moved-from objects

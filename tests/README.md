@@ -10,7 +10,7 @@ The full-forward, cached generation and target-to-AV interpretation paths are im
 unit checks alone do not establish transformer equivalence: use the independent
 GPU scenarios below. The browser/API use the live application integration below; the same workflow now includes AR reconstruction and matched steering replay.
 
-The suite contains **nineteen C++ unit executables, twenty Python unit tests, eighteen browser
+The suite contains **twenty-two C++ unit executables, twenty Python unit tests, eighteen browser
 unit tests and five integration scenarios**. Fixtures and full weights stay in ignored caches
 with recorded revisions, hashes and reference environment details.
 
@@ -338,3 +338,33 @@ reads a snapshot and delegates to the same pure validator. Moving these guard
 checks into unit tests does not remove their use in actual publication builds.
 Each retained integration scenario covers one component interaction; isolated
 negative guards do not consume integration slots.
+
+## Native Metal foundation
+
+The `metal-debug` preset builds the execution foundation on Apple silicon with
+macOS 26+, Xcode's Metal compiler and OpenSSL 3. It fetches pinned `metal-cpp`
+headers. Full Metal transformer kernels and the native application launcher
+follow this foundation; the preset does not yet build a working inference app.
+
+```sh
+cmake --preset metal-debug
+cmake --build --preset metal-debug --parallel
+ctest --test-dir build/metal-debug --output-on-failure
+python3 scripts/check.py tidy --build-dir build/metal-debug
+MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 \
+  build/metal-debug/test_device
+```
+
+Metal uses the existing `integration.device` workflow slot. It checks native
+resource/view transfers, prepared autonomous progress with collection delayed
+until completion, capture positions, final-token consumption, EOS, forward-only
+execution and cancellation. The three new pure units cover model retention,
+view placement and bounded sequence planning. The integration inventory stays
+at five; backend selection changes the device implementation under test.
+
+API validation covers the whole Metal workflow. Shader instrumentation covers
+direct control, publication and cancellation dispatches. Apple requires
+[pipeline and buffer inheritance for instrumented ICBs](https://developer.apple.com/documentation/xcode/validating-your-apps-metal-shader-usage).
+Dolittle's reusable bodies own those bindings, so their pipelines explicitly
+disable unsupported shader instrumentation. Their results remain covered by
+device assertions; this is not a claim of instrumented ICB-kernel coverage.

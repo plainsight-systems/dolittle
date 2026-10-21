@@ -463,7 +463,7 @@ Json check_interpretation(gpu::Device& device,
   run.generate({{}, "What is 2 + 2?", text::ThinkingMode::enabled},
                target_settings);
   check(run.phase() == experiment::Phase::retained && run.record(),
-        "target weights released and result retained");
+        "target generation and result retained");
   check(run.record()->target().generation.tokens == target_tokens,
         "target output changed in experiment orchestration");
   const experiment::CaptureKey key{site.point, {av.at("capture_position")}};
@@ -493,6 +493,16 @@ Json check_interpretation(gpu::Device& device,
   Json numerical = Json::array();
   bool passed = target_metric.passed;
   std::vector<std::byte> full_av_logits;
+  // The independent AV comparison owns another model outside Run's scheduler.
+  // Release only idle weights before lending the device to that comparison;
+  // capture leases and the retained experiment remain valid.
+  const auto target_weight_bytes = run.retained_model_bytes().device_bytes;
+  check(target_weight_bytes > 0, "completed target weights retained");
+  if (actual) {
+    run.release_models();
+    check(run.retained_model_bytes().device_bytes == 0,
+          "explicit idle release frees weights");
+  }
   // Inspect AV math on identical frozen injection bytes before variants. All
   // these device owners die before Run loads its persistent verbalizer.
   {
@@ -611,6 +621,10 @@ Json check_interpretation(gpu::Device& device,
   check(first.value != second.value &&
             run.phase() == experiment::Phase::verbalizer_ready,
         "separate variants reuse resident AV");
+  if (!actual) {
+    check(run.retained_model_bytes().device_bytes > target_weight_bytes,
+          "target and AV coexist when complete requests fit");
+  }
   for (auto id : {first, second}) {
     const auto& v = run.record()->variant(id).interpretation;
     check(v.generation && v.outcome == experiment::AttemptOutcome::completed,

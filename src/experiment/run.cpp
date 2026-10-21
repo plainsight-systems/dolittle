@@ -1,62 +1,18 @@
 /*
- * Steering scheduling, R3 (steering.md): resolve exact retained explanation and
- * replay IDs, admit both results, then release AV. Load AR once, forward both
- * descriptions with fresh KV, and normalize their difference on GPU. Retain
- * only the direction while switching to target. Reuse target weights for two
- * fresh-KV sequences with matched seed/settings, applying one residual update
- * in the steered branch. Classification replays the fixed generated prefix
- * before observing new IDs. Exceptions/cancellation retain a partial trial.
- * All vector operations and per-token decisions stay on GPU; CPU phase changes
- * follow completion. Budgets include original captures and surviving vectors.
- * Implementation corpora queried/read 2026-10-20: Core I.7 (#ri-post), explicit
- * results/lifetimes; GPU.1 (guidelines/gpu/GPU.1-keep-data-on-device.md),
- resident
- * intermediates; GDSA.2, unchanged fixed transformer arithmetic.
- * Axis R3: sequential target/AV phases with durable experiment records.
- * Contract: Run owns pairing, providers, text helpers, records and optional
- * resident AV weights; it borrows Device, which must outlive capture leases.
- * Providers load only verified sources within their host allowance. Operations
- * are serial. Target executes once; later interpretations use fresh sequence
- * state and may reuse AV weights. Rejected preflight is retryable; unexpected
- * target failure closes the run. close releases model resources, while the
- * immutable record and its capture leases remain readable until destruction.
- *
- * Algorithm: logical-overview.md experiment phases; execution-boundary.md
- H0-H4.
- * 1. Prepare/tokenize target text, validate pairing and budgets, load target
- *    weights, then prepare and execute the complete GPU sequence. The host
- *    observer detokenizes/classifies metadata without scheduling GPU progress.
- * 2. Build the retained record from completed device capture leases and exact
- *    IDs. Release target sequence/cache/weights; retained captures remain
- valid.
- * 3. Resolve a selected consumed row, validate the trained pair convention and
- *    construct a device normalization descriptor. Admit the AV model/sequence
- *    alongside retained captures. Reuse AV weights on subsequent requests.
- * 4. GPU normalization/status gates AV prefill; marker embedding replacement
- *    precedes block0. Run the same GPU generation path, retain reported source
- *    norm and exact AV IDs, decode them and extract explanation tags.
- * 5. Append a completed/cancelled/failed interpretation with honest phase costs
- *    and provenance. A load failure can be retried; device failure prevents
- *    pretending execution succeeded. Cancellation is an external stop request.
- * Host-reference selection remains an explicitly composed diagnostic path with
- * host captures/conversion. It is not a live fallback.
- * Cost: peak device=max(target phase, retained captures+AV phase), including
- KV,
- * scratch, sampler, constants, graph state and prepared journal allocations.
- * Host estimates include metadata, verified loading and diagnostic staging.
- * GPU normalization is included in generation duration; conversion_seconds
- * applies only to CPU reference conversion. Estimates exclude driver overhead.
- * Optimization: one model weight set resident at a time, capture arenas survive
- * the switch, and repeated AV requests reuse weights without reloading target.
- *
- * Corpus consultation, header design and implementation, 2026-10-20: both local
- * servers queried separately in each phase and the cited rules read in full.
- * cpp-guidelines I.1 (#ri-explicit), R.1 (#rr-raii): explicit residency,
- * completion, ownership and failure contracts. cpp-perf-guidelines GPU.1,
- * GPU.6, GPU.7, GPU.9: keep tensor intermediates/decisions on device, batch
- * dispatch, decouple observation and separate persistent from transient arenas.
- * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
- * Related GPU.6/7/9 entries describe dispatch, staging and storage.
+ * R3 retention implementation, metal-port.md Memory and model residency:
+ * validate exact source/binding identity and numerical mode; reserve the full
+ * next request before retaining idle models. Conservative transient admission
+ * keeps every recipe tensor live, adds KV, captures, sampling, staging and
+ * native command headroom. Evict oldest idle weights until all budgets fit;
+ * actual executor bounds remain enforced. All models are idle at these serial
+ * phase boundaries. Unified accounting additionally includes mapped checkpoint
+ * payloads because sharing with the uploaded arena is not established.
+ * Optimization: stable per-role owners reuse uploaded weights when the next
+ * complete request fits. No cache/sequence survives between generations.
+ * Both implementation corpora queried/read: Core R.1/I.7/ES.103
+ * (#rr-raii/#ri-post/#res-overflow), performance GPU.1/GPU.9:
+ * guidelines/gpu/GPU.1-keep-data-on-device.md and
+ * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
  */
 #include "experiment/run.h"
 
@@ -67,7 +23,11 @@
 #include <limits>
 #include <stdexcept>
 
+#include "experiment/model_retention.h"
 #include "gpu/device.h"
+#include "gpu/memory.h"
+#include "inference/decoding/device.h"
+#include "inference/sampling/device.h"
 #include "inference/steering/device.h"
 #include "tensors/tensor.h"
 
@@ -216,10 +176,20 @@ struct Run::Impl {
   RunLimits limits;
   Phase phase = Phase::empty;
   std::unique_ptr<Record> record;
-  std::unique_ptr<inference::ResidentModel> verbalizer;
+  struct CachedModel {
+    std::unique_ptr<inference::ResidentModel> owner;
+    const models::BoundCheckpoint*
+        checkpoint{};  // Borrowed from the stable owner.
+    MemoryCost cost{};
+    std::string identity;
+    std::uint64_t used{};
+  };
+  std::array<CachedModel, 3> models;
+  nla::ModelRole active = nla::ModelRole::target;
+  std::uint64_t use_clock{};
   measurement::PhaseMeasurements measurements;
   std::uint64_t execution = 0;
-  std::size_t verbalizer_host_bytes = 0;
+
   Impl(gpu::Device& d, RunId run, RunInputs in, RunLimits l)
       : device(d), id(run), inputs(std::move(in)), limits(l) {}
   inference::ExecutionId next_id() {
@@ -244,11 +214,183 @@ struct Run::Impl {
                                 sizeof(std::unique_ptr<Variant>)));
     return bytes;
   }
+  std::size_t resident_host() const {
+    std::size_t bytes = 0;
+    for (const auto& entry : models) {
+      if (entry.owner) bytes = add(bytes, entry.cost.host_bytes);
+    }
+    return bytes;
+  }
+  std::size_t inactive_device() const {
+    std::size_t bytes = 0;
+    for (std::size_t i = 0; i < models.size(); ++i) {
+      if (models.at(i).owner && i != static_cast<std::size_t>(active)) {
+        bytes = add(bytes, models.at(i).cost.device_bytes);
+      }
+    }
+    return bytes;
+  }
+  struct ModelRequest {
+    std::size_t capacity, pending;
+    bool captures;
+    std::size_t extra_device{};
+  };
+  inference::ResidentModel* acquire(nla::ModelRole role, ModelRequest request) {
+    const auto [capacity, pending, captures, extra_device] = request;
+    const auto snapshot = gpu::query_memory(device);
+    const bool unified = snapshot.topology == gpu::MemoryTopology::unified;
+    const auto retained_host =
+        add(record ? record->retained_bytes() : 0, inputs.metadata_host_bytes);
+    const auto required_host = add(retained_host, pending);
+    if (required_host >= limits.max_host_bytes) {
+      throw std::length_error("model admission host budget");
+    }
+    auto& entry = models.at(static_cast<std::size_t>(role));
+    if (entry.owner && (!entry.owner->usable() ||
+                        entry.identity != entry.owner->checkpoint_identity())) {
+      entry = {};
+    }
+    LoadedModel loaded{};
+    if (!entry.owner) {
+      loaded = load(role, limits.max_host_bytes - required_host);
+    }
+    const auto* checkpoint =
+        entry.owner ? entry.checkpoint : loaded.checkpoint.get();
+    if (!checkpoint) {
+      throw std::logic_error("resident checkpoint lease missing");
+    }
+    const std::string identity(checkpoint->identity());
+    // Pair identity and numerical modes are immutable for this Run. A cache
+    // hit uses its already-validated checkpoint; do not reopen/reverify files.
+    const auto mode = role == nla::ModelRole::verbalizer
+                          ? inputs.verbalizer_mode
+                          : inputs.target_mode;
+    const auto chunk = std::min(capacity, limits.max_prefill_chunk);
+    const auto recipe = checkpoint->model().incremental_forward({chunk}, mode);
+    // Conservative preparation bound: keep every non-parameter tensor live,
+    // including separate prefill/decode storage. Actual executor placement may
+    // use less; it still receives the remaining strict budget below.
+    std::vector<bool> parameter(recipe.forward.tensors.size(), false);
+    std::size_t weights = 0;
+    constexpr std::size_t weight_alignment = 256;
+    for (const auto& specification : checkpoint->model().parameters()) {
+      weights = add(weights, (weight_alignment - weights % weight_alignment) %
+                                 weight_alignment);
+      weights = add(weights, tensors::required_bytes(specification.layout));
+    }
+    for (const auto& binding : recipe.forward.parameters) {
+      parameter.at(binding.tensor.value) = true;
+    }
+    std::size_t scratch = 0;
+    for (std::size_t i = 0; i < parameter.size(); ++i) {
+      if (!parameter.at(i)) {
+        scratch = add(scratch,
+                      add(tensors::required_bytes(recipe.forward.tensors.at(i)),
+                          weight_alignment));
+      }
+    }
+    std::size_t cache = 0;
+    for (const auto& append : recipe.cache_appends) {
+      const auto& layout = recipe.forward.tensors.at(append.rotated_key.value);
+      cache =
+          add(cache, multiply(multiply(multiply(capacity, layout.shape.at(1)),
+                                       layout.shape.at(2)),
+                              2 * tensors::element_bytes(layout.element_type)));
+    }
+    const auto output_id = recipe.forward.terminal_output();
+    if (!output_id) {
+      throw std::invalid_argument("model has no terminal output");
+    }
+    const auto& output = recipe.forward.tensors.at(output_id->value);
+    const auto output_bytes = tensors::required_bytes(output);
+    const auto row = multiply(inputs.pair->target_site().vector_width,
+                              tensors::element_bytes(mode.activation_storage));
+    const auto capture_bytes = captures ? multiply(capacity, row) : 0;
+    const auto journal =
+        inference::DeviceSequence::host_bytes({capacity, capacity, chunk});
+    constexpr std::size_t cuda_command_allowance = 32ULL * 1024 * 1024;
+    constexpr std::size_t metal_command_allowance = 512ULL * 1024 * 1024;
+    const auto commands =
+        unified ? metal_command_allowance : cuda_command_allowance;
+    const auto sampling =
+        checkpoint->model().output_kind() == models::OutputKind::vocabulary
+            ? inference::sampling::DeviceCategorical::required_bytes(
+                  output.shape.back())
+            : 0;
+    const auto transient_device =
+        add(add(add(multiply(2, scratch), cache), capture_bytes),
+            add(commands, add(extra_device, sampling)));
+    const auto transient_host =
+        add(upload_allowance,
+            add(journal, add(multiply(2, output_bytes),
+                             multiply(capacity, 4 * sizeof(std::uint64_t)))));
+    MemoryCost active_cost{weights, loaded.host_working_bytes, 0};
+    if (unified) {
+      active_cost.unified_bytes =
+          add(add(weights, checkpoint->parameter_bytes()),
+              loaded.host_working_bytes);
+    }
+    if (entry.owner) active_cost = entry.cost;
+    std::vector<ResidentEntry> resident;
+    std::size_t owned_device = retained_device_bytes();
+    for (std::size_t i = 0; i < models.size(); ++i) {
+      if (models.at(i).owner) {
+        resident.push_back({static_cast<nla::ModelRole>(i), models.at(i).cost,
+                            models.at(i).used, false});
+        owned_device = add(owned_device, models.at(i).cost.device_bytes);
+      }
+    }
+    auto device_limit =
+        std::min(limits.max_device_bytes, snapshot.working_set_limit_bytes);
+    if (snapshot.available_device_bytes) {
+      device_limit = std::min(
+          device_limit, add(*snapshot.available_device_bytes, owned_device));
+    }
+    const MemoryCost retained{
+        retained_device_bytes(), required_host,
+        unified ? add(retained_device_bytes(), required_host) : 0};
+    const MemoryCost transient{
+        transient_device, transient_host,
+        unified ? add(transient_device, transient_host) : 0};
+    const auto decision = plan_model_retention(
+        {device_limit, limits.max_host_bytes,
+         unified ? std::optional(snapshot.working_set_limit_bytes)
+                 : std::nullopt},
+        {role, active_cost, retained, transient}, resident);
+    if (!decision) {
+      throw std::length_error(
+          "model and complete request do not fit memory budget");
+    }
+    for (const auto victim : decision->evict) {
+      models.at(static_cast<std::size_t>(victim)) = {};
+    }
+    active = role;
+    if (!entry.owner) {
+      const auto host = available_host(pending);
+      if (loaded.host_working_bytes >= host) {
+        throw std::length_error("model upload host budget");
+      }
+      entry.owner = inference::load_resident_model(
+          device, std::move(loaded.checkpoint),
+          {mode, available_device(),
+           std::min(upload_allowance, host - loaded.host_working_bytes)});
+      if (entry.owner->resident_device_bytes() != weights) {
+        throw std::logic_error("resident weight accounting mismatch");
+      }
+      entry.checkpoint = checkpoint;
+      entry.cost = active_cost;
+      entry.identity = identity;
+    }
+    if (use_clock == std::numeric_limits<std::uint64_t>::max()) {
+      throw std::length_error("model use counter exhausted");
+    }
+    entry.used = ++use_clock;
+    return entry.owner.get();
+  }
   std::size_t available_host(std::size_t pending) const {
     const auto retained = record ? record->retained_bytes() : 0;
-    const auto used =
-        add(add(retained, pending),
-            add(inputs.metadata_host_bytes, verbalizer_host_bytes));
+    const auto used = add(add(retained, pending),
+                          add(inputs.metadata_host_bytes, resident_host()));
     if (used >= limits.max_host_bytes) {
       throw std::length_error("experiment host budget");
     }
@@ -266,9 +408,9 @@ struct Run::Impl {
           "provider exceeded allowance or returned inconsistent source");
     }
     inputs.pair->validate_model(role, result.source, *result.checkpoint,
-                                role == nla::ModelRole::target
-                                    ? inputs.target_mode
-                                    : inputs.verbalizer_mode);
+                                role == nla::ModelRole::verbalizer
+                                    ? inputs.verbalizer_mode
+                                    : inputs.target_mode);
     return result;
   }
   std::size_t retained_device_bytes() const {
@@ -283,7 +425,7 @@ struct Run::Impl {
     return bytes;
   }
   std::size_t available_device() const {
-    const auto used = retained_device_bytes();
+    const auto used = add(retained_device_bytes(), inactive_device());
     if (used >= limits.max_device_bytes) {
       throw std::length_error("retained device budget");
     }
@@ -302,7 +444,7 @@ struct Run::Impl {
             target ? std::vector<models::ObservationPoint>{site.point}
                    : std::vector<models::ObservationPoint>{},
             {target ? multiply(capacity, row) : 0, target ? capacity : 0},
-            target ? limits.max_device_bytes : available_device(),
+            available_device(),
             host};
   }
 };
@@ -341,9 +483,24 @@ const Record* Run::record() const noexcept { return impl_->record.get(); }
 const measurement::PhaseMeasurements& Run::measurements() const noexcept {
   return impl_->measurements;
 }
+gpu::MemoryFootprint Run::retained_model_bytes() const {
+  gpu::MemoryFootprint result;
+  for (const auto& entry : impl_->models) {
+    if (entry.owner) {
+      result.device_bytes = add(result.device_bytes, entry.cost.device_bytes);
+      result.host_bytes = add(result.host_bytes, entry.cost.host_bytes);
+      result.unified_bytes =
+          add(result.unified_bytes, entry.cost.unified_bytes);
+    }
+  }
+  return result;
+}
+void Run::release_models() {
+  for (auto& entry : impl_->models) entry = {};
+  if (impl_->phase == Phase::verbalizer_ready) impl_->phase = Phase::retained;
+}
 void Run::close() {
-  impl_->verbalizer.reset();
-  impl_->verbalizer_host_bytes = 0;
+  for (auto& entry : impl_->models) entry = {};
   impl_->phase = Phase::closed;
 }
 void Run::generate_impl(const text::Prompt& prompt,
@@ -373,18 +530,13 @@ void Run::generate_impl(const text::Prompt& prompt,
   if (retained > p.limits.record.max_retained_bytes) {
     throw std::length_error("target retained budget");
   }
-  const auto host = p.available_host(retained);
   auto started = Clock::now();
   publication.phase(WorkPhase::loading_target);
-  auto loaded = p.load(nla::ModelRole::target, host);
-  const auto working = loaded.host_working_bytes;
-  if (working >= host) {
-    throw std::length_error("no host allowance for target execution");
-  }
-  auto resident = inference::load_resident_model(
-      p.device, std::move(loaded.checkpoint),
-      {p.inputs.target_mode, p.limits.max_device_bytes,
-       std::min(upload_allowance, host - working)});
+  auto* resident =
+      p.acquire(nla::ModelRole::target, {capacity, retained, true});
+  const auto host = p.available_host(retained);
+  const std::size_t working =
+      0;  // Cached model host ownership is already reserved.
   p.measurements.target_load_seconds = elapsed(started);
   const auto execution = p.next_id();
   // Preflight failures above remain retryable. Once sequence execution
@@ -440,7 +592,7 @@ void Run::generate_impl(const text::Prompt& prompt,
     p.phase = Phase::closed;
     throw;
   }
-  resident.reset();
+
   p.measurements.target_release_seconds = elapsed(started);
   p.phase = p.record->target().generation.reason ==
                     inference::StopReason::execution_failure
@@ -481,7 +633,7 @@ VariantId Run::interpret_impl(CaptureKey key,
                      sizeof(float) +
                          2 * tensors::element_bytes(
                                  p.inputs.verbalizer_mode.activation_storage));
-  auto host = p.available_host(add(pending, conversion_bytes));
+  std::size_t host = 0;
   Interpretation attempt{};
   attempt.capture = key;
   attempt.requested_settings = settings;
@@ -502,30 +654,24 @@ VariantId Run::interpret_impl(CaptureKey key,
       attempt.injection = provenance;
     }
     attempt.stage = AttemptStage::loading;
-    if (!p.verbalizer) {
-      start = Clock::now();
-      publication.phase(WorkPhase::loading_verbalizer);
-      auto loaded = p.load(nla::ModelRole::verbalizer, host);
-      if (loaded.host_working_bytes >= host) {
-        throw std::length_error("no host allowance for AV upload");
-      }
-      p.verbalizer = inference::load_resident_model(
-          p.device, std::move(loaded.checkpoint),
-          {p.inputs.verbalizer_mode, p.available_device(),
-           std::min(upload_allowance, host - loaded.host_working_bytes)});
+    start = Clock::now();
+    const bool reused = p.models.at(1).owner && p.models.at(1).owner->usable();
+    publication.phase(WorkPhase::loading_verbalizer);
+    (void)p.acquire(nla::ModelRole::verbalizer,
+                    {capacity, add(pending, conversion_bytes), false});
+    host = p.available_host(add(pending, conversion_bytes));
+    if (!reused) {
       attempt.cost.load_seconds = elapsed(start);
       accumulate(p.measurements.verbalizer_load_seconds,
                  *attempt.cost.load_seconds);
-      p.verbalizer_host_bytes = loaded.host_working_bytes;
-      host -= loaded.host_working_bytes;
-      p.phase = Phase::verbalizer_ready;
     }
+    p.phase = Phase::verbalizer_ready;
     attempt.stage = AttemptStage::preparation;
     const auto execution = p.next_id();
     start = Clock::now();
     {
       auto plan = inference::prepare_cached_forward(
-          *p.verbalizer, p.options(capacity, execution, false, host),
+          *p.models.at(1).owner, p.options(capacity, execution, false, host),
           std::move(injection.embedding));
       if (p.inputs.selection_execution ==
           inference::sampling::Execution::device) {
@@ -535,11 +681,11 @@ VariantId Run::interpret_impl(CaptureKey key,
       p.measurements.estimated_peak_device_bytes =
           std::max(p.measurements.estimated_peak_device_bytes,
                    plan.estimated_peak_device_bytes());
-      const auto estimated_host =
-          add(add(p.record->retained_bytes(), add(pending, conversion_bytes)),
-              add(add(p.inputs.metadata_host_bytes, p.verbalizer_host_bytes),
-                  std::max(plan.estimated_peak_host_bytes(),
-                           std::min(upload_allowance, host))));
+      const auto estimated_host = add(
+          add(p.record->retained_bytes(), add(pending, conversion_bytes)),
+          add(add(p.inputs.metadata_host_bytes, p.models.at(1).cost.host_bytes),
+              std::max(plan.estimated_peak_host_bytes(),
+                       std::min(upload_allowance, host))));
       p.measurements.estimated_peak_host_bytes =
           std::max(p.measurements.estimated_peak_host_bytes, estimated_host);
       attempt.stage = AttemptStage::generation;
@@ -559,7 +705,8 @@ VariantId Run::interpret_impl(CaptureKey key,
       p.measurements.estimated_peak_host_bytes = std::max(
           p.measurements.estimated_peak_host_bytes,
           add(add(p.record->retained_bytes(), add(pending, conversion_bytes)),
-              add(add(p.inputs.metadata_host_bytes, p.verbalizer_host_bytes),
+              add(add(p.inputs.metadata_host_bytes,
+                      p.models.at(1).cost.host_bytes),
                   plan.estimated_peak_host_bytes())));
       if (attempt.generation->injection_norm) {
         attempt.injection = provenance;
@@ -589,7 +736,7 @@ VariantId Run::interpret_impl(CaptureKey key,
     attempt.failure_message = result.failure_message;
     attempt.stage = AttemptStage::complete;
   } catch (const std::bad_alloc&) {
-    if (p.verbalizer && !p.verbalizer->usable()) {
+    if (p.models.at(1).owner && !p.models.at(1).owner->usable()) {
       close();
     }
     throw;
@@ -597,9 +744,9 @@ VariantId Run::interpret_impl(CaptureKey key,
     attempt.outcome = AttemptOutcome::failed;
     attempt.failure_message = e.what();
   }
-  if (p.verbalizer && !p.verbalizer->usable()) {
-    p.verbalizer.reset();
-    p.verbalizer_host_bytes = 0;
+  if (p.models.at(1).owner && !p.models.at(1).owner->usable()) {
+    p.models.at(1).owner.reset();
+    p.models.at(1).cost.host_bytes = 0;
     p.phase = Phase::closed;
   }
   const auto id = p.record->append(std::move(attempt));
@@ -683,7 +830,7 @@ TrialId Run::steer(SteeringEdit edit, RunObserver& observer,
       p.limits.record.max_retained_bytes - p.record->retained_bytes()) {
     throw std::length_error("steering retained budget");
   }
-  auto host = p.available_host(pending);
+  std::size_t host = 0;
   observer.prepare_comparison({prefix, edit.settings.max_new_tokens,
                                std::min(capacity, p.limits.max_prefill_chunk),
                                p.inputs.target_tokenizer->max_token_bytes(),
@@ -694,10 +841,7 @@ TrialId Run::steer(SteeringEdit edit, RunObserver& observer,
   }
   Publication publication(&observer, external_stop);
   const auto stop = publication.token();
-  p.verbalizer.reset();
-  p.verbalizer_host_bytes = 0;
   p.phase = Phase::retained;
-  host = p.available_host(pending);
   try {
     inference::DeviceCapture direction{};
     const auto check_stop = [&] {
@@ -708,21 +852,21 @@ TrialId Run::steer(SteeringEdit edit, RunObserver& observer,
     check_stop();
     if (trial.strength > 0) {
       publication.phase(WorkPhase::loading_reconstructor);
-      auto loaded = p.load(nla::ModelRole::reconstructor, host);
-      if (loaded.host_working_bytes >= host) {
-        throw std::length_error("AR host budget");
-      }
-      auto ar = inference::load_resident_model(
-          p.device, std::move(loaded.checkpoint),
-          {p.inputs.target_mode, p.available_device(),
-           std::min(upload_allowance, host - loaded.host_working_bytes)});
+      const auto width = p.inputs.pair->target_site().vector_width;
+      const auto direction_allowance =
+          add(multiply(width, 2 * sizeof(float)),
+              inference::DeviceDirection::required_bytes(width));
+      auto* ar = p.acquire(nla::ModelRole::reconstructor,
+                           {std::max(trial.original_ar_tokens.size(),
+                                     trial.edited_ar_tokens.size()),
+                            pending, false, direction_allowance});
+      host = p.available_host(pending);
       check_stop();
       publication.phase(WorkPhase::reconstructing);
       const auto reconstruct = [&](std::span<const std::uint32_t> ids,
                                    std::size_t retained) {
         const auto execution = p.next_id();
-        auto options = p.options(ids.size(), execution, false,
-                                 host - loaded.host_working_bytes);
+        auto options = p.options(ids.size(), execution, false, host);
         options.max_device_bytes = p.available_device() - retained;
         auto plan = inference::prepare_cached_forward(*ar, options);
         return plan.reconstruct(ids, stop);
@@ -732,7 +876,7 @@ TrialId Run::steer(SteeringEdit edit, RunObserver& observer,
       auto edited =
           reconstruct(trial.edited_ar_tokens, original.owner->size_bytes());
       check_stop();
-      const auto width = p.inputs.pair->target_site().vector_width;
+
       const auto vectors =
           add(original.owner->size_bytes(), edited.owner->size_bytes());
       const auto extra = inference::DeviceDirection::required_bytes(width);
@@ -749,17 +893,12 @@ TrialId Run::steer(SteeringEdit edit, RunObserver& observer,
     }
     check_stop();
     publication.phase(WorkPhase::loading_target);
-    auto loaded = p.load(nla::ModelRole::target, host);
-    if (loaded.host_working_bytes >= host) {
-      throw std::length_error("branch host budget");
-    }
     const auto direction_bytes =
         direction.owner ? direction.owner->size_bytes() : 0;
+    auto* resident = p.acquire(nla::ModelRole::target,
+                               {capacity, pending, false, direction_bytes});
+    host = p.available_host(pending);
     const auto device_budget = p.available_device() - direction_bytes;
-    auto resident = inference::load_resident_model(
-        p.device, std::move(loaded.checkpoint),
-        {p.inputs.target_mode, device_budget,
-         std::min(upload_allowance, host - loaded.host_working_bytes)});
     text::PreparedPrompt prompt{
         g.protocol_identity,
         g.tokenizer_identity,
@@ -771,8 +910,7 @@ TrialId Run::steer(SteeringEdit edit, RunObserver& observer,
     const auto branch = [&](BranchResult& result, StreamRole role) {
       check_stop();
       const auto execution = p.next_id();
-      auto options = p.options(capacity, execution, false,
-                               host - loaded.host_working_bytes);
+      auto options = p.options(capacity, execution, false, host);
       options.max_device_bytes = device_budget;
       auto plan = inference::prepare_cached_forward(*resident, options);
       if (role == StreamRole::steered && trial.strength > 0) {

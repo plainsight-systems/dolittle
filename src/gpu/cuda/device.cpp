@@ -1,4 +1,12 @@
 /*
+ * Shared memory admission (metal-port.md, Memory and model residency):
+ * query_memory reads CUDA's current free/total bytes without allocating or
+ * synchronizing; it returns a discrete-memory snapshot, not a reservation.
+ * Implementation consultation: Core I.7 (#ri-post) makes that limit explicit;
+ * GPU.9 (guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md)
+ * requires persistent and upcoming transient owners to share one budget.
+ * Both rules were read from the local corpora for this implementation.
+ *
  * Axis X4, CUDA kind: resource ownership, transfers and completion.
  * Contract: implement gpu/device.h and the explicit CUDA factory; preserve
  * buffer lifetime through outstanding submissions and never recycle in-use
@@ -66,6 +74,7 @@
 
 #include "diagnostics/allocation.h"
 #include "gpu/cuda/backend.h"
+#include "gpu/memory.h"
 
 namespace dolittle::gpu {
 namespace {
@@ -526,5 +535,15 @@ std::unique_ptr<Device> cuda::open_device(int ordinal) {
           std::to_string((driver % driver_major_scale) / driver_minor_scale),
       state->properties.totalGlobalMem};
   return std::make_unique<CudaDevice>(std::move(state));
+}
+// Admission snapshot: current free memory includes other processes; it is not
+// a reservation. Core I.7 (#ri-post), GPU.9
+// (guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md), queried
+// and read for the Metal/shared-retention implementation, govern this boundary.
+MemorySnapshot query_memory(Device& device) {
+  const auto state = device_state(device);
+  std::size_t available = 0, total = 0;
+  state->check(cudaMemGetInfo(&available, &total));
+  return {MemoryTopology::discrete, total, total, total - available, available};
 }
 }  // namespace dolittle::gpu

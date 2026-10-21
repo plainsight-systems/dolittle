@@ -1,72 +1,50 @@
 /*
- * Steering scheduling, R3: resolve the retained sample; admit two branch
- * results and fresh sequence capacities before releasing AV. Tokenize both AR
- * descriptions, run sequential GPU forwards with shared resident AR weights,
- * compute their normalized difference on device and retain its small owner.
- * Release AR, load target once, replay identical fixed IDs with fresh KV/RNG
- * for baseline and steered continuations. Apply the edit once in the second
- * branch. Restore text-classification state from the original generated prefix.
- * Retain trial results without replacing the original run. Cancellation stops
- * the current phase and preserves completed branch output. Budget all retained
- * device owners alongside active model resources. No CPU vector processing.
- * Overlay: steering.md, Device ownership and model phases.
- * Header consultation: Core I.1 (#ri-explicit), R.1 (#rr-raii), explicit
- * inputs and lifetimes; performance GPU.1, resident intermediates, GPU.9,
- * bounded persistent owners (guidelines/gpu/GPU.1-keep-data-on-device.md;
- * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md).
- * Both corpora queried/read, 2026-10-20.
-
- * Axis R3: sequential target/AV phases with durable experiment records.
- * Contract: Run owns pairing, providers, text helpers, records and optional
- * resident AV weights; it borrows Device, which must outlive capture leases.
- * Providers load only verified sources within their host allowance. Operations
- * are serial. Target executes once; later interpretations use fresh sequence
- * state and may reuse AV weights. Rejected preflight is retryable; unexpected
- * target failure closes the run. close releases model resources, while the
- * immutable record and its capture leases remain readable until destruction.
+ * R3 experiment scheduling and model retention. Run owns verified model roles,
+ * text helpers and records; Device outlives all retained capture/model owners.
+ * Public operations are serial. Every generation uses fresh KV and sequence
+ * state. Models remain cached by exact source/binding identity and immutable
+ * role-specific numerical mode only while complete-request budgets permit.
  *
  * Algorithm: logical-overview.md experiment phases; execution-boundary.md
- H0-H4.
- * 1. Prepare/tokenize target text, validate pairing and budgets, load target
- *    weights, then prepare and execute the complete GPU sequence. The host
- *    observer detokenizes/classifies metadata without scheduling GPU progress.
- * 2. Build the retained record from completed device capture leases and exact
- *    IDs. Release target sequence/cache/weights; retained captures remain
- valid.
- * 3. Resolve a selected consumed row, validate the trained pair convention and
- *    construct a device normalization descriptor. Admit the AV model/sequence
- *    alongside retained captures. Reuse AV weights on subsequent requests.
- * 4. GPU normalization/status gates AV prefill; marker embedding replacement
- *    precedes block0. Run the same GPU generation path, retain reported source
- *    norm and exact AV IDs, decode them and extract explanation tags.
- * 5. Append a completed/cancelled/failed interpretation with honest phase costs
- *    and provenance. A load failure can be retried; device failure prevents
- *    pretending execution succeeded. Cancellation is an external stop request.
- * Host-reference selection remains an explicitly composed diagnostic path with
- * host captures/conversion. It is not a live fallback.
- * Cost: peak device=max(target phase, retained captures+AV phase), including
- KV,
- * scratch, sampler, constants, graph state and prepared journal allocations.
- * Host estimates include metadata, verified loading and diagnostic staging.
- * GPU normalization is included in generation duration; conversion_seconds
- * applies only to CPU reference conversion. Estimates exclude driver overhead.
- * Optimization: one model weight set resident at a time, capture arenas survive
- * the switch, and repeated AV requests reuse weights without reloading target.
+ * H0-H4; metal-port.md Memory and model residency.
+ * 1. Encode target text, reserve its output/captures and full execution peak,
+ *    then admit target weights. GPU execution produces IDs and hook captures.
+ * 2. Drain the sequence, retain its record and device captures, and release KV
+ *    and scratch. Idle target weights may remain for later replay.
+ * 3. On interpretation, reserve AV execution beside retained captures, evict
+ *    idle roles oldest-first if needed, and load/reuse exact AV weights. Device
+ *    normalization replaces the marker embedding before the first block.
+ * 4. On steering, forward the original and edited explanation through AR with
+ *    fresh caches. Normalize their difference on GPU; retain that vector while
+ *    admitting target. Run matched baseline/steered sequences with fresh KV/RNG
+ *    and one residual edit in the second branch. Preserve the original record.
+ * 5. Decode completed output metadata and append the interpretation/trial.
+ *    Collection never schedules transformer steps. Cancellation stops the
+ *    active sequence and preserves completed output. Failed devices cannot
+ *    reuse cached weights. Rejected admission leaves idle owners intact;
+ *    a later upload failure may follow the admitted idle-model evictions.
  *
- * Corpus consultation, header design and implementation, 2026-10-20: both local
- * servers queried separately in each phase and the cited rules read in full.
- * cpp-guidelines I.1 (#ri-explicit), R.1 (#rr-raii): explicit residency,
- * completion, ownership and failure contracts. cpp-perf-guidelines GPU.1,
- * GPU.6, GPU.7, GPU.9: keep tensor intermediates/decisions on device, batch
- * dispatch, decouple observation and separate persistent from transient arenas.
- * Source: guidelines/gpu/GPU.1-keep-data-on-device.md.
- * Related GPU.6/7/9 entries describe dispatch, staging and storage.
+ * model_retention.h owns the pure decision. Run applies it only at drained
+ * phase boundaries; no borrowed model is evicted. Unified memory additionally
+ * charges mapped checkpoint payloads when physical sharing is unproven.
+ * retained_model_bytes reports cached weight ownership; release_models frees
+ * idle weights while keeping records usable; close also ends further work.
+ * Cost: O(recipe) preparation/admission; no per-token allocation or CPU vector
+ * processing. Optimization: reuse uploaded weights when the next full request
+ * fits, without retaining obsolete sequence storage. Admission uses a
+ * conservative tensor-live bound; actual prepared sequence costs are checked
+ * before start. No precision, capacity or capture reduction to fit memory.
+ * Both local corpora queried/read for design and implementation: Core R.1
+ * (#rr-raii), I.7 (#ri-post), ES.103 (#res-overflow); performance GPU.1/GPU.9,
+ * guidelines/gpu/GPU.1-keep-data-on-device.md and
+ * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md.
  */
 #pragma once
 
 #include <functional>
 
 #include "experiment/record.h"
+#include "gpu/memory.h"
 
 namespace dolittle::experiment {
 struct LoadedModel {
@@ -180,6 +158,11 @@ class Run {
       const noexcept;  // Null until target result retained.
   [[nodiscard]] const measurement::PhaseMeasurements& measurements()
       const noexcept;
+  // Request-boundary memory control: release completed weight owners while
+  // keeping records/capture leases and the ability to interpret/steer.
+  // No sequence may be in flight; Run's public calls are serial.
+  void release_models();
+  [[nodiscard]] gpu::MemoryFootprint retained_model_bytes() const;
   void close();
 
  private:

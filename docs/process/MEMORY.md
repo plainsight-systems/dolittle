@@ -1,5 +1,39 @@
 # Project memory
 
+## Metal foundation
+
+The approved site changes are published on `main` as `b7ca2d8`. Andrew accepted
+[the native Metal port](../architecture/metal-port.md), based on Vigil, Serenity,
+llama.cpp and vLLM-Metal. Keep `experiment/model_retention.h` for R3's decision
+to retain idle model weights; reserve residency terminology for GPU mechanisms.
+
+The foundation now implements native Metal4 resources, checked no-copy views,
+prepared ICB scheduling, separate completed publication windows, GPU position/
+stopping/capture control and cancellation. Control arguments/tables are reused;
+hook constants occupy one bounded arena. The collector can lag until completion.
+Native command allocation and application metadata are reported before start.
+Shared R3 retention admits the full upcoming request, keeps useful idle model
+owners when they fit and evicts oldest idle roles first. Unified accounting
+includes mapped checkpoints conservatively. Explicit idle-model release keeps
+records/capture leases usable. No model precision or sequence capacity changes.
+
+Both local C++ corpora were consulted for design and implementation. The M3
+resource/device workflow and 22 host units pass, including delayed collection,
+EOS, final-token consumption, cancellation and native view-boundary transfers.
+Linux host ASan/UBSan passes. CUDA tiny FP32/BF16 comparisons retain their frozen
+references and exercise target/AV coexistence. Native and forced-PTX pinned 8B
+workflows each pass all 531 reported checks. Strict Metal/CUDA builds, Google
+formatting and all 58 Metal/79 CUDA static-analysis commands pass. This phase is
+complete; numerical references, fixture hashes and acceptance limits are unchanged.
+Apple shader instrumentation requires inherited ICB bindings; our bodies own
+bindings, so instrumentation covers direct control/publication/cancellation,
+while API validation and device assertions cover the complete workflow.
+
+Full Metal transformer kernels, numerical equivalence and the native application
+are still the next phases. The `metal-debug` preset builds the foundation and
+tests, not a runnable inference application. Andrew approved committing this
+foundation and proceeding to the target-kernel header design.
+
 ## Project site documentation
 
 Steering was committed and pushed as `52192cd`. Andrew requested the next public
