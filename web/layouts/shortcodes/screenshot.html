@@ -1,0 +1,10 @@
+{{/* Real application captures, sized for the article with a full-size reading link. */}}
+{{ $source := resources.Get (.Get "src") }}
+{{ $small := $source.Resize "800x webp q85" }}
+{{ $full := $source.Process "webp q90" }}
+<figure class="walkthrough-image">
+  <a href="{{ $full.RelPermalink }}" aria-label="Open full-size screenshot: {{ .Get "alt" }}">
+    <img src="{{ $full.RelPermalink }}" srcset="{{ $small.RelPermalink }} 800w, {{ $full.RelPermalink }} {{ $full.Width }}w" sizes="(max-width: 60rem) 92vw, 50rem" width="{{ $full.Width }}" height="{{ $full.Height }}" loading="lazy" alt="{{ .Get "alt" }}">
+  </a>
+  <figcaption>{{ .Get "caption" }} <a href="{{ $full.RelPermalink }}">View full size</a></figcaption>
+</figure>

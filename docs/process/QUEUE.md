@@ -174,7 +174,7 @@ residual updates, fresh-KV matched continuations, retained trials and comparison
 UI. Native/forced-PTX independent numerical checks, strict builds, static
 analysis, units, Linux sanitizers, CUDA memcheck and Docker application flow
 pass. Zero-strength sampled branches match exactly; retries and reconnect
-preserve the comparison. Andrew approved committing and pushing the feature.
+preserve the comparison. Committed and pushed as `52192cd`.
 
 The browser-access fix is implemented and installed in the live service:
 remembered access across tabs, first-visit/expired-link recovery, and clearer
@@ -199,8 +199,13 @@ target-capture validation or a full numerical-parity result. Detailed evidence
 remains private.
 
 1. Review the implemented interface; the retained rhyming experiment is available.
-2. Add the public workflow walkthrough when requested. Long-context numerical
-   comparison and additional GPU validation remain future evidence.
+2. The public walkthrough, “Try the rhyming experiment,” and the rest of the
+   site have been rewritten in Andrew’s voice after the prose audit. Concrete
+   examples replace abstract subheadings and repeated qualifications. Home/About
+   reflect the working application, with a Run Dolittle navigation link. Local site build and all
+   thirteen site checks pass. Andrew approved merging and publishing this
+   documentation change on 2026-10-21. Long-context numerical comparison and
+   additional GPU validation remain future work.
 
 ## Later platform work
 

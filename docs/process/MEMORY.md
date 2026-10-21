@@ -1,5 +1,37 @@
 # Project memory
 
+## Project site documentation
+
+Steering was committed and pushed as `52192cd`. Andrew requested the next public
+workflow documentation in his voice, using the Andrew voice skill. The new
+“Try the rhyming experiment” walkthrough covers source setup, launcher access,
+the paper’s newline position, interpretation samples, reconstruction-difference
+steering, matched continuations and retained-session limits. Home/About now
+reflect the working engine. Existing reference measurements remain identified
+as reference runs. Andrew approved publishing the revised site and illustrated walkthrough on
+2026-10-21; additional examples will follow further experiments. Keep development logs out of
+public writing and avoid repeated defensive qualifications.
+
+Andrew requested a site-wide prose correction on 2026-10-21: lead with the
+example, explain what happened and what it tells us, and keep the language
+clear and concise. This is a practical experiment, not an academic defense.
+The site draft now removes repeated evidentiary disclaimers and publishing
+process descriptions. Preserve this direction in future edits.
+
+Andrew’s follow-up corrections: keep the paper-origin story on About rather
+than repeating it in the technical introduction. Define verbalizer and
+reconstructor before discussing checkpoints. Explain the initial PyTorch
+experiment (including its activation hooks), the purpose of the custom engine,
+and the later independent numerical reference as distinct steps. Preserve
+publication dates and display revision dates. The rhyming walkthrough must
+start with the sample actually returned; rabbit-to-mouse is Anthropic’s example,
+not a consistent observation in Andrew’s Qwen runs.
+
+The walkthrough includes actual UI screenshots at the prompt, token selection,
+sample comparison, edit and answer comparison steps. Captions explain the controls
+and the specific captured result. Preserve this visual teaching approach; images
+are real application captures with responsive derivatives and full-size links.
+
 ## Causal steering
 
 Andrew accepted the [steering design](../architecture/steering.md) on 2026-10-20.

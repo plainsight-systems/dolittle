@@ -77,11 +77,17 @@ def articles() -> list[tuple[str, dict, str]]:
         if meta['article_type'] == 'milestone' and (type(meta.get('milestone')) is not int or meta['milestone'] < 1):
             raise ValueError(f'{slug}: milestones require a positive milestone number.')
         # The registry controls URLs and publication time, not arbitrary mounts or aliases.
-        if set(meta) - {'title', 'description', 'date', 'article_type', 'milestone', 'draft'}:
+        if set(meta) - {'title', 'description', 'date', 'lastmod', 'article_type', 'milestone', 'draft'}:
             raise ValueError(f'{slug}: unsupported metadata key.')
         when = datetime.fromisoformat(meta['date'].replace('Z', '+00:00'))
         if when.tzinfo is None:
             raise ValueError(f'{slug}: date must include a time zone.')
+        if 'lastmod' in meta:
+            if not isinstance(meta['lastmod'], str):
+                raise ValueError(f'{slug}: lastmod must be a date string.')
+            updated = datetime.fromisoformat(meta['lastmod'].replace('Z', '+00:00'))
+            if updated.tzinfo is None or updated < when:
+                raise ValueError(f'{slug}: lastmod must include a time zone and not precede publication.')
         result.append((slug, meta, body))
     return result
 

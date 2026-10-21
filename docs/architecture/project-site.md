@@ -1,8 +1,7 @@
 # Project site
 
-The public site is the current implementation priority, before engine
-architecture. It explains the questions, mechanisms, and observations behind
-Dolittle. Andrew chose Cradle as the closer reference, with Serenity's
+The public site explains the questions, mechanisms, and observations behind
+Dolittle and provides a walkthrough of the working application. Andrew chose Cradle as the closer reference, with Serenity's
 milestone writing retained as one kind of article.
 
 ## Structure and responsibilities
@@ -12,7 +11,8 @@ milestone writing retained as one kind of article.
 - Writing is a chronological index of explanations, explorations, and
   milestones. It does not impose a numbered curriculum or manufacture future
   milestone pages. Articles have dates, a type, descriptions, and contents.
-- About explains the motivation, implementation intent, and current status.
+- Run Dolittle links directly to the application walkthrough in Writing.
+- About explains the motivation, implementation and current platform support.
 - A writing RSS feed uses the same published article set as the index.
 
 The site is static Hugo 0.154.2, following the sibling sites. Python 3.11+

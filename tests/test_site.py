@@ -33,6 +33,7 @@ class PublicationIntegrationTests(unittest.TestCase):
             'draft-check': 'draft = true',
             'future-check': 'date = "2999-01-01T00:00:00Z"',
             'milestone-check': 'article_type = "milestone"\nmilestone = 1',
+            'updated-check': 'lastmod = "2020-01-02T00:00:00Z"',
         }.items():
             meta = {'title': slug, 'description': 'Fixture article',
                     'date': '2020-01-01T00:00:00Z', 'article_type': 'exploration'}
@@ -58,6 +59,10 @@ class PublicationIntegrationTests(unittest.TestCase):
             self.assertNotIn(excluded, html)
         self.assertIn('Milestone 1', html)
         self.assertIn('/dolittle/writing/milestone-check/', html)
+        updated = (self.output / 'writing/updated-check/index.html').read_text()
+        self.assertIn('>1 January 2020</time>', updated)
+        self.assertIn('>2 January 2020</time>', updated)
+        self.assertIn('Updated', updated)
 
 
 class SiteValidationUnitTests(unittest.TestCase):

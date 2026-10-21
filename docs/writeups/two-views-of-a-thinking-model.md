@@ -1,108 +1,103 @@
 +++
 title = 'Two views of a thinking model'
-description = 'What generated thinking tells us, what an activation verbalizer adds, and how to read the places where they disagree.'
+description = 'How an NLA turns the numbers inside a model into text we can read and edit.'
 date = '2026-10-16T09:00:00Z'
+lastmod = '2026-10-21T00:00:00-07:00'
 article_type = 'explanation'
 +++
 
-Dolittle started with [Anthropic’s paper on natural language autoencoders](https://transformer-circuits.pub/2026/nla/index.html).
-I read it and thought this would be a fun experiment to build: run a model
-that generates thinking text, interpret its internal activations with an NLA,
-and put the two views beside each other in an interface people can explore.
+A thinking model gives us text we can read, but it also processes vectors of
+numbers at every layer. A natural language autoencoder, or NLA, translates one
+of those vectors into a description. Put that description beside the thinking
+text and we have two views of the same moment in generation.
 
-The paper provides the approach. I want to understand it through implementation
-and make it easy to interact with, following the same approach I took with
-Charlotte and Serenity. Dolittle will attach the generated thinking and the
-NLA descriptions to the same points in a generation so we can inspect them
-together.
+[Anthropic’s NLA paper](https://transformer-circuits.pub/2026/nla/index.html)
+uses poetry to explore what those descriptions contain. A model is asked to
+finish a couplet whose first line ends in “grab it.” Before it writes the next
+line, the NLA describes a plan involving “rabbit.” Changing the explanation
+to “mouse” gives the researchers a way to steer the model toward a different
+ending. Dolittle uses the same process with Qwen3 8B.
 
 ## The text the model generates
 
-Thinking mode gives the model a trained way to generate a reasoning sequence
-before its answer. Those are ordinary generated tokens with a particular role
-in the conversation format. They become part of the context used to produce
-later tokens, so the text participates in the continuing computation.
+Qwen3 can generate a thinking sequence before its answer. Those thinking
+tokens become part of the context for the tokens that follow. If it writes
+out a calculation or considers a rhyme, that text can shape what it writes
+next.
 
-That does not make it a complete record of the computation. The model is also
-processing numerical values through its layers. A readable sequence can be
-useful without naming every association, intermediate result, or influence
-represented in those values.
+Inside the transformer, each token has a state vector that successive blocks
+update. Attention combines information from the current and preceding token
+positions and adds its result to that state. The block’s feed-forward network
+then computes another update and adds it. This running state is the
+**residual stream**.
 
-For Dolittle, I wanted a target with native thinking behavior. Qwen3 8B provides
-that mode; its [model card](https://huggingface.co/Qwen/Qwen3-8B) documents the
-thinking and non-thinking formats. A prompt asking an arbitrary model to show
-its work would give us a different experiment.
+Qwen’s feed-forward network uses **SwiGLU** gating. It projects the normalized
+state along two paths, applies the SiLU activation function to one, and
+multiplies the two results element by element. A final projection brings that
+result back to the state’s width for the residual addition.
 
-## A description from an activation
+“Activations” is the broader name for intermediate values computed by the
+model. Dolittle captures a specific one: the 4,096-value residual-stream vector
+after block 24’s second addition, before block 25’s normalization. This gives
+the NLA the accumulated block output, including the attention and feed-forward
+updates. The gate values are intermediate steps within that computation.
 
-An activation is a numerical value produced while the model processes its
-input. The particular value Dolittle will capture is a vector from the
-residual stream at one position in one transformer block. That position
-matters: the state after consuming a token helps produce the next token.
+## Turning an activation into words
 
-An NLA adds two trained roles. The **activation verbalizer** receives the
-captured vector and produces a description. The **activation reconstructor**
-receives that description and predicts a vector. Training rewards the pair
-for reconstructing the original activation through this text bottleneck.
+The NLA’s **activation verbalizer** takes a captured vector and generates a
+text description. Its **activation reconstructor** works in the other
+direction, taking the description and predicting the original vector:
 
-The round trip is:
+**Activation → text explanation → reconstructed activation.**
 
-**Captured activation → text description → reconstructed activation.**
+During training, the pair is rewarded for reconstructing the activation
+accurately. This encourages the explanation to carry information from the
+vector through the text and back again. The published
+[Qwen3 8B NLA pair](https://huggingface.co/marco-bazzani/Qwen3-8B-nla)
+was trained to read block 24, which is why Dolittle captures that block.
 
-Reconstruction gives the training process an objective it can measure. It
-does not turn every sentence in the description into a verified statement.
-The [NLA article](https://www.anthropic.com/research/natural-language-autoencoders)
-discusses incorrect descriptions and the need for independent corroboration.
-
-The target model continues to generate its own text. The verbalizer is a
-separate computation with different trained weights. Putting their outputs
-beside each other makes the relationship easier to inspect, but the two
-outputs still need to keep their identities.
+The thinking text comes from Qwen3’s own generation. The NLA explanation comes
+from the verbalizer reading a saved activation. Keeping the two beside each
+other lets us see what each describes at the same point.
 
 ## When the views disagree
 
-One of the reference prompts follows a copper key. Mara puts it in a kitchen
-drawer, then moves it to her coat pocket. The coat hangs by the door. At a
-captured point in the 8B run, the generated thinking includes:
+In the initial PyTorch experiment, one prompt follows a copper key. Mara puts it in a kitchen
+drawer, then moves it to her coat pocket. The coat hangs by the door. At
+block 24, token position 426, the model’s thinking includes:
 
 > The coat is hanging by the door, so the key is in the coat pocket, which is part of the coat.
 
-The NLA description of that activation includes:
+The NLA description includes:
 
 > the entire response resolves the key's location, final sentence restating the answer for the key's position tied to Rosa being inside the suitcase in Mexico City.
 
-These are exact excerpts from one reference run, at zero-based block 24,
-token position 426. The description recognizes that the response is resolving
-a key’s location, but supplies a different person, container, and setting.
+The NLA picks up the task of locating the key, but invents a different person,
+container and setting. The model’s thinking follows the prompt’s coat pocket;
+the explanation supplies a suitcase in Mexico City.
 
-There are two kinds of claim to separate here. We can directly check a claim
-about the transcript: it says coat pocket, and does not introduce Rosa or
-Mexico City. A claim about what the numerical activation represents is harder
-to check. The extra content could be an inaccurate interpretation or an
-association not expressed in the thinking text. The comparison alone cannot
-decide between them.
+That gives us something specific to explore. We can generate another
+explanation from the same activation, see which details recur, then move to a
+nearby token and compare. Dolittle keeps each sample with the position it came
+from, so those comparisons are a few clicks apart.
 
-The same care applies in the other direction. An unexpected NLA description
-is not evidence, by itself, that we have discovered hidden reasoning. A high
-reconstruction score is not a truth score for its prose, either.
+## Editing the explanation
 
-This is part of why I want both views available. A visitor should be able to
-see what text the model had reached, which activation was captured, and what
-the verbalizer said about it. The interface can preserve those distinctions
-without requiring agreement between the descriptions.
+The reconstructor makes the text useful for more than reading. We can edit an
+explanation, reconstruct both versions, and subtract their vectors. The
+difference gives us a direction to add to the model’s activation before it
+continues generating.
 
-## Building something we can inspect
+In Anthropic’s rhyming example, the edit changes rabbit-related words to
+mouse-related words. Our Qwen runs produced varied descriptions, including
+carrots, rabbits, invented classrooms and comments about the poem’s wording.
+Rabbit was not a consistent result. The useful edit depends on what the
+selected explanation actually says.
 
-The first implementation will use Qwen3 8B and the published
-[marco-bazzani NLA pair](https://huggingface.co/marco-bazzani/Qwen3-8B-nla).
-That NLA reads the output of block 24. The reference experiment has already
-run the three roles on an RTX 3090 Ti, loading their weights in separate
-phases. [The model comparison]({{< relref "/writing/choosing-a-model-we-can-run" >}})
-explains the practical tradeoffs.
+Dolittle runs an unsteered version and a steered version with the same
+starting text and seed. We can read the resulting poems and the thinking that
+led to them.
 
-The next work is the direct C++/CUDA implementation and its browser interface.
-Capturing the right vector, keeping it attached to the right text position,
-and reproducing the published injection and reconstruction conventions are
-concrete things we can check. Once those work, there will be a much more
-useful way to explore the descriptions than reading them from a script’s
-output.
+[Try the rhyming experiment]({{< relref "/writing/running-an-investigation" >}})
+walks through the process. [The model comparison]({{< relref "/writing/choosing-a-model-we-can-run" >}})
+explains why I chose the 8B pair and how its three model roles fit on one GPU.

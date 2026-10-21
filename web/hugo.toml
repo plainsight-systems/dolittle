@@ -8,7 +8,7 @@ enableRobotsTXT = true
 
 [params]
 author = 'Andrew Hunter'
-description = 'Building a way to explore a model’s thinking text beside interpretations of its internal activations.'
+description = 'Read a model’s thinking, explore descriptions of its internal state, and edit them to change what it writes next.'
 repository = 'https://github.com/plainsight-systems/dolittle'
 
 [outputs]

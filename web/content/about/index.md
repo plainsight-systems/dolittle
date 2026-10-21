@@ -1,59 +1,49 @@
 +++
 title = 'About Dolittle'
-description = 'Why I want to put a model’s thinking text beside another view of its computation.'
+description = 'I read the NLA paper and wanted to build an experiment people could try for themselves.'
 +++
 
 I read [Anthropic’s paper on natural language autoencoders](https://transformer-circuits.pub/2026/nla/index.html)
-and thought this would be a fun experiment to build. It describes a way to
-turn an internal activation into a natural language description. Putting
-that beside a model’s generated thinking would give us two views to explore
-in an interactive demo.
+and thought it would be a fun experiment to build. The paper turns a model’s
+internal numbers into descriptions we can read. It also shows how editing
+those descriptions can change what the model writes next.
 
-I want to put those two views beside each other and make them approachable.
-Choose a point in the generation, see the thinking text available at that
-point, and read the NLA’s interpretation of an activation captured there. The
-places where they agree are interesting. So are the places where they do not.
+Dolittle puts that process in a browser. You can follow Qwen3’s thinking,
+select a token and read an NLA explanation of its activation. Generate more
+samples, inspect a nearby token, or edit an explanation and compare the
+original and steered versions of the response.
 
-## Understanding through implementation
+## Why build the engine?
 
-Dolittle follows the reason I build these projects: writing the machinery gives
-me something I can inspect and explain. The first engine is planned in C++ and CUDA,
-running published model weights on Linux. The browser will provide the
-interface, while the NVIDIA GPU does the inference. Users will build from
-source through a Docker entry point for the Linux/NVIDIA build.
+Implementing the machinery is part of the interest for me, as it was with
+Charlotte and Serenity. The initial Python experiment could already capture
+activations and pass them to the NLA for description. Building our own engine
+lets us explore the computation underneath: how attention runs on the GPU,
+how we reuse memory between tokens, and where we capture or change an
+activation. The browser makes that machinery something people can try.
 
-The selected target is Qwen3 8B with marco-bazzani’s trained NLA pair. Reference
-runs on a 24 GB RTX 3090 Ti have established that the models can execute in
-separate BF16 phases. The engine and live inference interface still need to be
-built. There is no application launch command yet.
+Dolittle runs the published Qwen3 8B and
+[marco-bazzani NLA weights](https://huggingface.co/marco-bazzani/Qwen3-8B-nla)
+through a C++/CUDA engine. The GPU runs one model role at a time, which lets
+the experiment fit on a 24 GB RTX 3090 Ti. The launcher builds from source in
+Docker and downloads the models once.
 
-## Planned platform support
+## Where it runs
 
-NVIDIA comes first, with CUDA on Linux and the 24 GB RTX 3090 Ti as the initial
-verification target. Metal on macOS is planned after the NVIDIA implementation.
-AMD support is undecided. The Metal build and hardware requirements will be
-worked out in that phase; the measurements so far are from the NVIDIA
-reference runs.
+Linux/NVIDIA is available now. Native Metal on macOS is planned next, with a
+native Windows/NVIDIA build also planned. AMD support is undecided. A browser
+on a Mac can already connect to the Linux GPU host and run the interface.
 
-## Room to work through a question
+[Try the rhyming experiment]({{< relref "/writing/running-an-investigation" >}})
+covers setup, reading an explanation and steering the next line of a poem.
 
-The writing is part of the work. Some articles will explain a mechanism, some
-will follow an experiment or a decision, and milestones will record a capability
-once it works. A question does not need to wait for a milestone before it is
-worth discussing.
+## Why Dolittle?
 
-The name comes from Doctor Dolittle, who learns to communicate with animals.
-Here the attempt is to make an unfamiliar computational process easier to
-inspect. Neither the thinking text nor the NLA description gives us an
-unqualified account of everything happening inside the model.
-
-## The wider workshop
+Doctor Dolittle learns to communicate with animals. The connection here is
+turning an unfamiliar internal representation into language we can work with.
+It seemed a fitting name for the experiment.
 
 I’m Andrew Hunter, a systems architect and builder. Dolittle is a
-[Plainsight Systems](https://plainsight-systems.com/) project. The hub connects
-the other builds and the questions that run between them; my
-[personal site](https://andrewphunter.com/) holds my broader writing.
-
-Begin with [two views of a thinking model]({{< relref "/writing/two-views-of-a-thinking-model" >}}),
-or read [the model comparison]({{< relref "/writing/choosing-a-model-we-can-run" >}})
-that led to the 8B choice.
+[Plainsight Systems](https://plainsight-systems.com/) project, alongside
+Charlotte, Serenity and Cradle. My [personal site](https://andrewphunter.com/)
+holds my broader writing.

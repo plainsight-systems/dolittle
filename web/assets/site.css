@@ -111,6 +111,8 @@ strong{font-weight:500}
 .prose .highlight{max-width:100%;min-width:0}
 .prose figure{margin-inline:0}
 .prose figcaption{font-size:.875rem;color:var(--muted);margin-top:.75rem}
+.walkthrough-image img{border:1px solid var(--rule)}
+.walkthrough-image>a{display:block;cursor:zoom-in}
 .prose math[display=block]{overflow-x:auto;padding:1.5rem 0;font-size:1.25em}
 .table-scroll{overflow-x:auto;max-width:100%}
 table{width:100%;border-collapse:collapse;font-size:.9rem;text-align:left;line-height:1.5}
@@ -122,8 +124,10 @@ th{font-weight:500}
 .footer-top,.footer-bottom{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:1rem}
 .footer-top>a:last-child{font:400 .75rem/1.8 var(--mono);text-decoration:none}
 .footer-bottom{margin-top:2rem;padding-top:1rem;border-top:1px solid #2c3650;font-size:.75rem;color:#b9b2a2}
-@media(max-width:24rem){
+@media(max-width:40rem){
   .masthead-inner{flex-wrap:wrap;padding-block:.75rem;gap:.25rem 1rem}
+  .masthead nav{width:100%;flex-wrap:wrap;column-gap:1.5rem;row-gap:0}
+  .masthead nav a{padding-block:.5rem;white-space:nowrap}
 }
 @media(min-width:48rem){
   .brand{font-size:2.4rem}

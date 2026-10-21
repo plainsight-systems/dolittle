@@ -38,7 +38,8 @@
     <div class="wrap masthead-inner">
       <a class="brand" href="{{ site.Home.RelPermalink }}" aria-label="Dolittle home">Dolittle</a>
       <nav aria-label="Main navigation">
-        <a href="{{ "writing/" | relURL }}" {{ if eq .Section "writing" }}aria-current="{{ if .IsSection }}page{{ else }}true{{ end }}"{{ end }}>Writing</a>
+        <a href="{{ "writing/running-an-investigation/" | relURL }}" {{ if eq .RelPermalink (("writing/running-an-investigation/" | relURL)) }}aria-current="page"{{ end }}>Run Dolittle</a>
+        <a href="{{ "writing/" | relURL }}" {{ if and (eq .Section "writing") (ne .RelPermalink ("writing/running-an-investigation/" | relURL)) }}aria-current="{{ if .IsSection }}page{{ else }}true{{ end }}"{{ end }}>Writing</a>
         <a href="{{ "about/" | relURL }}" {{ if eq .Section "about" }}aria-current="page"{{ end }}>About</a>
         {{ with site.Params.repository }}<a href="{{ . }}">Code <span aria-hidden="true">↗</span></a>{{ end }}
       </nav>

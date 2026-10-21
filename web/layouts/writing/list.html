@@ -1,7 +1,6 @@
 {{ define "main" }}
 <section class="wrap page-space">
-  <header class="page-header"><p class="eyebrow">From the workbench</p><h1>Writing</h1><div class="lead">{{ .Content }}</div><a class="text-link" href="{{ "writing/index.xml" | relURL }}">Follow by RSS <span aria-hidden="true">↗</span></a></header>
+  <header class="page-header"><p class="eyebrow">Dolittle</p><h1>Writing</h1><div class="lead">{{ .Content }}</div><a class="text-link" href="{{ "writing/index.xml" | relURL }}">Follow by RSS <span aria-hidden="true">↗</span></a></header>
   <div class="writing-list">{{ range .RegularPages.ByDate.Reverse }}{{ partial "writing-entry.html" (dict "page" . "heading" "h2") }}{{ end }}</div>
-  <div class="index-note"><h2>Explanations, explorations, milestones.</h2><p>An explanation opens up a mechanism. An exploration follows a question or a decision. A milestone records something that works. They share a place here because understanding grows between the checkpoints, too.</p></div>
 </section>
 {{ end }}

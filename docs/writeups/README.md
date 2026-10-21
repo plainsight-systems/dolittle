@@ -24,9 +24,20 @@ belongs in the site's publication list. Only listed, non-draft articles whose
 date has arrived enter the generated site and RSS. Removing `draft = true`
 prepares an article for the next build; it does not deploy the site.
 
+When revising a published article, preserve `date` and add `lastmod` with a
+time-zone-qualified timestamp. The article and index show its updated date.
+Date later additions explicitly when they describe work after the original
+publication, so current capabilities do not read as historical results.
+
 Use level-two headings for sections and relative Hugo links between articles,
 for example `{{< relref "/writing/two-views-of-a-thinking-model/" >}}`.
 The site provides the title, byline, date, reading time, and contents navigation.
+
+Walkthroughs should show the actual application at the steps being explained.
+Keep source screenshots in `web/assets/walkthrough/` and use the `screenshot`
+shortcode with `src`, `alt`, and `caption`. It generates responsive WebP images
+and links to the full-size capture. Captions identify the controls and describe
+the captured run; do not present a particular sample as an expected result.
 
 Separate measured results from plans and interpretations. Attribute reference
 runs to the reference implementation. Neither the thinking text nor the NLA

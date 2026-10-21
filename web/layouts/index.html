@@ -7,29 +7,29 @@
 <div class="hero-art"><img src="{{ $medium.RelPermalink }}" srcset="{{ $small.RelPermalink }} 800w, {{ $medium.RelPermalink }} 1440w, {{ $large.RelPermalink }} 2172w" sizes="100vw" width="2172" height="724" fetchpriority="high" alt="An engraved green parrot speaks into a brass horn as glowing marks become handwriting in an open notebook."></div>
 <div class="wrap">
   <section class="intro" aria-labelledby="project-title">
-    <div><p class="eyebrow">Thinking text &amp; internal activations</p><h1 id="project-title">Dolittle</h1><p class="intro-deck">Two views of a thinking model.<br>Room to explore what they tell us.</p><p class="byline">By <a href="https://andrewphunter.com/">Andrew Hunter</a></p></div>
-    <div class="intro-note"><p>I read Anthropic’s paper on natural language autoencoders and thought it would be a fun experiment to build: put a model’s generated thinking beside interpretations of its internal activations, and make both easy to explore.</p><a class="text-link" href="{{ "writing/two-views-of-a-thinking-model/" | relURL }}">Start with the idea <span aria-hidden="true">→</span></a></div>
+    <div><p class="eyebrow">Thinking text &amp; internal activations</p><h1 id="project-title">Dolittle</h1><p class="intro-deck">Read a model’s thinking.<br>Explore the activations behind it.</p><p class="byline">By <a href="https://andrewphunter.com/">Andrew Hunter</a></p></div>
+    <div class="intro-note"><p>Dolittle puts Qwen’s generated thinking beside descriptions of the numbers it processes internally. Select a token, read an explanation, then edit it to explore how the next output changes. The experiment follows Anthropic’s work on natural language autoencoders.</p><a class="text-link" href="{{ "writing/two-views-of-a-thinking-model/" | relURL }}">Start with the idea <span aria-hidden="true">→</span></a></div>
   </section>
 
   <section class="writing-section" aria-labelledby="writing-heading">
-    <div class="section-heading"><h2 id="writing-heading">From the workbench</h2><a href="{{ "writing/" | relURL }}">All writing <span aria-hidden="true">→</span></a></div>
+    <div class="section-heading"><h2 id="writing-heading">Explore Dolittle</h2><a href="{{ "writing/" | relURL }}">All writing <span aria-hidden="true">→</span></a></div>
     {{ $pages := where site.RegularPages "Section" "writing" }}
     {{ range first 3 ($pages.ByDate.Reverse) }}{{ partial "writing-entry.html" (dict "page" . "heading" "h3") }}{{ end }}
   </section>
 
   <section class="observation" aria-labelledby="observation-heading">
-    <div class="section-intro"><p class="eyebrow">One captured moment</p><div><h2 id="observation-heading">The same point. A different description.</h2><p>In this reference run, a key has moved from a drawer to a coat pocket. The model’s thinking and the NLA’s description take us to different places.</p></div></div>
+    <div class="section-intro"><p class="eyebrow">One captured moment</p><div><h2 id="observation-heading">Where did the key go?</h2><p>The prompt moves a key from a drawer to a coat pocket. Qwen follows that move in its thinking. The NLA describes a suitcase in Mexico City.</p></div></div>
     {{ with site.Data.observation }}
     <div class="two-views">
       <div><p class="eyebrow">Target · thinking text</p><blockquote>{{ .thinking }}</blockquote></div>
       <div><p class="eyebrow">NLA · activation interpretation</p><blockquote>{{ .interpretation }}</blockquote></div>
     </div>
-    <p class="caption">Exact excerpts from the Qwen3 8B reference run · {{ .date }} · block {{ .layer }}, position {{ .position }}. Shortened excerpts, not a live demo.</p>
+    <p class="caption">Excerpts from the initial Qwen3 8B PyTorch experiment · {{ .date }} · block {{ .layer }}, position {{ .position }}.</p>
     {{ end }}
-    <p class="observation-reading">We can check that the transcript says “coat pocket.” Establishing what the activation represents takes more than comparing those words.</p>
-    <a class="text-link" href="{{ "writing/two-views-of-a-thinking-model/#when-the-views-disagree" | relURL }}">How to read a disagreement <span aria-hidden="true">→</span></a>
+    <p class="observation-reading">The NLA picks up the task of locating the key, but invents a different story around it. Dolittle lets us sample the same activation again and compare nearby tokens to see how the description changes.</p>
+    <a class="text-link" href="{{ "writing/two-views-of-a-thinking-model/#when-the-views-disagree" | relURL }}">Read the example <span aria-hidden="true">→</span></a>
   </section>
 
-  <section class="workbench" aria-labelledby="workbench-heading"><p class="eyebrow">The build</p><div><h2 id="workbench-heading">First, a pair we can run.</h2><p>Qwen3 8B and its NLA pair have run on a 24 GB RTX 3090 Ti. Next comes the C++/CUDA engine and a browser interface for inspecting a generation. Explanations and explorations will accompany the work; milestones will mark capabilities we can use.</p><p class="status-note">Reference runs complete. NVIDIA first; Metal planned next. AMD support is undecided. The engine and live interface are still to come.</p><a class="text-link" href="{{ "about/" | relURL }}">About the project <span aria-hidden="true">→</span></a></div></section>
+  <section class="workbench" aria-labelledby="workbench-heading"><p class="eyebrow">Run the experiment</p><div><h2 id="workbench-heading">Try changing the next line.</h2><p>Ask Qwen to finish a rhyming couplet. Read an NLA explanation at the end of the first line, edit an idea it describes, and compare what the model writes next. The walkthrough covers setup and each step of the experiment.</p><p class="status-note">Available on Linux/NVIDIA, built from source through Docker. Verified on a 24 GB RTX 3090 Ti. Metal on macOS is planned next; AMD support is undecided.</p><a class="text-link" href="{{ "writing/running-an-investigation/" | relURL }}">Try the rhyming experiment <span aria-hidden="true">→</span></a></div></section>
 </div>
 {{ end }}
