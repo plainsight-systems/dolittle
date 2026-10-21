@@ -35,7 +35,7 @@
     },
     {
       "name": "metal-debug",
-      "displayName": "Native Metal foundation (Debug)",
+      "displayName": "Native Metal engine (Debug)",
       "inherits": "host-debug",
       "binaryDir": "${sourceDir}/build/metal-debug",
       "condition": {
@@ -46,6 +46,15 @@
       "cacheVariables": {
         "DOLITTLE_METAL": true,
         "CMAKE_OSX_DEPLOYMENT_TARGET": "26.0"
+      }
+    },
+    {
+      "name": "metal-release",
+      "displayName": "Native Metal engine (Release)",
+      "inherits": "metal-debug",
+      "binaryDir": "${sourceDir}/build/metal-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
       }
     }
   ],
@@ -61,6 +70,10 @@
     {
       "name": "metal-debug",
       "configurePreset": "metal-debug"
+    },
+    {
+      "name": "metal-release",
+      "configurePreset": "metal-release"
     }
   ],
   "testPresets": [

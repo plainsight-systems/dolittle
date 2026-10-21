@@ -14,9 +14,12 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <iostream>
+#include <random>
 #include <thread>
 #include <vector>
 
@@ -27,12 +30,154 @@
 #include "gpu/metal/support.h"
 #include "inference/decoding/device.h"
 #include "tests/support/check.h"
+int device_contracts();
 namespace {
 namespace gpu = dolittle::gpu;
 namespace inference = dolittle::inference;
 namespace tests = dolittle::tests;
 using Sequence = inference::DeviceSequence;
 using Access = gpu::detail::BackendAccess;
+void numeric(gpu::Device& device) {
+  struct Vector {
+    std::uint64_t a, b, operation;
+  };
+  std::vector<Vector> vectors;
+  const std::array<std::uint64_t, 18> boundaries{0,
+                                                 0x8000000000000000ULL,
+                                                 1,
+                                                 0x000fffffffffffffULL,
+                                                 0x0010000000000000ULL,
+                                                 0x0010000000000001ULL,
+                                                 0x3ff0000000000000ULL,
+                                                 0x3ff0000000000001ULL,
+                                                 0x3fefffffffffffffULL,
+                                                 0x3c90000000000000ULL,
+                                                 0x3ca0000000000000ULL,
+                                                 0x7fefffffffffffffULL,
+                                                 0x7ff0000000000000ULL,
+                                                 0xfff0000000000000ULL,
+                                                 0x7ff8000000000000ULL,
+                                                 0xbff0000000000000ULL,
+                                                 0x8000000000000001ULL,
+                                                 0xffefffffffffffffULL};
+  for (auto a : boundaries) {
+    for (auto b : boundaries) {
+      for (unsigned op = 0; op < 7; ++op) vectors.push_back({a, b, op});
+    }
+  }
+  // Fixed pseudorandom bits cover the full exponent range, independent of the
+  // production generator and arithmetic. Expected results use native IEEE64.
+  std::mt19937_64 random(195711);  // NOLINT(bugprone-random-generator-seed)
+  for (std::size_t i = 0; i < 4096; ++i) {
+    const auto a = random(), b = random();
+    for (unsigned op = 0; op < 7; ++op) vectors.push_back({a, b, op});
+    const double x =
+        -745.0 + 1454.0 * static_cast<double>(random() >> 11) * 0x1p-53;
+    vectors.push_back({std::bit_cast<std::uint64_t>(x), 0, 7});
+    const double base =
+        std::exp2(-30.0 + 60.0 * static_cast<double>(random() >> 11) * 0x1p-53);
+    const double power = static_cast<double>(random() >> 11) * 0x1p-53;
+    vectors.push_back({std::bit_cast<std::uint64_t>(base),
+                       std::bit_cast<std::uint64_t>(power), 8});
+  }
+  for (std::size_t i = 0; i <= 100000; ++i) {
+    const auto x = static_cast<double>(
+        static_cast<float>(-105.0 * static_cast<double>(i) / 100000.0));
+    vectors.push_back({std::bit_cast<std::uint64_t>(x), 0, 9});
+    const auto norm = static_cast<double>(static_cast<float>(
+        std::exp2(-24.0 + 48.0 * static_cast<double>(i) / 100000.0)));
+    vectors.push_back({std::bit_cast<std::uint64_t>(norm), 0, 10});
+  }
+  const auto bytes = vectors.size() * sizeof(Vector),
+             out_bytes = vectors.size() * sizeof(std::uint64_t);
+  auto queue = device.create_queue();
+  auto input = device.allocate({bytes, 8});
+  auto output = device.allocate({out_bytes, 8});
+  auto upload = device.allocate_staging({bytes, 8});
+  auto readback = device.allocate_staging({out_bytes, 8});
+  std::memcpy(upload.bytes().data(), vectors.data(), bytes);
+  queue.upload({&input, 0, bytes}, {&upload, 0, bytes});
+  const std::array bindings{
+      Access::binding(gpu::ConstDeviceRegion{&input, 0, bytes}, device),
+      Access::binding(gpu::DeviceRegion{&output, 0, out_bytes}, device)};
+  auto pipeline = gpu::metal::pipeline(device, DOLITTLE_METAL_TEST_LIBRARY,
+                                       "fixture_binary64");
+  Access::dispatch(queue, device, *pipeline, bindings, {vectors.size(), 1, 1},
+                   {128, 1, 1});
+  queue.download({&readback, 0, out_bytes}, {&output, 0, out_bytes});
+  queue.wait(queue.mark());
+  std::vector<std::uint64_t> result(vectors.size());
+  std::memcpy(result.data(), readback.bytes().data(), out_bytes);
+  std::size_t failures = 0;
+  for (std::size_t i = 0; i < vectors.size(); ++i) {
+    const auto v = vectors.at(i);
+    const auto a = std::bit_cast<double>(v.a), b = std::bit_cast<double>(v.b);
+    double expected = 0;
+    switch (v.operation) {
+      case 0:
+        expected = a + b;
+        break;
+      case 1:
+        expected = a - b;
+        break;
+      case 2:
+        expected = a * b;
+        break;
+      case 3:
+        expected = a / b;
+        break;
+      case 4:
+        expected = std::sqrt(a);
+        break;
+      case 5:
+        expected = static_cast<float>(a);
+        break;
+      case 6:
+        expected = std::bit_cast<float>(static_cast<std::uint32_t>(v.a));
+        break;
+      case 7:
+        expected = std::exp(a);
+        break;
+      case 8:
+        expected = std::pow(a, b);
+        break;
+      case 9:
+        expected = static_cast<float>(std::exp(a));
+        break;
+      case 10:
+        expected = static_cast<float>(1.0 / std::sqrt(a));
+        break;
+      default:
+        throw std::logic_error("bad numeric vector");
+    }
+    const auto actual_bits = result.at(i);
+    const auto expected_bits =
+        (v.operation == 5 || v.operation >= 9)
+            ? static_cast<std::uint64_t>(
+                  std::bit_cast<std::uint32_t>(static_cast<float>(expected)))
+            : std::bit_cast<std::uint64_t>(expected);
+    const double actual = (v.operation == 5 || v.operation >= 9)
+                              ? static_cast<double>(std::bit_cast<float>(
+                                    static_cast<std::uint32_t>(actual_bits)))
+                              : std::bit_cast<double>(actual_bits);
+    const auto distance = actual_bits > expected_bits
+                              ? actual_bits - expected_bits
+                              : expected_bits - actual_bits;
+    if (!(std::isnan(expected) && std::isnan(actual)) &&
+        distance > (v.operation >= 7 && v.operation <= 9 ? 1U : 0U)) {
+      if (failures++ < 8) {
+        std::cerr << "numeric op=" << v.operation << " a=" << std::hex << v.a
+                  << " b=" << v.b << " actual=" << actual_bits
+                  << " expected=" << expected_bits << std::dec << '\n';
+      }
+    }
+  }
+  std::cout << "numeric vectors=" << vectors.size() << " failures=" << failures
+            << '\n';
+  tests::check(!failures,
+               "Metal scalar arithmetic matches independent IEEE/libm vectors");
+}
+
 void resources(gpu::Device& device) {
   const auto page = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
   auto queue = device.create_queue();
@@ -191,6 +336,8 @@ int main() {
             memory.max_allocation_bytes > 0,
         "Metal memory capabilities");
     std::cout << device->info().name << '\n';
+    numeric(*device);
+    if (device_contracts()) return 1;
     resources(*device);
     sequence(*device, 8, 0, false);
     sequence(*device, 8, 8, false);

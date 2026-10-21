@@ -56,7 +56,11 @@
 #include <stdexcept>
 
 #include "diagnostics/allocation.h"
+#ifdef DOLITTLE_TEST_METAL
+#include "gpu/metal/device.h"
+#else
 #include "gpu/cuda/device.h"
+#endif
 #include "inference/cache/contiguous.h"
 #include "inference/decoding/device.h"
 #include "inference/injection/device.h"
@@ -72,8 +76,16 @@ namespace gpu = dolittle::gpu;
 using dolittle::tests::check;
 using dolittle::tests::expect_throws;
 
+#ifdef DOLITTLE_TEST_METAL
+int device_contracts() try {
+#else
 int main() try {
+#endif
+#ifdef DOLITTLE_TEST_METAL
+  auto device = gpu::metal::open_device();
+#else
   auto device = gpu::cuda::open_device(0);
+#endif
   constexpr auto fp32 = tensors::ElementType::float32;
   const std::array layouts{
       tensors::contiguous_layout(fp32, std::array<std::size_t, 2>{4, 2}),
@@ -173,7 +185,11 @@ int main() try {
       [&] { gather.submit(queue, bindings, {&copied, 0, 4}); });
 
   {
+#ifdef DOLITTLE_TEST_METAL
+    auto foreign_device = gpu::metal::open_device();
+#else
     auto foreign_device = gpu::cuda::open_device(0);
+#endif
     auto foreign_buffer = foreign_device->allocate({64, 64});
     auto foreign_queue = foreign_device->create_queue();
     expect_throws<std::invalid_argument>(
@@ -509,6 +525,7 @@ int main() try {
                               {"architecture", device->info().architecture},
                               {"driver_api", device->info().driver_version}};
   std::cout << report.dump() << '\n';
+  return 0;
 } catch (const std::exception& error) {
   return dolittle::tests::report_failure(error.what());
 } catch (...) {

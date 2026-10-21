@@ -1,4 +1,9 @@
 /*
+ * Native application and numerical acceptance design, 2026-10-21:
+ * Core I.1 (#ri-explicit) makes backend selection and comparison policy
+ * explicit. Performance GPU.1 (guidelines/gpu/GPU.1-keep-data-on-device.md)
+ * keeps production inference on the GPU; test metrics consume completed
+ * readbacks. Both local corpora queried and read for design and implementation.
  * Steering composition: open the optional pinned AR archive with its own
  * tokenizer/provenance and separate value head. Providers bind one model role
  * at a time; Run schedules GPU residency. Setup verifies all three roles once.
@@ -8,7 +13,12 @@
  * before execution (guidelines/memory/MEM.9-embedded-allocate-at-init.md).
  * Both local corpora queried and full rules read.
  *
- * Axis D2: Linux/NVIDIA composition of the live experiment application.
+ * Native composition contract: compile one GPU backend into the application.
+ * Metal opens the default Apple GPU; CUDA accepts a device ordinal. Session
+ * owns device lifetime and Run admits memory against its working-set snapshot.
+ * Retain idle model weights when the complete next request fits that budget.
+ * No new per-token allocation, transfer or CPU computation is introduced.
+ * Axis D2: native GPU composition of the live experiment application.
  * Contract: local operator chooses the manifest/cache/assets, GPU ordinal and
  * listener. HTTP clients cannot change these inputs. Secrets come from a local
  * token file, not model metadata. Hashes are verified by setup when the trusted
@@ -29,13 +39,13 @@
  * binding failure unwinds these owners. Model/provider failures are reported
  * without fallback.
  *
- * Cost: two persistent read-only archive mappings, at most eight parallel file
- * checks (four per role) only for direct sha256 mode. Prepared mode reads
+ * Cost: three persistent read-only archive mappings, at most twelve parallel
+ * file checks (four per role) only for direct sha256 mode. Prepared mode reads
  * bounded metadata without a full payload scan. Mapped pages are
  * OS-reclaimable; mapping size is distinct from heap admission and physical
  * RSS. Charge both archive metadata allowances plus per-run text/pair metadata.
  * Optimization: providers share verified mappings across all turns and role
- * switches. Only the active role's weights are uploaded/resident on the GPU.
+ * switches. Idle weights remain on the GPU when the next complete request fits.
  * Target capacity is P+G <= 8192 (prompt plus generated tokens); Run rejects
  * oversize requests before upload. AV capacity remains independent at 512.
  * At the target ceiling, KV uses 147456*8192 = 1.125 GiB and raw captures
@@ -89,11 +99,16 @@
 #include <fstream>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <thread>
 
 #include "bounds.h"
+#ifdef DOLITTLE_METAL
+#include "gpu/metal/device.h"
+#else
 #include "gpu/cuda/device.h"
+#endif
 #include "inference/sampling/categorical.h"
 #include "models/qwen3/checkpoint.h"
 #include "nla/pairs/qwen3_8b.h"
@@ -123,7 +138,13 @@ constexpr auto publication_mib = 128;
 constexpr auto max_id_bytes = 128;
 constexpr auto pair_template_tokens = 4096;
 constexpr auto hex_shift = 4;
-constexpr auto device_gib = 23;
+#ifdef DOLITTLE_METAL
+constexpr auto backend_name = "metal";
+constexpr auto device_budget = std::numeric_limits<std::size_t>::max();
+#else
+constexpr auto backend_name = "cuda";
+constexpr std::size_t device_budget = 23ULL * 1024 * 1024 * 1024;
+#endif
 constexpr auto tokenizer_mib = 128;
 constexpr auto metadata_mib = 256;
 constexpr auto target_context = 8192;
@@ -135,7 +156,6 @@ constexpr auto event_limit = 32768;
 constexpr auto maximum_port = 65535;
 constexpr auto text_byte_limit = 65536;
 constexpr auto request_byte_limit = 131072;
-constexpr auto qwen3_vocabulary = 151936;
 namespace tensors = dolittle::tensors;
 namespace tokenizers = dolittle::tokenizers;
 namespace text = dolittle::text;
@@ -275,7 +295,7 @@ experiment::RunInputs inputs(const Sources& sources) {
                                std::move(av_text.tokenizer),
                                std::move(target_text.protocol),
                                {},
-                               "cuda",
+                               backend_name,
                                (metadata_mib + 2 * tokenizer_mib) * mib,
                                inference::sampling::Execution::device};
   if (ar_archive) {
@@ -367,7 +387,13 @@ int main(int argc, char** argv) try {
   }
   const int ordinal =
       args.contains("--device") ? integer(args.at("--device")) : 0;
-  const experiment::RunLimits limits{device_gib * gib,
+#ifdef DOLITTLE_METAL
+  if (ordinal != 0) {
+    throw std::invalid_argument(
+        "Metal uses the default Apple GPU (--device 0)");
+  }
+#endif
+  const experiment::RunLimits limits{device_budget,
                                      gib,
                                      prefill_chunk,
                                      target_context,
@@ -393,12 +419,16 @@ int main(int argc, char** argv) try {
                                              verification_started)
                    .count()
             << " seconds; retaining read-only mappings.\n";
-  experiment::Session session(
-      {[ordinal] { return gpu::cuda::open_device(ordinal); },
-       [sources] { return inputs(sources); },
-       limits,
-       {max_commands, max_jobs, max_receipts, event_limit,
-        publication_mib * mib, max_page_events, mib, max_readers}});
+  experiment::Session session({
+#ifdef DOLITTLE_METAL
+      [] { return gpu::metal::open_device(); },
+#else
+      [ordinal] { return gpu::cuda::open_device(ordinal); },
+#endif
+      [sources] { return inputs(sources); },
+      limits,
+      {max_commands, max_jobs, max_receipts, event_limit, publication_mib * mib,
+       max_page_events, mib, max_readers}});
   const auto host = args.at("--host");
   server::HttpOptions options{
       args.at("--bind"),
@@ -413,7 +443,7 @@ int main(int argc, char** argv) try {
       socket_timeout_ms,
       {request_byte_limit, mib, max_jobs, max_id_bytes},
       limits,
-      "cuda",
+      backend_name,
       "Qwen3-8B / Qwen3-8B-nla"};
   options.steering_available = static_cast<bool>(sources.reconstructor);
   server::Server server(session, std::move(options));

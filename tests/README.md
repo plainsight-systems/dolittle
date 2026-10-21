@@ -1,5 +1,15 @@
 # Verification
 
+The target numerical workflow includes isolated operation checks against
+independent FP32 equations with explicit BF16 rounding. Their published
+operation/dtype elementwise tolerances and scope are defined in the
+[numerical portability contract](../docs/architecture/numerical-portability.md).
+Reports keep these separate from the unchanged frozen full-model absolute and
+relative L2 checks. Metal reports whole-model differences without failing on that budget; CUDA
+continues enforcing it. Operation accuracy, finite/structurally valid outputs and
+exact same-backend full/cached comparisons remain required. No additional integration scenario
+is registered.
+
 Follow the [test scope and stability rules](../docs/process/workflow.md#test-scope-and-stability).
 Unit tests call isolated code in process and check stable contracts/invariants;
 they do not launch systems or depend on private implementation details.
@@ -339,15 +349,14 @@ checks into unit tests does not remove their use in actual publication builds.
 Each retained integration scenario covers one component interaction; isolated
 negative guards do not consume integration slots.
 
-## Native Metal foundation
+## Native Metal application
 
-The `metal-debug` preset builds the execution foundation on Apple silicon with
-macOS 26+, Xcode's Metal compiler and OpenSSL 3. It fetches pinned `metal-cpp`
-headers. Full Metal transformer kernels and the native application launcher
-follow this foundation; the preset does not yet build a working inference app.
+The `metal-debug` and `metal-release` presets build the application and its
+verification drivers on Apple Silicon with macOS 26+, Xcode's Metal compiler
+and OpenSSL 3. CMake fetches pinned `metal-cpp` headers.
 
 ```sh
-cmake --preset metal-debug
+cmake --preset metal-debug -DDOLITTLE_GENERATION_FIXTURES=/path/to/frozen-fixtures
 cmake --build --preset metal-debug --parallel
 ctest --test-dir build/metal-debug --output-on-failure
 python3 scripts/check.py tidy --build-dir build/metal-debug
@@ -355,10 +364,40 @@ MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR
   build/metal-debug/test_device
 ```
 
-Metal uses the existing `integration.device` workflow slot. It checks native
+Metal reuses the existing device, tiny, 8B and application workflow slots. The
+model workflows include AV interpretation and AR steering. Use `--target-only`
+only for a focused target diagnostic. Run the complete source launcher flow with:
+
+```sh
+python3 tests/integration/test_application.py --native-source --cache models
+```
+
+For Metal target comparisons, use fixtures from the independent oracle running through
+MPS on the same Apple GPU; see [reference setup](../scripts/README.md#independent-reference-fixtures).
+Their weights, tokens, selections and numeric limits match the original CUDA
+fixtures, while expected values come from MPS. The frozen CUDA comparison
+remains a cross-backend diagnostic. The MPS oracle is frozen at batch size one:
+exact replay and prefix identity are required; peer-batch variation is reported
+separately. Run the default native tests as well as the validation-layer
+invocation above. Current validation status is recorded in the work queue.
+
+Row reports retain their frozen absolute/relative-L2 verdicts and include
+additional `diagnostics`: cosine similarity, actual/reference norm ratio and
+NMSE. Logit rows also report temperature-one KL(reference || actual), total
+variation, argmax IDs and their reciprocal ranks. These reuse completed test
+readbacks outside inference timing. They do not change acceptance limits or
+oracle precision. See [whole-model comparisons](../docs/architecture/numerical-portability.md#whole-model-comparisons)
+for the accepted policy. Whole-model limit results remain visible; operation
+accuracy, finite outputs and exact same-backend replay determine acceptance.
+NLA fixtures retain their independent CUDA provenance; no MPS NLA baseline is
+claimed. When relocating fixtures, change only their model-root paths and keep
+all expected values, weights, source identities and limits unchanged.
+
+The device workflow checks native
 resource/view transfers, prepared autonomous progress with collection delayed
 until completion, capture positions, final-token consumption, EOS, forward-only
-execution and cancellation. The three new pure units cover model retention,
+execution and cancellation, full-vocabulary GPU sampling, RNG continuation
+and independent scalar-math vectors. Three pure units cover model retention,
 view placement and bounded sequence planning. The integration inventory stays
 at five; backend selection changes the device implementation under test.
 

@@ -3,8 +3,16 @@
 `app/` is served by the C++ inference service. `web/` is the independent public
 project site. The browser has no inference dependencies or build step.
 
-On Linux with an NVIDIA GPU, a compatible driver, Docker Compose and NVIDIA
-Container Toolkit configured:
+Use the same source launcher on Linux/NVIDIA or macOS/Apple Silicon:
+
+- Linux: a compatible NVIDIA driver, Docker Compose and NVIDIA Container Toolkit.
+- Mac: Apple Silicon, macOS 26+, Xcode 26 with the Metal toolchain, CMake 3.24+
+  and OpenSSL 3 development files. Install the command-line dependencies with
+  `brew install cmake openssl@3`; select Xcode with `xcode-select` and install its
+  Metal toolchain with `xcodebuild -downloadComponent MetalToolchain`.
+
+On a Mac the launcher builds `metal-release` incrementally and runs natively.
+On Linux it builds and runs the Docker image.
 
 ```sh
 python3 scripts/run.py
@@ -22,7 +30,9 @@ verifying SHA-256 before saving a setup receipt. Later launches check the receip
 and file metadata without rehashing the weights. Changed files or a new manifest
 trigger setup again. Rebuilding application code does not invalidate model setup.
 The service retains read-only mappings across experiments and uploads only the
-selected model. Keep cache files unchanged while the service runs.
+selected model. It keeps idle models on the GPU when the next complete request
+fits the memory budget, and releases them when space is needed. Keep cache files
+unchanged while the service runs.
 
 Use `python3 scripts/run.py --verify-models` to force full verification and repair,
 or `python3 scripts/models.py --cache /path/to/cache` to do that without launching.
@@ -33,7 +43,9 @@ Keep that process running. Model files live in `models/` by default; use
 `--cache /path/to/cache` to choose persistent storage and `--offline` to require
 all verified files to exist. The cache needs 44.9 GB (41.8 GiB) for the selected
 weights, plus space for metadata and a partial download. No application
-executable is downloaded. The initial hardware target is a 24 GB NVIDIA GPU.
+executable is downloaded. The NVIDIA target has 24 GB VRAM. Metal has been
+exercised on an M3 Max with 128 GB unified memory; admission uses the device
+working-set limit and accounts for mapped weights, caches and scratch.
 
 The source-built native developer path is explicit:
 
@@ -44,7 +56,7 @@ python3 scripts/run.py --native-binary build/cuda/dolittle
 
 The build runs in Docker; the second command executes on the Linux host and
 requires compatible CUDA runtime libraries. This path does not establish Docker
-GPU support. Metal execution is planned, and AMD remains undecided.
+GPU support. AMD remains undecided.
 
 The default listener is loopback. To use another machine's browser, either
 forward the same port over SSH or explicitly opt into a trusted LAN:

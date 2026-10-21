@@ -139,6 +139,39 @@ python3 -m unittest discover -s tests -p test_tidy.py
 
 ## Independent reference fixtures
 
+For native Metal comparisons, run the independent oracle on the same Apple GPU.
+[`validation/mps_reference.py`](validation/mps_reference.py) imports the existing
+frozen reference functions unchanged. It verifies and reuses checkpoint files,
+token traces and numeric limits from existing fixtures, then freezes separately
+computed MPS outputs. Its output root must be new; it refuses to overwrite an
+existing fixture directory.
+
+```sh
+python3.12 -m venv .local/mps-oracle-venv
+.local/mps-oracle-venv/bin/python -m pip install -r scripts/validation/requirements-mps.lock
+.local/mps-oracle-venv/bin/python scripts/validation/mps_reference.py \
+  --output .local/mps-fixtures \
+  .cache/generation-fixtures/tiny-fp32/fixture.json \
+  .cache/generation-fixtures/tiny-bf16/fixture.json \
+  .cache/generation-fixtures/qwen3-8b-bf16/fixture.json
+```
+
+This requires native MPS and the pinned PyTorch 2.7.1 macOS wheel. CPU fallback,
+MPS fast math and forced alternate matmul kernels must be disabled. The wrapper
+unsets `PYTORCH_MPS_PREFER_METAL`: PyTorch 2.7.1 enables that option when the
+variable exists, including when its value is `0`. It records the literal
+environment values and PyTorch git revision. `PYTORCH_MPS_FAST_MATH=0` controls
+PyTorch-built Metal shaders; it does not expose Apple's MPSGraph compiler policy.
+The wrapper checks parameter placement/dtype, reference source hashes, exact single-sequence
+replay/prefix invariance and the original greedy trace before publishing each
+fixture. Peer-batch differences are recorded as diagnostics: Dolittle's execution
+contract covers one sequence, and MPS does not provide peer-batch identity here. A
+`frozen.json` manifest records fixture/source hashes, device, OS and package
+versions. Configure the Metal test build with this new fixture root. Preserve
+the CUDA root for CUDA acceptance and cross-backend diagnostic comparisons.
+
+CUDA fixture generation continues to use the original script below.
+
 [`validation/forward_reference.py`](validation/forward_reference.py) generates
 fixtures without calling Dolittle, using the pinned verification environment and
 CUDA by default (`--device cpu` also generates independent reference values
@@ -167,13 +200,6 @@ execution. It never regenerates or replaces a reference to clear a failure.
 Container mode mounts the AV fixture/model roots read-only in addition to the
 target fixtures; native and container paths must resolve to the recorded files.
 
-## Later application launch
-
-The planned `run.py` entry point will check Docker/GPU prerequisites, acquire
-and verify declared model files in a persistent cache, and launch the application.
-It is not implemented in this interpretation slice. Keep downloads out of image
-builds and never reset a user's checkout or existing model cache.
-
 ## Project site
 
 `python3 scripts/site.py serve` builds and serves the public project site on
@@ -184,9 +210,10 @@ checker, with a filesystem wrapper used after actual Hugo builds.
 
 ## Application launch
 
-`python3 scripts/run.py` builds the runtime image locally, checks Docker GPU
-access, prepares pinned artifacts once, then starts Compose and opens its
-private browser link. Subsequent launches reuse the setup receipt when the
+`python3 scripts/run.py` builds from source: Docker Compose on Linux/NVIDIA,
+or the native `metal-release` CMake preset on Apple Silicon. It prepares pinned
+artifacts once, starts the service and opens its private browser link. Native
+Metal requires macOS 26+, Xcode 26 with the Metal toolchain, CMake and OpenSSL 3. Subsequent launches reuse the setup receipt when the
 manifest and file metadata match, without hashing weight payloads.
 `--verify-models` forces full verification/repair before launch.
 `scripts/models.py --offline` fully verifies an existing cache

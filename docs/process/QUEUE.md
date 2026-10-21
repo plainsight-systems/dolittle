@@ -218,8 +218,17 @@ remains private.
   shared model retention. M3 device integration, 22 host units, Linux ASan/UBSan,
   tiny CUDA comparisons and native/forced-PTX pinned 8B comparisons pass with
   unchanged references. Strict builds, Google formatting and both static-analysis
-  passes are clean. Andrew approved committing this phase. Complete Metal target
-  kernels and frozen numerical comparison follow; no Metal inference app yet.
+  passes are clean. Foundation committed as `1006866`.
+- Target kernels, sampler and capture are implemented. Andrew accepted
+  diagnostic whole-model numerical budgets on 2026-10-21; independent operation
+  accuracy, finite/structurally valid outputs and exact replay/chunk invariance
+  remain required. Native-source investigation is complete. Preserve the frozen
+  references and measured differences; no more acceptance research is needed.
+- Native Metal application complete: source launcher, AV/AR and matched steering,
+  model retention and live streaming use the shared application contracts.
+  Strict Metal/CUDA builds, 22 host units, device/tiny/8B workflows, native
+  source-launch application, formatting and 68 Metal tidy entries pass. Tiny
+  target/AV/AR also passes Metal API validation. Accepted for commit and push.
 
 ## Later platform work
 

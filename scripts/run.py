@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Build Dolittle from source, verify models and launch its browser service.
 
-Default: Linux/NVIDIA through Docker Compose. --native-binary is an explicit
-source-built developer path and does not count as container GPU verification.
+Default: Linux/NVIDIA through Docker Compose; macOS/Apple Silicon builds natively.
+--native-binary selects an existing source-built developer binary.
 The host owns driver/toolkit installation. Never download application binaries.
 """
 import argparse
 import json
 import os
+import platform
 from pathlib import Path
 import secrets
 import subprocess
@@ -43,9 +44,19 @@ def main():
         parser.error('Invalid browser host')
     address = f'{host}:{args.port}'
     cache = args.cache.absolute()
-    if not args.native_binary:
+    native_binary = args.native_binary
+    if native_binary is None and sys.platform == 'darwin':
+        if platform.machine() != 'arm64' or int(platform.mac_ver()[0].split('.')[0]) < 26:
+            parser.error('Native Metal requires Apple Silicon and macOS 26 or later.')
+        if args.device != 0:
+            parser.error('Metal uses the default Apple GPU (--device 0).')
+        print('Building native Metal application from source...', flush=True)
+        subprocess.run(['cmake', '--preset', 'metal-release'], cwd=ROOT, check=True)
+        subprocess.run(['cmake', '--build', '--preset', 'metal-release', '--target', 'dolittle', '--parallel', str(min(os.cpu_count() or 2, 8))], cwd=ROOT, check=True)
+        native_binary = ROOT / 'build/metal-release/dolittle'
+    if native_binary is None:
         if sys.platform != 'linux':
-            parser.error('Run the inference launcher on Linux/NVIDIA; the browser can run on this Mac.')
+            parser.error('Supported launch hosts: Linux/NVIDIA or macOS/Apple Silicon.')
         subprocess.run(['docker', 'compose', 'version'], check=True)
         info = json.loads(subprocess.check_output(['docker', 'info', '--format', '{{json .}}']))
         if 'nvidia' not in info.get('Runtimes', {}):
@@ -62,8 +73,8 @@ def main():
         token_file.write_text(token)
         token_file.chmod(0o600)
         env = os.environ.copy()
-        if args.native_binary:
-            command = [str(args.native_binary.absolute()), '--manifest', str(ROOT / 'config/models.json'), '--cache', str(cache), '--assets', str(ROOT / 'app'), '--token-file', str(token_file), '--bind', args.bind, '--port', str(args.port), '--host', address, '--device', str(args.device), '--model-integrity', 'prepared']
+        if native_binary:
+            command = [str(native_binary.absolute()), '--manifest', str(ROOT / 'config/models.json'), '--cache', str(cache), '--assets', str(ROOT / 'app'), '--token-file', str(token_file), '--bind', args.bind, '--port', str(args.port), '--host', address, '--device', str(args.device), '--model-integrity', 'prepared']
         else:
             env.update(DOLITTLE_CACHE=str(cache), DOLITTLE_TOKEN_FILE=str(token_file), DOLITTLE_BIND=args.bind, DOLITTLE_PORT=str(args.port), DOLITTLE_HOST=address, DOLITTLE_DEVICE=str(args.device), DOLITTLE_MODEL_INTEGRITY='prepared')
             command = ['docker', 'compose', 'up', '--no-build', '--abort-on-container-exit']
@@ -93,7 +104,7 @@ def main():
         except KeyboardInterrupt:
             return 0
         finally:
-            if args.native_binary:
+            if native_binary:
                 process.terminate()
                 process.wait()
             else:

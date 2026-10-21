@@ -381,7 +381,9 @@ void DeviceSequence::complete() {
   require(s.begun && !s.recording && !s.complete,
           "invalid sequence completion");
   for (std::size_t i = 0; i < s.bodies.size(); ++i) {
-    if (s.recorded.at(i)) s.bodies.at(i).seal(s.device);
+    if (s.recorded.at(i) && s.bodies.at(i).count()) {
+      s.bodies.at(i).seal(s.device);
+    }
   }
   for (const auto step : s.plan.steps) {
     if (step == kernels::metal::SequenceStep::finalize) continue;
@@ -480,6 +482,7 @@ PreparedSequenceResources DeviceSequence::prepared_resources() const {
       s.timeline->host_bytes() + s.cancellation->host_bytes();
   for (const auto& body : s.bodies) {
     command += body.command_bytes();
+    shared_bytes += body.parameter_bytes();
     metadata += body.host_bytes();
   }
   return {{private_bytes + shared_bytes + command, shared_bytes + metadata,

@@ -72,7 +72,10 @@ struct BackendAccess {
   static void record(Queue&, Device&, metal::CommandBody*);
   static void dispatch(Queue&, Device&, MTL::ComputePipelineState&,
                        std::span<const metal::BufferBinding>, MTL::Size,
-                       MTL::Size);
+                       MTL::Size, std::span<const std::byte> parameters = {},
+                       std::size_t threadgroup_bytes = 0);
+  static std::shared_ptr<MTL::ComputePipelineState> pipeline(
+      Device&, const char* library, const char* name, bool indirect);
   static void poison(Device&) noexcept;
   static void drain_noexcept(Device&) noexcept;
 };

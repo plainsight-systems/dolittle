@@ -178,7 +178,7 @@ if(DOLITTLE_CUDA)
         dolittle_warnings(test_device)
         add_test(NAME integration.device COMMAND test_device)
         set_tests_properties(integration.device PROPERTIES LABELS integration RUN_SERIAL TRUE)
-        add_executable(test_generation tests/gpu/test_generation.cpp tests/gpu/forward_reference.cpp tests/gpu/interpretation.cpp)
+        add_executable(test_generation tests/gpu/test_generation.cpp tests/gpu/forward_reference.cpp tests/gpu/interpretation.cpp tests/gpu/operator_reference.cpp)
         if(DOLITTLE_ALLOCATION_CHECKS)
             target_sources(test_generation PRIVATE src/diagnostics/allocation.cpp)
             target_sources(test_device PRIVATE src/diagnostics/allocation.cpp)
@@ -186,14 +186,6 @@ if(DOLITTLE_CUDA)
         target_include_directories(test_generation PRIVATE "${PROJECT_SOURCE_DIR}")
         target_link_libraries(test_generation PRIVATE dolittle_execution dolittle_numerical dolittle_cuda)
         dolittle_warnings(test_generation)
-        set(DOLITTLE_APPLICATION_CACHE "" CACHE PATH "Verified revision cache for live application integration")
-        if(DOLITTLE_APPLICATION_CACHE)
-            find_package(Python3 REQUIRED COMPONENTS Interpreter)
-            add_test(NAME integration.application COMMAND "${Python3_EXECUTABLE}"
-                "${PROJECT_SOURCE_DIR}/tests/integration/test_application.py"
-                --binary "$<TARGET_FILE:dolittle>" --cache "${DOLITTLE_APPLICATION_CACHE}")
-            set_tests_properties(integration.application PROPERTIES LABELS integration RUN_SERIAL TRUE)
-        endif()
         set(DOLITTLE_GENERATION_FIXTURES "" CACHE PATH "Independent generation fixture root")
         if(DOLITTLE_GENERATION_FIXTURES)
             add_test(NAME integration.generation_tiny COMMAND test_generation
@@ -207,7 +199,7 @@ if(DOLITTLE_CUDA)
     endif()
 endif()
 
-option(DOLITTLE_METAL "Build native Metal execution foundation" OFF)
+option(DOLITTLE_METAL "Build native Metal target execution" OFF)
 if(DOLITTLE_METAL)
     if(NOT APPLE OR DOLITTLE_CUDA)
         message(FATAL_ERROR "Metal requires macOS and cannot share a binary with CUDA")
@@ -220,36 +212,81 @@ if(DOLITTLE_METAL)
     add_library(dolittle_metal STATIC
         src/gpu/metal/metal_cpp.cpp src/gpu/metal/device.cpp
         src/gpu/metal/submission.cpp src/gpu/metal/commands.cpp
-        src/kernels/metal/decode.cpp)
+        src/kernels/metal/decode.cpp src/kernels/metal/operations.cpp
+        src/kernels/metal/sampling.cpp src/kernels/metal/injection.cpp
+        src/kernels/metal/steering.cpp)
     target_include_directories(dolittle_metal SYSTEM PUBLIC "${metal_cpp_SOURCE_DIR}")
     target_link_libraries(dolittle_metal PUBLIC dolittle_host "-framework Metal" "-framework Foundation")
     target_compile_options(dolittle_metal PUBLIC -fblocks)
     find_program(XCRUN xcrun REQUIRED)
     set(METAL_LIBRARY "${CMAKE_CURRENT_BINARY_DIR}/dolittle.metallib")
+    set(METAL_AIR_FILES)
+    foreach(kernel decode embedding projection normalization rotary attention elementwise sampling injection steering)
+        set(air "${CMAKE_CURRENT_BINARY_DIR}/${kernel}.air")
+        add_custom_command(OUTPUT "${air}"
+            COMMAND "${XCRUN}" -sdk macosx metal -std=metal4.0 -Wall -Wextra -Werror
+                -fno-fast-math -ffp-contract=off
+                -c "${PROJECT_SOURCE_DIR}/src/kernels/metal/${kernel}.metal" -o "${air}"
+            DEPENDS "src/kernels/metal/${kernel}.metal" src/kernels/metal/common.metal
+                src/kernels/metal/numeric.metal src/kernels/metal/elementary.metal VERBATIM)
+        list(APPEND METAL_AIR_FILES "${air}")
+    endforeach()
     add_custom_command(OUTPUT "${METAL_LIBRARY}"
-        COMMAND "${XCRUN}" -sdk macosx metal -std=metal4.0 -Wall -Wextra -Werror
-            -c "${PROJECT_SOURCE_DIR}/src/kernels/metal/decode.metal" -o "${CMAKE_CURRENT_BINARY_DIR}/decode.air"
-        COMMAND "${XCRUN}" -sdk macosx metallib "${CMAKE_CURRENT_BINARY_DIR}/decode.air" -o "${METAL_LIBRARY}"
-        DEPENDS src/kernels/metal/decode.metal VERBATIM)
+        COMMAND "${XCRUN}" -sdk macosx metallib ${METAL_AIR_FILES} -o "${METAL_LIBRARY}"
+        DEPENDS ${METAL_AIR_FILES} VERBATIM)
     add_custom_target(dolittle_metallib DEPENDS "${METAL_LIBRARY}")
     add_dependencies(dolittle_metal dolittle_metallib)
     target_compile_definitions(dolittle_metal PRIVATE DOLITTLE_METAL_LIBRARY="${METAL_LIBRARY}")
     dolittle_warnings(dolittle_metal)
+    add_executable(dolittle src/main.cpp)
+    target_compile_definitions(dolittle PRIVATE DOLITTLE_METAL=1)
+    target_link_libraries(dolittle PRIVATE dolittle_execution dolittle_http dolittle_metal)
+    if(DOLITTLE_ALLOCATION_CHECKS)
+        target_sources(dolittle PRIVATE src/diagnostics/allocation.cpp)
+    endif()
+    dolittle_warnings(dolittle)
     if(BUILD_TESTING)
         set(METAL_TEST_LIBRARY "${CMAKE_CURRENT_BINARY_DIR}/device-test.metallib")
         add_custom_command(OUTPUT "${METAL_TEST_LIBRARY}"
             COMMAND "${XCRUN}" -sdk macosx metal -std=metal4.0 -Wall -Wextra -Werror
-                -c "${PROJECT_SOURCE_DIR}/tests/gpu/device_metal.metal" -o "${CMAKE_CURRENT_BINARY_DIR}/device-test.air"
+                -fno-fast-math -ffp-contract=off -c "${PROJECT_SOURCE_DIR}/tests/gpu/device_metal.metal" -o "${CMAKE_CURRENT_BINARY_DIR}/device-test.air"
             COMMAND "${XCRUN}" -sdk macosx metallib "${CMAKE_CURRENT_BINARY_DIR}/device-test.air" -o "${METAL_TEST_LIBRARY}"
-            DEPENDS tests/gpu/device_metal.metal VERBATIM)
+            DEPENDS tests/gpu/device_metal.metal src/kernels/metal/numeric.metal src/kernels/metal/elementary.metal VERBATIM)
         add_custom_target(dolittle_test_metallib DEPENDS "${METAL_TEST_LIBRARY}")
-        add_executable(test_device tests/gpu/test_device_metal.cpp)
+        add_executable(test_device tests/gpu/test_device_metal.cpp tests/gpu/test_device.cpp)
         add_dependencies(test_device dolittle_test_metallib)
         target_include_directories(test_device PRIVATE "${PROJECT_SOURCE_DIR}")
         target_compile_definitions(test_device PRIVATE DOLITTLE_METAL_TEST_LIBRARY="${METAL_TEST_LIBRARY}")
-        target_link_libraries(test_device PRIVATE dolittle_metal)
+        target_link_libraries(test_device PRIVATE dolittle_execution dolittle_metal)
+        target_compile_definitions(test_device PRIVATE DOLITTLE_TEST_METAL=1)
         dolittle_warnings(test_device)
         add_test(NAME integration.device COMMAND test_device)
         set_tests_properties(integration.device PROPERTIES LABELS integration RUN_SERIAL TRUE TIMEOUT 120)
+        add_executable(test_generation tests/gpu/test_generation.cpp tests/gpu/forward_reference.cpp tests/gpu/interpretation.cpp tests/gpu/operator_reference.cpp)
+        target_include_directories(test_generation PRIVATE "${PROJECT_SOURCE_DIR}")
+        target_compile_definitions(test_generation PRIVATE DOLITTLE_TEST_METAL=1)
+        target_link_libraries(test_generation PRIVATE dolittle_execution dolittle_numerical dolittle_metal)
+        dolittle_warnings(test_generation)
+        set(DOLITTLE_GENERATION_FIXTURES "" CACHE PATH "Independent generation fixture root")
+        if(DOLITTLE_GENERATION_FIXTURES)
+            add_test(NAME integration.generation_tiny COMMAND test_generation
+                "${DOLITTLE_GENERATION_FIXTURES}/tiny-fp32/fixture.json"
+                "${DOLITTLE_GENERATION_FIXTURES}/tiny-bf16/fixture.json")
+            add_test(NAME integration.generation_8b COMMAND test_generation
+                "${DOLITTLE_GENERATION_FIXTURES}/qwen3-8b-bf16/fixture.json")
+            set_tests_properties(integration.generation_tiny integration.generation_8b
+                PROPERTIES LABELS integration RUN_SERIAL TRUE WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+        endif()
+    endif()
+endif()
+
+if(BUILD_TESTING AND TARGET dolittle)
+    set(DOLITTLE_APPLICATION_CACHE "" CACHE PATH "Verified revision cache for live application integration")
+    if(DOLITTLE_APPLICATION_CACHE)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        add_test(NAME integration.application COMMAND "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/integration/test_application.py"
+            --binary "$<TARGET_FILE:dolittle>" --cache "${DOLITTLE_APPLICATION_CACHE}")
+        set_tests_properties(integration.application PROPERTIES LABELS integration RUN_SERIAL TRUE)
     endif()
 endif()

@@ -9,8 +9,8 @@ generated reasoning beside natural language interpretations of its internal
 activations. One prompt, one generation, two views of the model working
 through it.
 
-The first engine targets Linux with CUDA and source builds in a pinned Docker
-environment. Metal on macOS is planned next; AMD support is undecided. The
+The engine runs on Linux/NVIDIA through a source-built Docker image and
+natively on Apple Silicon with Metal. AMD support is undecided. The
 browser interface lets you follow the thinking text and inspect activations
 captured at selected positions. The first hardware target is a
 24 GB Ampere GPU, with reference measurements on an RTX 3090 Ti. The selected
@@ -18,9 +18,9 @@ pairing is **Qwen3 8B with marco-bazzani's natural language autoencoder**,
 interpreting activations at block 24 (zero-based).
 
 **Status: generation, interpretation, steering and the live interface are implemented.** The
-C++20/CUDA engine loads verified checkpoints, formats and tokenizes Qwen3 prompts,
+C++20/CUDA/Metal engine loads verified checkpoints, formats and tokenizes Qwen3 prompts,
 generates with a contiguous KV cache, and retains configurable raw captures.
-It releases the target before loading the AV, normalizes a selected capture and
+It retains idle models when memory permits, normalizes a selected capture and
 replaces one AV embedding row, then retains each interpretation as a separate
 variant. AV weights stay resident between requests; each gets a fresh cache.
 A bounded HTTP session streams exact token progress, retains captures and
@@ -34,19 +34,21 @@ Container GPU execution requires the NVIDIA Container Toolkit. The current
 numerical scenarios cover short sequences; they do not establish full-context
 behavior or performance on other NVIDIA hardware.
 
-On Linux/NVIDIA, build and launch from source:
+On Linux/NVIDIA or macOS/Apple Silicon, build and launch from source:
 
 ```sh
 python3 scripts/run.py
 ```
 
 See [application setup](app/README.md) for driver/Container Toolkit requirements,
-persistent model storage, the native developer path and remote browser access.
+persistent model storage, native Metal prerequisites and remote browser access.
 The runtime image builds locally; no prebuilt application executable is fetched.
 Setup downloads and hash-verifies models once. Later launches reuse the prepared
 cache; `--verify-models` forces a full verification and repair.
 The Docker application flow is verified on the RTX 3090 Ti with NVIDIA
 Container Toolkit 1.20.1, including target generation and AV interpretation.
+The native Metal flow is verified on an M3 Max with 128 GB unified memory,
+including interpretation, reconstruction and matched steering.
 
 Development checks:
 
@@ -90,7 +92,7 @@ easy to interact with. Dolittle is R&D under Plainsight Systems LLC.
 
 | Path | Purpose |
 | --- | --- |
-| `src/` | C++20 and CUDA inference engine |
+| `src/` | C++20, CUDA and Metal inference engine |
 | `app/` | Browser interface served with the engine |
 | `web/` | Public project website |
 | `tests/` | Numerical, GPU, and application verification |

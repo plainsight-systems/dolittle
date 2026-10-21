@@ -1,6 +1,6 @@
 /*
- * Pure operation validation and CUDA preparation/submission implement this
- * catalog; mathematical kernels are supplied by the CUDA implementation files.
+ * Pure operation validation and backend preparation/submission implement this
+ * catalog; CUDA and Metal supply the mathematical kernels.
  * Axis X5: bounded mathematical operations and backend capability selection.
  * Contract: TensorId indexes the supplied layout table; invalid IDs, shapes,
  * strides, constants and unsupported modes fail with invalid_argument. Size
@@ -42,7 +42,17 @@
  * warp sums; attention dots use eight contiguous feature ranges. Attention
  * rounds normalized probabilities to FP32 before FMA accumulation of values.
  * These orders depend on feature widths and visible keys, never batch size or
- * cache chunking. Corpus consultation, numerical contract design, 2026-10-19:
+ * cache chunking. Repeatability and chunk invariance are exact on the same
+ * backend/hardware/build. Elementary FP32 functions use native backend math;
+ * identical bits across CUDA and Metal are not required. Accuracy is checked
+ * separately under docs/architecture/numerical-portability.md, preserving all
+ * storage/conversion points above. Contract consultation, 2026-10-21:
+ * cpp-guidelines I.1/I.7 (#ri-explicit/#ri-post) separates accuracy from
+ * replay; cpp-perf-guidelines GDSA.2 declares the determinism scope, with GPU.1
+ * keeping reference computation/readback outside inference. Sources:
+ * guidelines/gpu-dsa/GDSA.2-declare-each-reductions-determinism.md;
+ * guidelines/gpu/GPU.1-keep-data-on-device.md.
+ * Corpus consultation, numerical contract design, 2026-10-19:
  * cpp-guidelines I.7 (#ri-post): expose arithmetic guarantees to consumers.
  * cpp-perf-guidelines GDSA.2: state fixed reductions and invariance explicitly.
  * Source: guidelines/gpu-dsa/GDSA.2-declare-each-reductions-determinism.md.

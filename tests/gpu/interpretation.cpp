@@ -1,4 +1,9 @@
 /*
+ * Native application and numerical acceptance design, 2026-10-21:
+ * Core I.1 (#ri-explicit) makes backend selection and comparison policy
+ * explicit. Performance GPU.1 (guidelines/gpu/GPU.1-keep-data-on-device.md)
+ * keeps production inference on the GPU; test metrics consume completed
+ * readbacks. Both local corpora queried and read for design and implementation.
  * Steering verification extends the same target/AV experiment: independently
  * frozen AR vectors and difference direction, fresh replay at prompt/generated
  * positions, zero-strength control and changed-row comparisons. AR chunk sizes
@@ -251,7 +256,7 @@ std::vector<float> decode(std::span<const std::byte> bytes,
   return values;
 }
 Json compare(const Json& expected, std::span<const std::byte> bytes,
-             tensors::ElementType storage) {
+             tensors::ElementType storage, ModelComparisonPolicy policy) {
   const auto values = expected.at("values").get<std::vector<float>>();
   const auto actual = decode(bytes, storage);
   const auto& limit = expected.at("tolerance");
@@ -259,6 +264,7 @@ Json compare(const Json& expected, std::span<const std::byte> bytes,
       values, actual,
       {limit.at("max_absolute_error"), limit.at("max_relative_l2")});
   bool passed = m.passed;
+  bool accepted = accepts_model_comparison(m, policy);
   Json rows = Json::array();
   const auto width = expected.at("width").get<std::size_t>();
   for (std::size_t row = 0; row < expected.at("positions").size(); ++row) {
@@ -266,6 +272,7 @@ Json compare(const Json& expected, std::span<const std::byte> bytes,
         std::span(values).subspan(row * width, width),
         std::span(actual).subspan(row * width, width),
         {limit.at("max_absolute_error"), limit.at("max_relative_l2")});
+    accepted = accepted && accepts_model_comparison(metric, policy);
     passed = passed && metric.passed;
     rows.push_back(
         {{"position", expected.at("positions").at(row)},
@@ -276,6 +283,7 @@ Json compare(const Json& expected, std::span<const std::byte> bytes,
   }
   return {
       {"passed", passed},
+      {"accepted", accepted},
       {"kind", expected.contains("block") ? "capture" : "logits"},
       {"block", expected.value("block", Json(nullptr))},
       {"boundary", expected.value("boundary", Json(nullptr))},
@@ -300,7 +308,8 @@ experiment::ModelProvider provider(
 }
 }  // namespace
 Json check_interpretation(gpu::Device& device,
-                          const std::filesystem::path& target_fixture) {
+                          const std::filesystem::path& target_fixture,
+                          ModelComparisonPolicy policy) {
   const auto target = read(target_fixture);
   const auto av_path =
       target_fixture.parent_path().parent_path().parent_path() / "av-fixtures" /
@@ -491,7 +500,7 @@ Json check_interpretation(gpu::Device& device,
   // checks retention against the engine's own completed snapshot, not a new
   // zero-error requirement for the preexisting FP32 reference comparison.
   Json numerical = Json::array();
-  bool passed = target_metric.passed;
+  bool passed = accepts_model_comparison(target_metric, policy);
   std::vector<std::byte> full_av_logits;
   // The independent AV comparison owns another model outside Run's scheduler.
   // Release only idle weights before lending the device to that comparison;
@@ -534,13 +543,14 @@ Json check_interpretation(gpu::Device& device,
     full_av_logits.assign(result.logits().bytes.begin(),
                           result.logits().bytes.end());
     auto metric =
-        compare(reference.at("logits"), result.logits().bytes, storage);
-    passed = passed && metric.at("passed").get<bool>();
+        compare(reference.at("logits"), result.logits().bytes, storage, policy);
+    passed = passed && metric.at("accepted").get<bool>();
     numerical.push_back(metric);
     for (std::size_t i = 0; i < result.captures().size(); ++i) {
-      metric = compare(reference.at("captures").at(i),
-                       dolittle::at(result.captures(), i).bytes, storage);
-      passed = passed && metric.at("passed").get<bool>();
+      metric =
+          compare(reference.at("captures").at(i),
+                  dolittle::at(result.captures(), i).bytes, storage, policy);
+      passed = passed && metric.at("accepted").get<bool>();
       numerical.push_back(metric);
     }
   }
@@ -586,8 +596,8 @@ Json check_interpretation(gpu::Device& device,
       pos += n;
       if (result.next_logits) {
         auto m = compare(steps.at(0).at("logits"), result.next_logits->bytes,
-                         storage);
-        passed = passed && m.at("passed").get<bool>();
+                         storage, policy);
+        passed = passed && m.at("accepted").get<bool>();
         numerical.push_back(m);
       }
     }
@@ -605,9 +615,9 @@ Json check_interpretation(gpu::Device& device,
         check(result.next_logits->bytes == full_av_logits,
               "AV cached and full final logits differ on identical input");
       }
-      auto m =
-          compare(expected.at("logits"), result.next_logits->bytes, storage);
-      passed = passed && m.at("passed").get<bool>();
+      auto m = compare(expected.at("logits"), result.next_logits->bytes,
+                       storage, policy);
+      passed = passed && m.at("accepted").get<bool>();
       numerical.push_back(m);
     }
     cached.finish();
@@ -625,6 +635,8 @@ Json check_interpretation(gpu::Device& device,
     check(run.retained_model_bytes().device_bytes > target_weight_bytes,
           "target and AV coexist when complete requests fit");
   }
+  Json token_comparisons = Json::array();
+  std::vector<std::uint32_t> previous_tokens;
   for (auto id : {first, second}) {
     const auto& v = run.record()->variant(id).interpretation;
     check(v.generation && v.outcome == experiment::AttemptOutcome::completed,
@@ -635,9 +647,22 @@ Json check_interpretation(gpu::Device& device,
     const auto& g = *v.generation;
     const auto expected =
         av.at("expected_generated_ids").get<std::vector<std::uint32_t>>();
-    check(std::ranges::equal(std::span(g.tokens).subspan(g.prompt_tokens),
-                             expected),
+    const bool matches = std::ranges::equal(
+        std::span(g.tokens).subspan(g.prompt_tokens), expected);
+    check(policy == ModelComparisonPolicy::report_differences || matches,
           "AV output IDs disagree with frozen reference");
+    if (!previous_tokens.empty()) {
+      check(g.tokens == previous_tokens,
+            "AV repeated generation changed on the same backend");
+    }
+    previous_tokens = g.tokens;
+    token_comparisons.push_back(
+        {{"matches_reference", matches},
+         {"actual_ids",
+          std::vector<std::uint32_t>(
+              g.tokens.begin() + static_cast<std::ptrdiff_t>(g.prompt_tokens),
+              g.tokens.end())},
+         {"expected_ids", expected}});
   }
   check(!run.record()->variant(second).interpretation.cost.load_seconds,
         "second variant reloaded AV weights");
@@ -668,12 +693,19 @@ Json check_interpretation(gpu::Device& device,
       {"cancelled_variants", 1},
       {"estimated_peak_device_bytes", phase_cost.estimated_peak_device_bytes},
       {"estimated_peak_host_bytes", phase_cost.estimated_peak_host_bytes},
-      {"generated_ids", av.at("expected_generated_ids")},
+      {"token_comparisons", token_comparisons},
       {"normalization_max_absolute", normalization.maximum_absolute_error},
-      {"target_capture_max_absolute", target_metric.maximum_absolute_error}};
+      {"target_capture",
+       {{"passed", target_metric.passed},
+        {"accepted", accepts_model_comparison(target_metric, policy)},
+        {"max_absolute", target_metric.maximum_absolute_error},
+        {"relative_l2", target_metric.relative_l2
+                            ? Json(*target_metric.relative_l2)
+                            : Json(nullptr)}}}};
 }
 Json check_steering(gpu::Device& device,
-                    const std::filesystem::path& target_fixture) {
+                    const std::filesystem::path& target_fixture,
+                    ModelComparisonPolicy policy) {
   const auto fixture = read(target_fixture.parent_path() / "steering.json");
   const auto target = read(target_fixture);
   const auto& ar_data = fixture.at("ar");
@@ -692,9 +724,11 @@ Json check_steering(gpu::Device& device,
     const auto metric = compare_values(
         expected, decoded,
         {tolerance.at("max_absolute_error"), tolerance.at("max_relative_l2")});
-    passed = passed && metric.passed;
+    const bool accepted = accepts_model_comparison(metric, policy);
+    passed = passed && accepted;
     metrics.push_back(
         {{"passed", metric.passed},
+         {"accepted", accepted},
          {"max_absolute", metric.maximum_absolute_error},
          {"relative_l2",
           metric.relative_l2 ? Json(*metric.relative_l2) : Json(nullptr)}});
@@ -751,6 +785,7 @@ Json check_steering(gpu::Device& device,
       {mode, 23 * gib, 64 * mib});
   const models::ObservationPoint site{models::ObservationBoundary::block_output,
                                       {fixture.at("block").get<std::size_t>()}};
+  Json token_comparisons = Json::array();
   for (const auto& c : fixture.at("cases")) {
     const auto ids = c.at("prefix").get<std::vector<std::uint32_t>>();
     const auto expected = c.at("generated").get<std::vector<std::uint32_t>>();
@@ -779,9 +814,17 @@ Json check_steering(gpu::Device& device,
                             inference::sampling::Execution::device);
     check(result.reason == inference::StopReason::token_limit,
           "steering generation failed: " + result.failure_message);
-    check(std::ranges::equal(std::span(result.tokens).subspan(ids.size()),
-                             expected),
+    const bool matches = std::ranges::equal(
+        std::span(result.tokens).subspan(ids.size()), expected);
+    check(policy == ModelComparisonPolicy::report_differences || matches,
           "steering generated IDs disagree with independent reference");
+    token_comparisons.push_back(
+        {{"matches_reference", matches},
+         {"actual_ids",
+          std::vector<std::uint32_t>(
+              result.tokens.begin() + static_cast<std::ptrdiff_t>(ids.size()),
+              result.tokens.end())},
+         {"expected_ids", expected}});
     const auto& capture = result.captures.at(0);
     const auto bytes = export_capture(device, capture.device, capture.bytes,
                                       capacity * row_bytes);
@@ -791,6 +834,7 @@ Json check_steering(gpu::Device& device,
   }
   return {{"passed", passed},
           {"numerical", metrics},
+          {"token_comparisons", token_comparisons},
           {"cases", fixture.at("cases").size()}};
 }
 

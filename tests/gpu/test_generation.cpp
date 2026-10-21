@@ -1,4 +1,9 @@
 /*
+ * Native application and numerical acceptance design, 2026-10-21:
+ * Core I.1 (#ri-explicit) makes backend selection and comparison policy
+ * explicit. Performance GPU.1 (guidelines/gpu/GPU.1-keep-data-on-device.md)
+ * keeps production inference on the GPU; test metrics consume completed
+ * readbacks. Both local corpora queried and read for design and implementation.
  * Extend the existing tiny/8B experiment with AR and matched steering replay
  * after releasing the AV. Accumulate its independent numerical verdict into
  * the existing scenario result; no extra integration scenario is registered.
@@ -70,7 +75,23 @@
  * the committed prefix on EOS, cancellation and failed publication. GPU.7
  * (guidelines/gpu/GPU.7-pipeline-cpu-and-gpu-work.md) requires safe retirement
  * of queued output slots. Both corpora queried/read for design/implementation.
+ * Whole-model diagnostics, 2026-10-21: Core I.1 (#ri-explicit) for design
+ * and I.7 (#ri-post) for implementation separate metrics from acceptance;
+ * performance GPU.1 keeps host comparisons outside inference and its timing
+ * (guidelines/gpu/GPU.1-keep-data-on-device.md). Both corpora queried/read.
+ * numerical-portability.md, "Whole-model comparisons": compare row direction
+ * and magnitude, then temperature-one distributions and reciprocal argmax
+ * ranks. Use stable centered log-softmax and double host accumulators. Equal
+ * nonempty shapes and finite reference values are required; invalid actual
+ * rows produce unavailable metrics. No thresholds or production math changes.
+ * Linear work, constant auxiliary storage; reuse completed host readbacks.
  */
+// Portability checks, design/implementation 2026-10-21:
+// numerical-portability.md adds independent operation equations to this
+// existing target workflow. Core I.1/I.7 (#ri-explicit/#ri-post) keeps their
+// elementwise pass separate from frozen model limits; GPU.1 keeps host
+// reference work outside kernel timing
+// (guidelines/gpu/GPU.1-keep-data-on-device.md). Both corpora queried/read.
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -84,7 +105,11 @@
 #include <string>
 
 #include "bounds.h"
+#ifdef DOLITTLE_TEST_METAL
+#include "gpu/metal/device.h"
+#else
 #include "gpu/cuda/device.h"
+#endif
 #include "inference/generation.h"
 #include "inference/sampling/categorical.h"
 #include "models/qwen3/checkpoint.h"
@@ -94,11 +119,20 @@
 #include "tests/gpu/capture_export.h"
 #include "tests/gpu/forward_reference.h"
 #include "tests/gpu/interpretation.h"
+#include "tests/gpu/operator_reference.h"
 #include "tests/support/check.h"
 #include "text/qwen3_chat.h"
 #include "tokenizers/byte_bpe.h"
 
 namespace {
+#ifdef DOLITTLE_TEST_METAL
+constexpr auto model_policy =
+    dolittle::tests::ModelComparisonPolicy::report_differences;
+#else
+constexpr auto model_policy =
+    dolittle::tests::ModelComparisonPolicy::enforce_limits;
+#endif
+
 namespace tensors = dolittle::tensors;
 namespace models = dolittle::models;
 namespace inference = dolittle::inference;
@@ -204,9 +238,14 @@ Json comparisons(const tests::ForwardReferenceCase& expected,
           metric.maximum_absolute_error <= limit.max_absolute_error &&
           (!metric.relative_l2 || *metric.relative_l2 <= limit.max_relative_l2);
     }
-    passed = passed && metric.passed;
+    const bool accepted =
+        metric.identity_and_shape_match && metric.all_values_finite &&
+        (model_policy == tests::ModelComparisonPolicy::report_differences ||
+         metric.passed);
+    passed = passed && accepted;
     outputs.push_back(
         {{"output", metric.output_name},
+         {"accepted", accepted},
          {"passed", metric.passed},
          {"maximum_absolute_error", metric.maximum_absolute_error},
          {"relative_l2",
@@ -295,18 +334,49 @@ Json compare_rows(const Json& reference, std::span<const std::byte> bytes,
       tolerance(reference.at("tolerance")));
   Json row_metrics = Json::array();
   bool rows_passed = comparison.passed;
+  bool rows_accepted =
+      tests::accepts_model_comparison(comparison, model_policy);
   for (std::size_t row = 0; row < count; ++row) {
+    const auto expected = std::span(all).subspan((first + row) * width, width);
+    const auto observed = std::span(actual).subspan(row * width, width);
     const auto metric = tests::compare_values(
-        std::span(all).subspan((first + row) * width, width),
-        std::span(actual).subspan(row * width, width),
-        tolerance(reference.at("tolerance")));
+        expected, observed, tolerance(reference.at("tolerance")));
     rows_passed = rows_passed && metric.passed;
+    rows_accepted =
+        rows_accepted && tests::accepts_model_comparison(metric, model_policy);
     row_metrics.push_back(
         {{"position", first + row},
          {"passed", metric.passed},
          {"max_absolute_error", metric.maximum_absolute_error},
          {"relative_l2",
           metric.relative_l2 ? Json(*metric.relative_l2) : Json(nullptr)}});
+    auto& row_report = row_metrics.back();
+    row_report["diagnostics"] = nullptr;
+    if (const auto geometry = tests::row_geometry(expected, observed)) {
+      auto& diagnostic = row_report["diagnostics"];
+      diagnostic = {
+          {"cosine_similarity", geometry->cosine_similarity
+                                    ? Json(*geometry->cosine_similarity)
+                                    : Json(nullptr)},
+          {"actual_to_reference_norm",
+           geometry->norm_ratio ? Json(*geometry->norm_ratio) : Json(nullptr)},
+          {"nmse", metric.relative_l2
+                       ? Json(*metric.relative_l2 * *metric.relative_l2)
+                       : Json(nullptr)}};
+      if (!reference.contains("boundary")) {
+        if (const auto logits = tests::logit_diagnostics(expected, observed)) {
+          diagnostic["logits"] = {
+              {"reference_to_actual_kl", logits->reference_to_actual_kl},
+              {"total_variation", logits->total_variation},
+              {"reference_argmax", logits->reference_argmax},
+              {"actual_argmax", logits->actual_argmax},
+              {"reference_argmax_rank_in_actual",
+               logits->reference_argmax_rank_in_actual},
+              {"actual_argmax_rank_in_reference",
+               logits->actual_argmax_rank_in_reference}};
+        }
+      }
+    }
   }
   if (!rows_passed) {
     const Json diagnostic{
@@ -322,8 +392,9 @@ Json compare_rows(const Json& reference, std::span<const std::byte> bytes,
         {"rows", row_metrics}};
     std::cerr << "numerical comparison failed: " << diagnostic.dump() << '\n';
   }
-  passed = passed && rows_passed;
+  passed = passed && rows_accepted;
   return {{"passed", rows_passed},
+          {"accepted", rows_accepted},
           {"rows", std::move(row_metrics)},
           {"max_absolute_error", comparison.maximum_absolute_error},
           {"relative_l2", comparison.relative_l2 ? Json(*comparison.relative_l2)
@@ -731,7 +802,7 @@ Json check_generation(gpu::Device& device,
   return report;
 }
 
-Json run(const std::filesystem::path& fixture) {
+Json run(const std::filesystem::path& fixture, bool target_only) {
   tests::check(std::filesystem::file_size(fixture) <=
                    128 * std::size_t{1024} * std::size_t{1024},
                "fixture exceeds harness budget");
@@ -766,10 +837,16 @@ Json run(const std::filesystem::path& fixture) {
               {"cases", Json::array()},
               {"reference", bundle.at("reference")},
               {"tolerances", bundle.at("tolerances")}};
+#ifdef DOLITTLE_TEST_METAL
+  auto device = gpu::metal::open_device();
+#else
   auto device = gpu::cuda::open_device(0);
+#endif
   report.emplace("device", Json({{"name", device->info().name},
                                  {"architecture", device->info().architecture},
                                  {"driver", device->info().driver_version}}));
+  report.emplace("operator_reference",
+                 tests::check_operator_reference(*device));
   std::vector<tests::ForwardReferenceCase> expected;
   std::vector<inference::ForwardResult> results;
   std::uint64_t id = 1;
@@ -849,18 +926,28 @@ Json run(const std::filesystem::path& fixture) {
                      dolittle::at(result.captures(), 0).bytes.empty(),
                  "empty selections did not preserve empty metadata");
   }
-  bool passed = true;
+  bool passed = report.at("operator_reference").at("passed").get<bool>();
   report.emplace(
       "generation",
       Json(check_generation(*device, *checkpoint, bundle, text_pair, passed)));
   // All comparisons below deliberately run after the execution owners die.
   checkpoint.reset();
-  auto interpretation = tests::check_interpretation(*device, fixture);
-  passed = passed && interpretation.at("passed").get<bool>();
-  report.emplace("interpretation", std::move(interpretation));
-  auto steering = tests::check_steering(*device, fixture);
-  passed = passed && steering.at("passed").get<bool>();
-  report.emplace("steering", std::move(steering));
+  if (!target_only) {
+    auto interpretation =
+        tests::check_interpretation(*device, fixture, model_policy);
+    passed = passed && interpretation.at("passed").get<bool>();
+    report.emplace("interpretation", std::move(interpretation));
+    auto steering = tests::check_steering(*device, fixture, model_policy);
+    passed = passed && steering.at("passed").get<bool>();
+    report.emplace("steering", std::move(steering));
+  }
+  report.emplace(
+      "model_comparison_policy",
+      model_policy == tests::ModelComparisonPolicy::report_differences
+          ? "report_differences"
+          : "enforce_limits");
+  report.emplace("scope",
+                 target_only ? "target-generation" : "target-av-steering");
   device.reset();
   for (std::size_t i = 0; i < results.size(); ++i) {
     report.at("cases").at(i).emplace(
@@ -882,14 +969,23 @@ int main(int argc, char** argv) {
   try {
     if (argc < 2) {
       throw std::invalid_argument(
-          "usage: test_generation FIXTURE.json [FIXTURE.json ...]");
+          "usage: test_generation [--target-only] FIXTURE.json [FIXTURE.json "
+          "...]");
+    }
+    const bool target_only =
+        std::string_view(
+            dolittle::at(std::span(argv, static_cast<std::size_t>(argc)), 1)) ==
+        "--target-only";
+    if (target_only && argc < 3) {
+      throw std::invalid_argument("--target-only requires fixtures");
     }
     Json reports = Json::array();
     bool passed = true;
-    for (int i = 1; i < argc; ++i) {
+    for (int i = target_only ? 2 : 1; i < argc; ++i) {
       auto report =
           run(dolittle::at(std::span(argv, static_cast<std::size_t>(argc)),
-                           static_cast<std::size_t>(i)));
+                           static_cast<std::size_t>(i)),
+              target_only);
       passed = passed && report.at("passed").get<bool>();
       reports.push_back(std::move(report));
     }

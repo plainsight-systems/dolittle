@@ -11,11 +11,14 @@
  */
 #pragma once
 #include <Metal/Metal.hpp>
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 namespace dolittle::gpu::metal {
 template <class T>
@@ -42,17 +45,26 @@ gpu::metal::NativePtr<T> owned(T* object) {
   return gpu::metal::transfer(object);
 }
 inline auto pool() { return owned(NS::AutoreleasePool::alloc()->init()); }
+inline constexpr std::size_t feedback_diagnostic_bytes = 1024;
 struct Feedback {
   std::atomic<bool> arrived{false};
   bool failed{};
+  std::array<char, feedback_diagnostic_bytes> diagnostic{};
 };
 inline auto commit_options(const std::shared_ptr<Feedback>& feedback) {
   auto options = owned(MTL4::CommitOptions::alloc()->init());
-  options->addFeedbackHandler(
-      [feedback](MTL4::CommitFeedback* result) noexcept {
-        feedback->failed = !result || result->error();
-        feedback->arrived.store(true, std::memory_order_release);
-      });
+  options->addFeedbackHandler([feedback](
+                                  MTL4::CommitFeedback* result) noexcept {
+    feedback->failed = !result || result->error();
+    if (result && result->error()) {
+      const std::string_view message(
+          result->error()->localizedDescription()->utf8String());
+      const auto count =
+          std::min(message.size(), feedback->diagnostic.size() - 1);
+      std::ranges::copy(message.substr(0, count), feedback->diagnostic.begin());
+    }
+    feedback->arrived.store(true, std::memory_order_release);
+  });
   return options;
 }
 inline void wait_feedback(const Feedback& feedback) {
@@ -65,7 +77,8 @@ inline void wait_feedback(const Feedback& feedback) {
     std::this_thread::sleep_for(feedback_poll_interval);
   }
   if (feedback.failed) {
-    throw std::runtime_error("Metal command execution failed");
+    throw std::runtime_error(std::string("Metal command execution failed: ") +
+                             feedback.diagnostic.data());
   }
 }
 inline auto residency(MTL::Device& device) {

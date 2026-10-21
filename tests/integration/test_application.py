@@ -206,7 +206,7 @@ def run(binary, cache, port, report, hold=False):
                 if not page['more']:
                     break
             assert recovered == events and after == cursor
-            summary = dict(execution='native' if binary is not None else 'container',
+            summary = dict(execution='native' if binary is not None or sys.platform == 'darwin' else 'container', backend=status['backend'],
                            run=run_id, events=len(events), target_tokens=sum(len(e['tokens']) for e in target_deltas),
                            interpretations=len(done), steering_trials=2, exact_reconnect=True, idempotent_retry=True)
             (report / 'result.json').write_text(json.dumps(summary, indent=2) + '\n')
@@ -233,11 +233,16 @@ def run(binary, cache, port, report, hold=False):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     execution = parser.add_mutually_exclusive_group(required=True)
-    execution.add_argument('--binary', type=Path, help='Source-built native Linux/CUDA executable')
+    execution.add_argument('--binary', type=Path, help='Source-built CUDA or Metal executable')
+    execution.add_argument('--native-source', action='store_true', help='Build and run the native Metal application through the source launcher')
     execution.add_argument('--container', action='store_true', help='Build and run through Docker Compose')
     parser.add_argument('--cache', type=Path, required=True)
     parser.add_argument('--port', type=int, default=8787)
     parser.add_argument('--report', type=Path, default=ROOT / '.local/application-check')
     parser.add_argument('--hold', action='store_true', help='Keep this experiment open for browser inspection until Ctrl-C')
     args = parser.parse_args()
+    if args.native_source and sys.platform != 'darwin':
+        parser.error('--native-source requires macOS')
+    if args.container and sys.platform != 'linux':
+        parser.error('--container requires Linux')
     run(args.binary, args.cache, args.port, args.report, args.hold)

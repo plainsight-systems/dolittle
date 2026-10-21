@@ -23,6 +23,8 @@
 #include <array>
 #include <deque>
 #include <limits>
+#include <map>
+#include <tuple>
 #include <vector>
 
 #include "diagnostics/allocation.h"
@@ -35,6 +37,7 @@
 namespace dolittle::gpu {
 namespace {
 using metal::owned;
+constexpr std::size_t max_dispatch_bindings = 31;
 void require(bool condition, const char* message) {
   if (!condition) throw std::invalid_argument(message);
 }
@@ -57,6 +60,9 @@ struct State {
   gpu::metal::NativePtr<MTL::Device> native;
   DeviceInfo info;
   bool poisoned{};
+  std::map<std::tuple<std::string, std::string, bool>,
+           metal::NativePtr<MTL::ComputePipelineState>>
+      pipelines;
   metal::NativePtr<MTL::ComputePipelineState> copy_pipeline;
   std::vector<std::weak_ptr<NativeQueue>> queues;
   void check() const {
@@ -231,6 +237,7 @@ struct Transfer {
   gpu::metal::NativePtr<MTL4::CommandBuffer> commands;
   gpu::metal::NativePtr<MTL::ResidencySet> residency;
   std::shared_ptr<metal::Feedback> feedback;
+  std::shared_ptr<metal::CommandBody> body;
 };
 std::uint64_t next_identity() {
   static std::atomic<std::uint64_t> counter{1};
@@ -245,6 +252,7 @@ struct Queue::Impl {
   std::shared_ptr<State> state;
   std::shared_ptr<NativeQueue> native;
   metal::CommandBody* recording{};
+  metal::NativePtr<MTL::ResidencySet> residency;
   gpu::metal::NativePtr<MTL::SharedEvent> completed;
   std::uint64_t identity = next_identity(), issued{}, retired{};
   std::deque<Transfer> transfers;
@@ -267,9 +275,10 @@ struct Queue::Impl {
     native->drain();
     for (const auto& packet : transfers) {
       metal::wait_feedback(*packet.feedback);
-      native->queue->removeResidencySet(packet.residency.get());
     }
     transfers.clear();
+    residency->removeAllAllocations();
+    residency->commit();
     transfer_first = transfer_end;
     prefixes.clear();
     retired = issued;
@@ -281,8 +290,9 @@ struct Queue::Impl {
     const auto autorelease = metal::pool();
     Transfer packet{owned(state->native->newCommandAllocator()),
                     owned(state->native->newCommandBuffer()),
-                    metal::residency(*state->native.get()),
-                    std::make_shared<metal::Feedback>()};
+                    residency,
+                    std::make_shared<metal::Feedback>(),
+                    {}};
     packet.residency->addAllocation(src.buffer);
     packet.residency->addAllocation(dst.buffer);
     packet.residency->commit();
@@ -303,7 +313,7 @@ struct Queue::Impl {
     transfers.push_back(std::move(packet));
     ++transfer_end;
     auto& stored = transfers.back();
-    native->queue->addResidencySet(stored.residency.get());
+
     const std::array<const MTL4::CommandBuffer*, 1> buffers{
         stored.commands.get()};
     native->queue->commit(buffers.data(), buffers.size(), options.get());
@@ -366,6 +376,8 @@ Queue detail::BackendAccess::create_queue(Device& device) {
   impl->native->queue = owned(native.newMTL4CommandQueue());
   impl->native->drained = owned(native.newSharedEvent());
   impl->completed = owned(native.newSharedEvent());
+  impl->residency = metal::residency(native);
+  impl->native->queue->addResidencySet(impl->residency.get());
   std::erase_if(impl->state->queues,
                 [](const auto& weak) { return weak.expired(); });
   impl->state->queues.push_back(impl->native);
@@ -412,13 +424,88 @@ void detail::BackendAccess::record(Queue& queue, Device& device,
   require(!body || !queue.impl_->recording, "nested command recording");
   queue.impl_->recording = body;
 }
+std::shared_ptr<MTL::ComputePipelineState> detail::BackendAccess::pipeline(
+    Device& device, const char* path, const char* name, bool indirect) {
+  const auto state = state_of(device);
+  const auto key =
+      std::make_tuple(std::string(path), std::string(name), indirect);
+  if (auto found = state->pipelines.find(key);
+      found != state->pipelines.end()) {
+    return found->second;
+  }
+  const auto autorelease = metal::pool();
+  NS::Error* error = nullptr;
+  auto library = metal::transfer(state->native->newLibrary(
+      NS::String::string(path, NS::UTF8StringEncoding), &error));
+  if (!library) {
+    throw std::runtime_error("Metal library: " + metal::describe(error));
+  }
+  auto function = owned(
+      library->newFunction(NS::String::string(name, NS::UTF8StringEncoding)));
+  auto descriptor = owned(MTL::ComputePipelineDescriptor::alloc()->init());
+  descriptor->setComputeFunction(function.get());
+  descriptor->setSupportIndirectCommandBuffers(indirect);
+  descriptor->setLabel(NS::String::string(name, NS::UTF8StringEncoding));
+  // Apple's validator cannot instrument ICBs with their own pipeline/buffers.
+  // Direct control shaders remain instrumented; API validation covers both.
+  if (indirect) descriptor->setShaderValidation(MTL::ShaderValidationDisabled);
+  auto result = metal::transfer(state->native->newComputePipelineState(
+      descriptor.get(), MTL::PipelineOptionNone, nullptr, &error));
+  if (!result) {
+    throw std::runtime_error("Metal pipeline: " + metal::describe(error));
+  }
+  state->pipelines.emplace(key, result);
+  return result;
+}
 void detail::BackendAccess::dispatch(
     Queue& queue, Device& device, MTL::ComputePipelineState& pipeline,
     std::span<const metal::BufferBinding> bindings, MTL::Size grid,
-    MTL::Size group) {
+    MTL::Size group, std::span<const std::byte> parameters,
+    std::size_t threadgroup_bytes) {
   (void)native_queue(queue, device);
-  require(queue.impl_->recording, "dispatch requires a prepared body");
-  queue.impl_->recording->append(pipeline, bindings, grid, group);
+  require(
+      threadgroup_bytes <= native_device(device).maxThreadgroupMemoryLength(),
+      "dispatch exceeds threadgroup memory");
+  require(bindings.size() < max_dispatch_bindings,
+          "too many dispatch bindings");
+  const auto direct = queue.impl_->recording == nullptr;
+  auto owned_body = direct ? std::make_shared<metal::CommandBody>() : nullptr;
+  auto& body = direct ? *owned_body : *queue.impl_->recording;
+  std::array<metal::BufferBinding, max_dispatch_bindings> inputs{};
+  std::size_t count = 0;
+  if (!parameters.empty()) {
+    inputs.at(count++) = body.parameter(device, parameters);
+  }
+  for (auto binding : bindings) inputs.at(count++) = binding;
+  body.append(pipeline, std::span(inputs).first(count), grid, group,
+              threadgroup_bytes);
+  if (!direct) return;
+  body.seal(device);
+  const auto autorelease = metal::pool();
+  auto& q = *queue.impl_;
+  Transfer packet{owned(q.state->native->newCommandAllocator()),
+                  owned(q.state->native->newCommandBuffer()), q.residency,
+                  std::make_shared<metal::Feedback>(), std::move(owned_body)};
+  body.residency(*packet.residency);
+  packet.residency->commit();
+  packet.commands->beginCommandBuffer(packet.allocator.get());
+  auto* encoder = packet.commands->computeCommandEncoder();
+  if (!encoder) {
+    throw std::runtime_error("Metal compute encoder creation failed");
+  }
+  encoder->barrierAfterQueueStages(MTL::StageAll, MTL::StageDispatch,
+                                   MTL4::VisibilityOptionDevice);
+  encoder->executeCommandsInBuffer(body.native(), NS::Range{0, body.count()});
+  encoder->endEncoding();
+  packet.commands->endCommandBuffer();
+  const auto options = metal::commit_options(packet.feedback);
+  q.transfers.push_back(std::move(packet));
+  ++q.transfer_end;
+  auto& stored = q.transfers.back();
+
+  const std::array<const MTL4::CommandBuffer*, 1> commands{
+      stored.commands.get()};
+  q.native->queue->commit(commands.data(), commands.size(), options.get());
 }
 void detail::BackendAccess::poison(Device& device) noexcept {
   if (auto* native = dynamic_cast<MetalDevice*>(&device)) {
@@ -435,6 +522,10 @@ void Queue::upload(DeviceRegion dst, ConstHostRegion src) {
               dst.owner->impl_->state == impl_->state &&
               src.owner->impl_->state == impl_->state,
           "foreign upload region");
+  if (src.offset > std::numeric_limits<std::size_t>::max() - src.bytes ||
+      dst.offset > std::numeric_limits<std::size_t>::max() - dst.bytes) {
+    throw std::length_error("transfer extent overflows");
+  }
   const auto& source = *src.owner->impl_;
   const auto& destination = *dst.owner->impl_;
   require(src.bytes == dst.bytes && src.offset <= source.bytes &&
@@ -456,6 +547,10 @@ void Queue::download(HostRegion dst, ConstDeviceRegion src) {
               dst.owner->impl_->state == impl_->state &&
               src.owner->impl_->state == impl_->state,
           "foreign download region");
+  if (src.offset > std::numeric_limits<std::size_t>::max() - src.bytes ||
+      dst.offset > std::numeric_limits<std::size_t>::max() - dst.bytes) {
+    throw std::length_error("transfer extent overflows");
+  }
   const auto& source = *src.owner->impl_;
   const auto& destination = *dst.owner->impl_;
   require(src.bytes == dst.bytes && src.offset <= source.bytes &&
@@ -477,6 +572,10 @@ void Queue::copy(DeviceRegion dst, ConstDeviceRegion src) {
               dst.owner->impl_->state == impl_->state &&
               src.owner->impl_->state == impl_->state,
           "foreign copy region");
+  if (src.offset > std::numeric_limits<std::size_t>::max() - src.bytes ||
+      dst.offset > std::numeric_limits<std::size_t>::max() - dst.bytes) {
+    throw std::length_error("transfer extent overflows");
+  }
   const auto& source = *src.owner->impl_;
   const auto& destination = *dst.owner->impl_;
   require(src.offset <= source.bytes &&
@@ -548,9 +647,13 @@ void Queue::wait(CompletionPoint point) {
     while (impl_->transfer_first < prefix_end) {
       auto& packet = impl_->transfers.front();
       metal::wait_feedback(*packet.feedback);
-      impl_->native->queue->removeResidencySet(packet.residency.get());
+
       impl_->transfers.pop_front();
       ++impl_->transfer_first;
+    }
+    if (impl_->transfers.empty()) {
+      impl_->residency->removeAllAllocations();
+      impl_->residency->commit();
     }
     std::erase_if(impl_->prefixes, [&](const auto& prefix) {
       return prefix.first <= point.sequence;

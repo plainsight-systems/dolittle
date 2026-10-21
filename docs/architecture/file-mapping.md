@@ -616,10 +616,11 @@ immutable journal. `server/http.*` owns transport; `server/wire.cpp` implements 
 wire translation. Generation/Run observers publish borrowed deltas; the concrete
 text protocol owns incremental classification. No CUDA objects cross these seams.
 
-`main.cpp` selects the CUDA device and pinned model providers. `dolittle_execution`
-contains backend-neutral execution/session sources; `dolittle_cuda` contains the
-runtime and kernels for this build. A Metal port adds its backend/composition/build
-path and numerical validation while retaining the application contracts.
+`main.cpp` selects CUDA or Metal at build time and supplies pinned model
+providers. `dolittle_execution` contains backend-neutral execution/session
+sources; `dolittle_cuda` and `dolittle_metal` contain their respective runtimes
+and kernels. Both builds use the same application contracts. `scripts/run.py`
+selects Docker on Linux and the native Metal source build on macOS.
 
 The source launcher, revision-aware model cache and browser files follow the
 application document. The application integration replaces the standalone archive

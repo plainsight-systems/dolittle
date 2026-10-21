@@ -29,10 +29,47 @@ Apple shader instrumentation requires inherited ICB bindings; our bodies own
 bindings, so instrumentation covers direct control/publication/cancellation,
 while API validation and device assertions cover the complete workflow.
 
-Full Metal transformer kernels, numerical equivalence and the native application
-are still the next phases. The `metal-debug` preset builds the foundation and
-tests, not a runnable inference application. Andrew approved committing this
-foundation and proceeding to the target-kernel header design.
+The phase-two target kernels, GPU sampler and dynamic capture path now have
+implementations. Both corpora were consulted for implementation. Native Metal4
+indirect bodies register their pipeline allocations as well as buffers for
+residency; validation-layer behavior must not substitute for normal execution.
+FP32 elementary math uses split exponential range reduction; binary64 remains
+isolated to sampling and GPU constant setup. Eight-row projection tiles are
+selected from M3 measurements. The foundation is committed as `1006866`;
+the target kernels and complete native application are now accepted.
+
+Andrew accepted the Metal numerical policy on 2026-10-21: whole-model
+comparisons report differences rather than enforcing the arbitrary 3% budget.
+Independent operation accuracy, finite/structurally valid outputs, BF16/FP32
+semantics and exact same-backend replay/full-versus-cached agreement remain
+required. CUDA keeps its established strict fixture comparisons. Preserve the
+original oracle, fixtures, limits and reported failures; this is an agreed
+acceptance-policy change, not a claim that those differences disappeared.
+
+The native-source investigation is complete. All 22 operation cases pass on
+Metal and CUDA. All 20 matched-prefix argmax choices agree with MPS; the worst
+capture/logit relative L2 values are 0.046493/0.038526. Identical-input checks
+across all 36 blocks found only small arithmetic differences, including BF16
+midpoint crossings. Matching MPSGraph's reduction tree is not the objective.
+The MPS wrapper unsets the presence-based PREFER_METAL flag; refreshed fixtures
+retain identical expected values and limits. Detailed evidence stays local.
+
+The native Metal application is complete. `scripts/run.py` builds and launches
+Metal on Apple Silicon and keeps Linux Docker behavior. Shared Session/Run
+composition uses device working-set admission, retaining idle weights when the
+next request fits. Both local C++ corpora were queried/read for header design
+and implementation; the independent oracle remains unchanged.
+
+Strict Metal and CUDA builds pass. All 22 host units, Metal device and tiny
+FP32/BF16 target/AV/AR workflows pass, including the tiny flow with Metal API
+validation. The pinned 8B workflow passes the accepted policy; both AV variants
+and all four steering cases match the independent generated IDs. Original
+whole-model budget failures remain in reports. All 68 Metal clang-tidy entries,
+Google formatting and the native source-launch application flow pass. The latter
+covers complete interpretation, edited-text steering, exact zero-strength
+sampled branches, reconnect/idempotency and clean shutdown on the M3 Max.
+Andrew approved committing and pushing the complete Metal port. Do not reopen
+numerical acceptance research.
 
 ## Project site documentation
 

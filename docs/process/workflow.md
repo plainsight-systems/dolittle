@@ -181,10 +181,17 @@ inventory and replace or remove existing coverage before adding a scenario.
 
 ### Numerical and device verification
 
-Verify GPU computation on the 3090 against appropriate independent reference
+Verify GPU computation on each implemented backend against appropriate independent reference
 results. Define numerical comparisons for logits, captured activations,
 injected inputs, and reconstructed vectors as those paths are designed.
 Generated prose alone is insufficient evidence of numerical correctness.
+Follow the [numerical portability contract](../architecture/numerical-portability.md):
+same-backend repeatability/chunk invariance is exact; independent operation
+accuracy uses explicit dtype/operation tolerances. Keep elementwise tolerance
+and whole-model relative L2 limits distinct. Metal whole-model budgets are
+diagnostic under the accepted portability contract; operation and replay checks
+remain required. Preserve every measured error and original limit in reports. Use native platform elementary
+math while preserving the documented tensor precision and conversion points.
 
 Freeze the independent reference implementation, precision, fixtures and error
 limits before correcting a numerical failure. Compare operations on identical
