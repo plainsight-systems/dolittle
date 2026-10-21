@@ -128,3 +128,24 @@ test('new samples advance past retained seeds without precision loss or overflow
   assert.equal(nextSampleSeed([{ settings: { seed: '9007199254740993' } }]), '9007199254740994');
   assert.equal(nextSampleSeed([{ settings: { seed: '18446744073709551615' } }, { settings: { seed: '0' } }]), '1');
 });
+test('steering journal separates branches and replays without altering the original', async () => {
+  const { continuationText } = await import('../../app/controller.js');
+  const s = newState('e', '1');
+  const start = {sequence:'1',type:'steering_started',request:'trial',variant:'7',capture:{position:0,block:24,boundary:'block_output'},prefix_tokens:1,original_prompt_tokens:1};
+  const branch = (seq, role, first, char) => ({...token(seq,first,[char.charCodeAt(0)]),request:'trial',role,prompt_tokens:1});
+  const events = [start,branch('2','baseline',0,'P'),branch('3','baseline',1,'B'),branch('4','steered',0,'P'),branch('5','steered',1,'S'),{sequence:'6',type:'steering_complete',request:'trial',trial:'1',outcome:'completed'}];
+  const p = page(events,'6'); applyPage(s,p); applyPage(s,p);
+  assert.equal(s.target.tokens.length,0);
+  assert.equal(s.trials.size,1);
+  assert.equal(continuationText(s.trials.get('trial'),'baseline','reasoning'),'B');
+  assert.equal(continuationText(s.trials.get('trial'),'steered','reasoning'),'S');
+});
+test('steering source requires completed delimited nonempty text; edit ranges preserve Unicode', async () => {
+  const {canSteer,editedRange} = await import('../../app/controller.js');
+  const sample={variant:'1',outcome:'completed',format:'complete',content:[0,1],stream:{generatedBytes:[65]}};
+  assert.equal(canSteer(sample),true);
+  assert.equal(canSteer({...sample,outcome:'cancelled'}),false);
+  assert.equal(canSteer({...sample,format:'missing'}),false);
+  assert.equal(canSteer({...sample,stream:{generatedBytes:[0xff]}}),false);
+  assert.deepEqual(editedRange('🐇 carrot','🐁 carrot'),['','🐁',' carrot']);
+});

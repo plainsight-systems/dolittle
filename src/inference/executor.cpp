@@ -1,4 +1,16 @@
 /*
+ * Steering/AR execution, X1 (steering.md): prepare explicit residual mutation
+ * at its declared producer, before copies/consumers. A device kernel uses S/B
+ * to update only p-S, retaining direction/status owners through completion.
+ * Vector models run the same chunk graph, then gather/project the last row
+ * into independently owned device output; sampling is absent. Target weights
+ * survive successive fresh-KV plans. All buffers are admitted before capture;
+ * device status stops failed requests. Scalar terminal collection occurs after
+ * execution and never drives continuation. O(D) added vector storage/work.
+ * Implementation corpora queried/read 2026-10-20: Core I.7 (#ri-post), explicit
+ * endpoint/lifetime contracts; GPU.1
+ (guidelines/gpu/GPU.1-keep-data-on-device.md)
+ * for resident output and GDSA.2 for shape-independent numerical behavior.
  * Axis X1: prepare model recipes, bind storage and execute full or cached
  passes.
  * Contract: verified BoundCheckpoint and Device outlive borrowed plans. A
@@ -101,6 +113,7 @@
 #include "inference/cache/contiguous.h"
 #include "inference/decoding/device.h"
 #include "inference/injection/device.h"
+#include "inference/steering/device.h"
 #include "inference/storage_plan.h"
 #include "models/checkpoint.h"
 #include "tensors/representations/bf16.h"
@@ -264,6 +277,9 @@ FullForwardPlan prepare_full_forward(gpu::Device& device,
                                      models::SequenceLength length,
                                      const ForwardOptions& options) {
   const auto& model = checkpoint.model();
+  if (model.output_kind() != models::OutputKind::vocabulary) {
+    throw std::invalid_argument("vector models require cached reconstruction");
+  }
   if (!length.value || length.value > model.context_limit().value) {
     throw std::invalid_argument("forward length outside context");
   }
@@ -832,6 +848,10 @@ struct CachedForwardPlan::Impl {
   std::optional<gpu::HostBuffer> selection_readback;
   std::unique_ptr<DeviceSequence> decode;
   std::unique_ptr<DeviceInjection> device_injection;
+  std::optional<ResidualIntervention> intervention;
+  std::optional<models::ResidualBoundary> intervention_boundary;
+  std::unique_ptr<DeviceIntervention> device_intervention;
+  std::shared_ptr<gpu::DeviceBuffer> retained_vector;
   std::optional<gpu::DeviceBuffer> prompt_ids;
   std::optional<gpu::HostBuffer> prompt_staging;
   std::shared_ptr<gpu::DeviceBuffer> retained_capture_storage;
@@ -875,6 +895,7 @@ struct CachedForwardPlan::Impl {
     // Release graph borrowers while their queue and bound arenas still exist.
     decode.reset();
     device_injection.reset();
+    device_intervention.reset();
     if (resident) {
       resident->leased = false;
     }
@@ -1167,7 +1188,7 @@ CachedForwardPlan CachedForwardPlan::prepare_impl(
     p->steps.push_back({std::move(operation), {}});
   }
   // Retain one vocabulary row; captures are chunk-sized, not capacity-sized.
-  const auto logits = present(forward.logits);
+  const auto logits = forward.terminal_output().value();
   auto& logit_slot = p->slots.at(logits.value);
   logit_slot.arena = Arena::output;
   logit_slot.offset = 0;
@@ -1367,6 +1388,11 @@ ConsumedView CachedForwardPlan::consume_view(
     std::span<const std::uint32_t> ids, bool need_logits,
     std::optional<sampling::DeviceDraw> draw) {
   auto& p = *impl_;
+  if (p.checkpoint->model().output_kind() != models::OutputKind::vocabulary ||
+      p.intervention) {
+    throw std::invalid_argument(
+        "vector output and intervention require autonomous execution");
+  }
   if (p.injection && p.injection->device) {
     throw std::invalid_argument(
         "device injection requires autonomous execution");
@@ -1445,7 +1471,8 @@ ConsumedView CachedForwardPlan::consume_view(
 
 void CachedForwardPlan::prepare_device_generation(
     const DeviceGenerationRequest& request) {
-  const auto& [settings, seed, prompt, stop_ids, generated] = request;
+  const auto& [settings, seed, prompt, stop_ids, generated, forward_only] =
+      request;
   auto& p = *impl_;
   if (p.device_generation || p.committed || p.failed || p.finished ||
       prompt.empty() || prompt.size() > p.options.capacity ||
@@ -1456,12 +1483,27 @@ void CachedForwardPlan::prepare_device_generation(
     throw std::invalid_argument(
         "live injection requires a device normalization input");
   }
-  prepare_sampling();
-  p.sampler->start(settings, seed, stop_ids);
+  if (forward_only !=
+          (p.checkpoint->model().output_kind() == models::OutputKind::vector) ||
+      (forward_only && (generated || p.injection || p.intervention))) {
+    throw std::invalid_argument("sequence endpoint kind mismatch");
+  }
+  for (const auto id : prompt) {
+    if (id >= vocabulary_size()) {
+      throw std::invalid_argument("prompt token outside vocabulary");
+    }
+  }
+  if (p.intervention && p.intervention->position.value >= prompt.size()) {
+    throw std::invalid_argument("intervention must belong to replay prefix");
+  }
+  if (!forward_only) {
+    prepare_sampling();
+    p.sampler->start(settings, seed, stop_ids);
+  }
   const auto capacity = prompt.size() + generated;
   const DeviceSequence::Shape shape{
       prompt.size(), generated,
-      std::min(prompt.size(), p.options.max_prefill_chunk)};
+      std::min(prompt.size(), p.options.max_prefill_chunk), forward_only};
   std::size_t capture_bytes = 0;
   for (auto& c : p.captures) {
     c.decode_offset = capture_bytes;
@@ -1473,6 +1515,9 @@ void CachedForwardPlan::prepare_device_generation(
     extra_device =
         add(extra_device, DeviceInjection::required_bytes(
                               p.injection->width, p.injection->storage_type));
+  }
+  if (forward_only) {
+    extra_device = add(extra_device, p.logit_bytes);
   }
   const auto extra_host =
       add(DeviceSequence::host_bytes(shape), prompt.size_bytes());
@@ -1505,17 +1550,30 @@ void CachedForwardPlan::prepare_device_generation(
         *p.device, p.work_queue(), input.source.region(), input.source_type,
         injection.storage_type, injection.width, input.scale);
   }
+  if (forward_only) {
+    p.retained_vector = std::make_shared<gpu::DeviceBuffer>(
+        p.device->allocate({p.logit_bytes, 4}));
+  }
   p.decode = std::make_unique<DeviceSequence>(*p.device, p.work_queue(), shape);
   const auto position = p.decode->position();
   const auto& tokens = p.slots.at(p.recipe.forward.token_input.value);
   try {
-    p.decode->begin(p.sampler->result_storage(), p.sampler->terminal_state(),
-                    {&present(p.scratch), tokens.offset, tokens.bytes},
-                    {&present(p.prompt_ids), 0, prompt.size_bytes()},
-                    p.device_injection ? p.device_injection->status()
-                                       : gpu::ConstDeviceRegion{},
-                    p.device_injection ? p.device_injection->norm()
-                                       : gpu::ConstDeviceRegion{});
+    p.decode->begin(
+        p.sampler ? p.sampler->result_storage() : gpu::ConstDeviceRegion{},
+        p.sampler ? p.sampler->terminal_state() : gpu::ConstDeviceRegion{},
+        {&present(p.scratch), tokens.offset, tokens.bytes},
+        {&present(p.prompt_ids), 0, prompt.size_bytes()},
+        p.device_injection ? p.device_injection->status()
+                           : gpu::ConstDeviceRegion{},
+        p.device_injection ? p.device_injection->norm()
+                           : gpu::ConstDeviceRegion{},
+        p.device_intervention ? p.device_intervention->status()
+                              : gpu::ConstDeviceRegion{},
+        p.device_intervention ? p.device_intervention->count()
+                              : gpu::ConstDeviceRegion{});
+    if (p.device_intervention) {
+      p.device_intervention->initialize();
+    }
     if (p.device_injection) {
       p.device_injection->submit();
     }
@@ -1563,6 +1621,17 @@ void CachedForwardPlan::prepare_device_generation(
                             {p.buffer(slot.arena), slot.offset, slot.bytes},
                             p.injection->position.value, rows);
         }
+        if (p.device_intervention &&
+            p.intervention_boundary->producer_step == i) {
+          const auto& boundary = *p.intervention_boundary;
+          const auto& slot = p.slots.at(boundary.tensor.value);
+          p.device_intervention->submit(
+              {p.buffer(slot.arena), slot.offset,
+               multiply(rows, multiply(boundary.site.vector_width,
+                                       tensors::element_bytes(
+                                           boundary.site.storage_type)))},
+              position, rows);
+        }
         if (captures) {
           for (auto c : p.copies_after.at(i)) {
             const auto& capture = p.captures.at(c);
@@ -1590,13 +1659,22 @@ void CachedForwardPlan::prepare_device_generation(
     p.decode->begin_stage(DeviceSequence::Stage::first_selection);
     submit(remainder ? remainder : shape.chunk, p.recipe.logits_begin,
            p.steps.size(), false);
-    (void)p.sampler->submit_next({&present(p.output), 0, p.logit_bytes});
+    if (forward_only) {
+      p.work_queue().copy({p.retained_vector.get(), 0, p.logit_bytes},
+                          {&present(p.output), 0, p.logit_bytes});
+    } else {
+      (void)p.sampler->submit_next({&present(p.output), 0, p.logit_bytes});
+    }
     p.decode->end_stage();
     p.decode->begin_stage(DeviceSequence::Stage::decode);
-    submit(1, 0, p.recipe.logits_begin, true);
+    if (!forward_only) {
+      submit(1, 0, p.recipe.logits_begin, true);
+    }
     p.decode->begin_selection();
-    submit(1, p.recipe.logits_begin, p.steps.size(), false);
-    (void)p.sampler->submit_next({&present(p.output), 0, p.logit_bytes});
+    if (!forward_only) {
+      submit(1, p.recipe.logits_begin, p.steps.size(), false);
+      (void)p.sampler->submit_next({&present(p.output), 0, p.logit_bytes});
+    }
     p.decode->end_stage();
     p.decode->complete();
   } catch (...) {
@@ -1607,6 +1685,61 @@ void CachedForwardPlan::prepare_device_generation(
   p.host_bytes = add(p.host_bytes, extra_host);
   p.peak = add(p.peak, extra_device);
   p.device_generation = true;
+}
+void CachedForwardPlan::prepare_intervention(ResidualIntervention input) {
+  auto& p = *impl_;
+  if (p.committed || p.device_generation || p.intervention || p.failed ||
+      p.finished || input.position.value >= p.options.capacity ||
+      !std::isfinite(input.strength) || input.strength < 0) {
+    throw std::invalid_argument("intervention preparation state");
+  }
+  const auto& boundaries = p.recipe.forward.residual_boundaries;
+  const auto found =
+      std::find_if(boundaries.begin(), boundaries.end(), [&](const auto& b) {
+        return same_point(b.site.point, input.site) &&
+               b.site.vector_width == input.width &&
+               b.site.storage_type ==
+                   p.options.numerical_mode.activation_storage;
+      });
+  if (found == boundaries.end()) {
+    throw std::invalid_argument("unsupported intervention boundary");
+  }
+  if (input.strength == 0) {
+    return;
+  }
+  if (DeviceIntervention::required_bytes >
+      p.options.max_device_bytes - p.peak) {
+    throw std::length_error("intervention budget");
+  }
+  auto prepared = std::make_unique<DeviceIntervention>(
+      *p.device, p.work_queue(), input,
+      p.options.numerical_mode.activation_storage);
+  p.intervention = std::move(input);
+  p.intervention_boundary = *found;
+  p.device_intervention = std::move(prepared);
+  p.peak = add(p.peak, DeviceIntervention::required_bytes);
+}
+DeviceCapture CachedForwardPlan::reconstruct(std::span<const std::uint32_t> ids,
+                                             const std::stop_token& stop) {
+  prepare_device_generation({{}, 0, ids, {}, 0, true});
+  if (stop.stop_requested()) {
+    request_stop();
+  }
+  start_sequence();
+  for (;;) {
+    const auto event = collect_sequence(stop);
+    if (event.kind != DeviceSequence::Kind::terminal) {
+      continue;
+    }
+    finish();
+    if (event.status != static_cast<unsigned>(DeviceSequence::Reason::limit) ||
+        event.position != ids.size()) {
+      throw std::runtime_error(stop.stop_requested()
+                                   ? "reconstruction cancelled"
+                                   : "reconstruction failed");
+    }
+    return {impl_->retained_vector, 0, impl_->logit_bytes};
+  }
 }
 void CachedForwardPlan::request_stop() noexcept {
   if (impl_->decode) {
@@ -1655,6 +1788,9 @@ std::span<const DeviceCapture> CachedForwardPlan::device_captures()
 
 void CachedForwardPlan::prepare_sampling() {
   auto& p = *impl_;
+  if (p.checkpoint->model().output_kind() != models::OutputKind::vocabulary) {
+    throw std::invalid_argument("vector output has no sampler");
+  }
   if (p.sampler) {
     return;
   }

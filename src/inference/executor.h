@@ -1,4 +1,20 @@
 /*
+ * Steering execution, X1: prepare_intervention validates the model-declared
+ * block output, absolute prefix position, FP32 direction lease and strength.
+ * At the producer, device position selects one row h[D]; GPU computes its norm
+ * and stores BF16(h + alpha*norm(h)*direction) before consumers/captures.
+ * reconstruct requires a vector-output model and runs autonomous prefill plus
+ * the final vector head, without a sampler. The returned device allocation owns
+ * D elements independently of scratch/weights. Plans drain before borrowers
+ die.
+ * Admit vector/status storage before graph capture; no hot allocations/copies
+ * to host. Prefix replay uses fresh KV; target weights can serve both branches.
+ * Overlay: steering.md, Device ownership and model phases.
+ * Header design: Core I.1 (#ri-explicit), R.1 (#rr-raii); performance GPU.1
+ * (guidelines/gpu/GPU.1-keep-data-on-device.md), GPU.9
+ * (guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md).
+ * Both corpora queried and rules read for this design, 2026-10-20.
+
  * Axis X1: prepare model recipes, bind storage and execute full or cached
  passes.
  * Contract: verified BoundCheckpoint and Device outlive borrowed plans. A
@@ -87,6 +103,7 @@
 
 #include "inference/cache/cache.h"
 #include "inference/decoding/device.h"
+#include "inference/intervention.h"
 #include "inference/observations.h"
 #include "inference/sampling/device.h"
 
@@ -246,6 +263,9 @@ class CachedForwardPlan {
   [[nodiscard]] ConsumedChunk consume(std::span<const std::uint32_t> token_ids,
                                       bool need_next_logits);
   void prepare_sampling();
+  void prepare_intervention(ResidualIntervention);
+  [[nodiscard]] DeviceCapture reconstruct(std::span<const std::uint32_t>,
+                                          const std::stop_token& = {});
   // One prepared request owns prefill, first selection and decode. Returned
   // events are observation only; retained capture owners outlive this plan.
   struct DeviceGenerationRequest {
@@ -254,6 +274,7 @@ class CachedForwardPlan {
     std::span<const std::uint32_t> prompt_ids;
     std::span<const std::uint32_t> stop_ids;
     std::size_t max_new_tokens;
+    bool forward_only = false;
   };
   void prepare_device_generation(const DeviceGenerationRequest&);
   void start_sequence();

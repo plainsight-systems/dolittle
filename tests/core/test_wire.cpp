@@ -1,4 +1,11 @@
 /*
+ * Steering units preserve full-width variant IDs and reject invalid strength
+ * before typed admission. No session, socket or model execution occurs.
+ * Steering corpus consultation, header design and implementation 2026-10-20:
+ * Core I.1 (#ri-explicit), typed contracts; performance MEM.9, bounded setup
+ * before execution (guidelines/memory/MEM.9-embedded-allocate-at-init.md).
+ * Both local corpora queried and full rules read.
+ *
  * Axis A1/D3: pure wire contracts; no sockets, threads, filesystem or GPU.
  * Inputs are owned JSON strings and presentation values; outputs preserve IDs,
  * binary token bytes and contiguous cursors. Reject ambiguous fields and
@@ -42,6 +49,22 @@ int main() try {
   expect_throws<std::invalid_argument>([&] {
     (void)server::decode_command({"POST", "/api/v1/runs", malformed.dump()},
                                  limits);
+  });
+  const auto steering_settings = nlohmann::json::parse(body).at("settings");
+  auto steering = nlohmann::json{{"request", "steer"},
+                                 {"variant", "9007199254740993"},
+                                 {"explanation", "edited text"},
+                                 {"strength", 0.5},
+                                 {"settings", steering_settings}};
+  const auto steered = server::decode_command(
+      {"POST", "/api/v1/runs/1/steering", steering.dump()}, limits);
+  check(std::get<experiment::SteerRequest>(steered).edit.variant.value ==
+            9007199254740993ULL,
+        "variant identity preserves 64 bits");
+  steering.at("strength") = 2.1;
+  expect_throws<std::invalid_argument>([&] {
+    (void)server::decode_command(
+        {"POST", "/api/v1/runs/1/steering", steering.dump()}, limits);
   });
   experiment::TokenDelta delta{
       {experiment::StreamRole::target, 0}, 0, 1, 0, {}, {}};

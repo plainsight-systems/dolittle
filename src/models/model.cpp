@@ -1,4 +1,17 @@
 /*
+ * Steering validation, M6: match declared writable [N,D] residuals to the
+ * complete observation catalog and their exact producer. Single-producer and
+ * read-before-write checks order all consumers after mutation. Validate the
+ * selected terminal output against its explicit vocabulary/vector kind and
+ * width. O(recipe) metadata checks; no device work or borrowed result lifetime.
+ * Overlay: steering.md, Full transformer flow and the mutation boundary.
+ * Implementation consultation: Core I.7 (#ri-post) makes output and mutation
+ * invariants explicit; GPU.1 keeps results device-owned; GDSA.2 fixes
+ arithmetic
+ * independent of batching. Both corpora queried/read, 2026-10-20. Sources:
+ * guidelines/gpu/GPU.1-keep-data-on-device.md;
+ * guidelines/gpu-dsa/GDSA.2-declare-each-reductions-determinism.md.
+
  * Shared model lifetime and structural recipe validation.
  * Axis M6: pure structural validation of a model-produced forward recipe.
  * Contract: implement validate_recipe and Model lifetime definitions.
@@ -262,19 +275,47 @@ void validate_recipe(const Model& model, const ForwardRecipe& recipe,
     }
     found->second.tensor = value.tensor;
   }
+  std::unordered_set<std::size_t> writable;
+  for (const auto& boundary : recipe.residual_boundaries) {
+    const auto found = sites.find(boundary.site.point);
+    if (boundary.site.point.boundary != ObservationBoundary::block_output ||
+        found == sites.end() || !found->second.tensor ||
+        found->second.tensor->value != boundary.tensor.value ||
+        boundary.site.vector_width != found->second.site.vector_width ||
+        boundary.site.storage_type != found->second.site.storage_type ||
+        boundary.producer_step >= recipe.operations.size() ||
+        !writable.insert(boundary.tensor.value).second) {
+      throw std::invalid_argument("invalid residual mutation boundary");
+    }
+    const auto uses = kernels::validate_operation(
+        recipe.operations.at(boundary.producer_step), recipe.tensors, mode);
+    if (std::none_of(uses.begin(), uses.end(), [&](const auto& use) {
+          return use.tensor.value == boundary.tensor.value &&
+                 use.access == kernels::OperandAccess::write;
+        })) {
+      throw std::invalid_argument(
+          "residual boundary does not name its producer");
+    }
+  }
+  if ((recipe.logits && recipe.vector_output) ||
+      (recipe.logits && model.output_kind() != OutputKind::vocabulary) ||
+      (recipe.vector_output && model.output_kind() != OutputKind::vector)) {
+    throw std::invalid_argument("model endpoint kind mismatch");
+  }
+  const auto output = recipe.terminal_output();
   if (logit_positions.empty()) {
-    if (recipe.logits) {
+    if (output) {
       throw std::invalid_argument("unrequested logits must be absent");
     }
   } else {
-    if (!recipe.logits) {
+    if (!output) {
       throw std::invalid_argument("requested logits are absent");
     }
-    const auto& layout = layout_at(*recipe.logits);
+    const auto& layout = layout_at(*output);
     const auto expected = tensors::contiguous_layout(
         mode.activation_storage,
-        std::array{logit_positions.size(), model.vocabulary_size()});
-    if (sources.at(recipe.logits->value) != Source::operation ||
+        std::array{logit_positions.size(), model.output_width()});
+    if (sources.at(output->value) != Source::operation ||
         !same_layout(layout, expected)) {
       throw std::invalid_argument(
           "selected logits layout or producer mismatch");

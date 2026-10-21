@@ -1,13 +1,22 @@
 /*
- * CUDA execution of inference/decoding/device.h; axis X1/X4.
- * Contract/algorithm: execution-boundary.md sections 3-4. One root graph owns
- * full-chunk WHILE, remainder IF, first-selection IF and decode WHILE bodies.
- * Device position controls ID gathers, KV placement and capture destinations.
- * Decode commits consumption before its conditional head/sample tail; every
- * selected ID is consumed even when cancellation races with its publication.
- * Capture bytes copy D2D into independent owners. Only immutable 32-byte events
- * cross to mapped host memory. Release/acquire publishes them without CPU ack.
- * Graph edges order all readers before state/scratch reuse; no grid spin waits.
+ * AR/steering control extension, X1/X4: forward_only performs all fixed input
+ * chunks followed by one vector head, publishing no sampled IDs. Null sampler
+ * regions are valid only in that mode. Mutation status is latched at chunk and
+ * selection boundaries; terminal state checks one application after full
+ * replay. All decisions read device words. No extra host transfers or hot
+ * allocations. Overlay: steering.md, Device ownership and model phases. Core
+ * I.7 (#ri-post) and performance GPU.1
+ * (guidelines/gpu/GPU.1-keep-data-on-device.md), queried and read for
+ * implementation 2026-10-20, enforce explicit autonomous control. CUDA
+ * execution of inference/decoding/device.h; axis X1/X4. Contract/algorithm:
+ * execution-boundary.md sections 3-4. One root graph owns full-chunk WHILE,
+ * remainder IF, first-selection IF and decode WHILE bodies. Device position
+ * controls ID gathers, KV placement and capture destinations. Decode commits
+ * consumption before its conditional head/sample tail; every selected ID is
+ * consumed even when cancellation races with its publication. Capture bytes
+ * copy D2D into independent owners. Only immutable 32-byte events cross to
+ * mapped host memory. Release/acquire publishes them without CPU ack. Graph
+ * edges order all readers before state/scratch reuse; no grid spin waits.
  * Failure ends partial capture and drains before destruction. All regions and
  * journal bounds are admitted before launch; collection never allocates.
  * Optimization: graph size is O(recipe), host output O(P+G), device control
@@ -59,6 +68,8 @@ struct Control {
   State* state{};
   const unsigned *selection{}, *terminal{}, *prompt_ids{}, *injection_status{};
   const float* injection_norm{};
+  const unsigned *intervention_status{}, *intervention_count{};
+  bool forward_only = false;
   unsigned* token_input{};
   Publication* publication{};
   Event* events{};
@@ -86,6 +97,9 @@ __global__ void decide_stage(Control c, Stage stage) {
     s.error = *c.injection_status;
     publish(c, {Kind::injection, s.error, 0, 0, 0, *c.injection_norm});
   }
+  if (c.intervention_status) {
+    s.error |= *c.intervention_status;
+  }
   bool run = false;
   if (!s.error) {
     switch (stage) {
@@ -97,7 +111,8 @@ __global__ void decide_stage(Control c, Stage stage) {
               s.position == c.prompt - c.prompt % c.chunk;
         break;
       case Stage::first_selection:
-        run = !cancelled(c) && s.position == c.prompt && c.generated != 0;
+        run = !cancelled(c) && s.position == c.prompt &&
+              (c.generated != 0 || c.forward_only);
         break;
       case Stage::decode:
         // A selection promises consumption, including EOS and cancellation.
@@ -117,9 +132,13 @@ __global__ void finish_prompt(Control c, std::size_t rows, bool repeat) {
   auto& s = *c.state;
   publish(c, {Kind::consumed, 0, s.position, rows, 0, 0});
   s.position += rows;
+  if (c.intervention_status) {
+    s.error |= *c.intervention_status;
+  }
   if (repeat) {
-    cudaGraphSetConditional(c.condition[0],
-                            !cancelled(c) && s.position + c.chunk <= c.prompt);
+    cudaGraphSetConditional(
+        c.condition[0],
+        !s.error && !cancelled(c) && s.position + c.chunk <= c.prompt);
   }
 }
 __global__ void finish_selection(Control c) {
@@ -134,7 +153,11 @@ __global__ void finish_consumption(Control c) {
   auto& s = *c.state;
   publish(c, {Kind::consumed, 0, s.position, 1, 0, 0});
   ++s.position;
-  const bool more = !*c.terminal && s.generated < c.generated && !cancelled(c);
+  if (c.intervention_status) {
+    s.error |= *c.intervention_status;
+  }
+  const bool more =
+      !s.error && !*c.terminal && s.generated < c.generated && !cancelled(c);
   cudaGraphSetConditional(c.condition[4], more);
   // The loop continues only if the selection branch below succeeds.
   cudaGraphSetConditional(c.condition[3], 0);
@@ -143,7 +166,13 @@ __global__ void continue_decode(Control c) {
   cudaGraphSetConditional(c.condition[3], !c.state->error);
 }
 __global__ void finish_sequence(Control c) {
-  const auto& s = *c.state;
+  auto& s = *c.state;
+  if (c.intervention_status) {
+    s.error |= *c.intervention_status;
+    if (s.position >= c.prompt && *c.intervention_count != 1) {
+      s.error = 1;
+    }
+  }
   const auto reason = s.error ? Reason::failure
                               : (s.generated && *c.terminal
                                      ? Reason::eos
@@ -234,6 +263,7 @@ struct DeviceSequence::Impl {
     control.prompt = shape.prompt;
     control.generated = shape.generated;
     control.chunk = shape.chunk;
+    control.forward_only = shape.forward_only;
   }
   Impl(const Impl&) = delete;
   Impl& operator=(const Impl&) = delete;
@@ -333,10 +363,15 @@ void DeviceSequence::begin(gpu::ConstDeviceRegion selection,
                            gpu::DeviceRegion tokens,
                            gpu::ConstDeviceRegion prompt,
                            gpu::ConstDeviceRegion injection_status,
-                           gpu::ConstDeviceRegion injection_norm) {
+                           gpu::ConstDeviceRegion injection_norm,
+                           gpu::ConstDeviceRegion intervention_status,
+                           gpu::ConstDeviceRegion intervention_count) {
   auto& p = *impl_;
-  if (p.begun || selection.bytes != 2 * sizeof(unsigned) ||
-      terminal.bytes != sizeof(unsigned) ||
+  if (p.begun ||
+      (!p.control.forward_only && (selection.bytes != 2 * sizeof(unsigned) ||
+                                   terminal.bytes != sizeof(unsigned))) ||
+      (p.control.forward_only &&
+       (p.control.generated || selection.owner || terminal.owner)) ||
       tokens.bytes < p.control.chunk * sizeof(unsigned) ||
       prompt.bytes != p.control.prompt * sizeof(unsigned) ||
       selection.offset % alignof(unsigned) ||
@@ -354,8 +389,23 @@ void DeviceSequence::begin(gpu::ConstDeviceRegion selection,
       std::span(static_cast<std::byte*>(mapped), p.output.bytes().size())
           .subspan(sizeof(Publication))
           .data());
-  p.control.selection = reinterpret_cast<const unsigned*>(p.pointer(selection));
-  p.control.terminal = reinterpret_cast<const unsigned*>(p.pointer(terminal));
+  if (!p.control.forward_only) {
+    p.control.selection =
+        reinterpret_cast<const unsigned*>(p.pointer(selection));
+    p.control.terminal = reinterpret_cast<const unsigned*>(p.pointer(terminal));
+  }
+  if (intervention_status.owner || intervention_count.owner) {
+    if (intervention_status.bytes != sizeof(unsigned) ||
+        intervention_count.bytes != sizeof(unsigned) ||
+        intervention_status.offset % alignof(unsigned) ||
+        intervention_count.offset % alignof(unsigned)) {
+      throw std::invalid_argument("intervention control bounds");
+    }
+    p.control.intervention_status =
+        reinterpret_cast<const unsigned*>(p.pointer(intervention_status));
+    p.control.intervention_count =
+        reinterpret_cast<const unsigned*>(p.pointer(intervention_count));
+  }
   p.control.prompt_ids = reinterpret_cast<const unsigned*>(p.pointer(prompt));
   p.control.token_input = reinterpret_cast<unsigned*>(p.pointer(tokens));
   if (injection_status.owner) {
@@ -438,7 +488,9 @@ void DeviceSequence::end_stage() {
     if (p.stage == Stage::decode && !p.selection) {
       throw std::logic_error("missing selection tail");
     }
-    finish_selection<<<1, 1, 0, p.stream>>>(p.control);
+    if (!p.control.forward_only) {
+      finish_selection<<<1, 1, 0, p.stream>>>(p.control);
+    }
     if (p.stage == Stage::decode) {
       continue_decode<<<1, 1, 0, p.stream>>>(p.control);
     }

@@ -1,4 +1,17 @@
 /*
+ * AR convention, M7: verify the pinned ar/ artifact digest and metadata hash,
+ * require the 28-block vector model and BF16/FP32 execution. Encode the exact
+ * Summary/text/summary template and require suffix [1318,29,366,1708,29].
+ * The original and edited descriptions are independent inputs; their output
+ * vectors are subtracted later on GPU. No AR state is shared with AV decoding.
+ * O(text bytes) template preparation; owned identities, borrowed tokenizer only
+ * for the call. Overlay: steering.md, Paper method and our model pair.
+ * Header consultation: Core I.1 (#ri-explicit), R.1 (#rr-raii), explicit
+ * inputs and lifetimes; performance GPU.1, resident intermediates, GPU.9,
+ * bounded persistent owners (guidelines/gpu/GPU.1-keep-data-on-device.md;
+ * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md).
+ * Both corpora queried/read, 2026-10-20.
+
  * Pinned Qwen3-8B target/AV pairing contract.
  * Axis M7, qwen3_8b kind: strict trained convention, not a generic YAML
  * interpreter. Contract: sources describe archives verified with
@@ -79,6 +92,8 @@ struct Qwen3_8bSources {
   std::span<const std::byte> verbalizer_metadata;
   std::reference_wrapper<const tokenizers::Tokenizer> verbalizer_tokenizer;
   std::reference_wrapper<const text::Protocol> verbalizer_protocol;
+  std::optional<tensors::formats::SourceIdentity> reconstructor{};
+  std::span<const std::byte> reconstructor_metadata{};
 };
 struct Qwen3_8bLimits {
   std::size_t max_metadata_bytes;

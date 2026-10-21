@@ -1,5 +1,8 @@
 # Architecture
 
+The [steering design](steering.md) covers edited-explanation reconstruction,
+a GPU residual update and matched unsteered/steered continuations.
+
 The accepted [GPU execution boundary and complete transformer flow](execution-boundary.md)
 defines live execution placement and capture ownership. One prepared GPU request
 owns prefill, first selection, decoding and final-token consumption. Captures
@@ -55,7 +58,7 @@ The pinned pair owns its source checks, trained prompt, normalization and output
 tags. Shared execution owns resident weights, fresh sequence caches and explicit
 embedding replacement. Run coordinates target release before AV loading; Record
 owns exact tokens, raw captures and separately retained interpretation attempts.
-Reconstruction remains subsequent work.
+AR reconstruction and matched steering replay extend the same device execution boundary.
 
 The accepted [live experiment application](live-application.md) implements
 source launch, live target progress, selection, AV variants and reconnect.

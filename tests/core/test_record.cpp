@@ -1,4 +1,11 @@
 /*
+ * Steering units validate exact replay boundaries, generated-stop rejection,
+ * immutable edit ownership and atomic trial admission using in-memory values.
+ * Steering corpus consultation, header design and implementation 2026-10-20:
+ * Core I.1 (#ri-explicit), typed contracts; performance MEM.9, bounded setup
+ * before execution (guidelines/memory/MEM.9-embedded-allocate-at-init.md).
+ * Both local corpora queried and full rules read.
+ *
  * Axis R4 isolated record invariants: owned rows survive source moves,
  * unavailable rows remain absent, valid variants append, rejected variants
  * leave state intact. Construct only in-memory records; no application flow or
@@ -96,6 +103,52 @@ int main() try {
   completed.outcome = experiment::AttemptOutcome::completed;
   completed.stage = experiment::AttemptStage::complete;
   const auto completed_id = completed_record.append(completed);
+  {
+    auto t = target();
+    tests::check(
+        experiment::replay_prefix(t, {key.site, {0}}) == 1 &&
+            experiment::replay_prefix(t, key) == 2,
+        "replay keeps full prompt or prefix through selected generated token");
+    t.generation.stop_ids.push_back(2);
+    tests::expect_throws<std::invalid_argument>(
+        [&] { (void)experiment::replay_prefix(t, key); });
+    t = target();
+    t.pair.reconstructor =
+        dolittle::tensors::formats::SourceIdentity{"ar", "revision", "digest"};
+    experiment::Record trials(std::move(t), {65536, 2, 1});
+    auto sample = completed;
+    sample.explanation = {nla::ExplanationFormat::complete,
+                          nla::ByteRange{0, 1}};
+    const auto source = trials.append(sample);
+    experiment::SteeringTrial trial{};
+    trial.variant = source;
+    trial.capture = key;
+    trial.original = "b";
+    trial.edited = "c";
+    trial.original_ar_tokens = {1};
+    trial.edited_ar_tokens = {2};
+    trial.strength = 0.5F;
+    trial.settings = sample.requested_settings;
+    trial.prefix_tokens = 2;
+    trial.original_prompt_tokens = 1;
+    trial.reconstructor = trials.target().pair.reconstructor;
+    trial.outcome = experiment::AttemptOutcome::failed;
+    trial.message = "cancelled before branch execution";
+    auto invalid_trial = trial;
+    invalid_trial.prefix_tokens = 1;
+    tests::expect_throws<std::invalid_argument>(
+        [&] { (void)trials.append(invalid_trial); });
+    tests::check(trials.trial_count() == 0,
+                 "rejected trial does not alter record");
+    const auto id_trial = trials.append(trial);
+    trial.edited = "changed after append";
+    tests::check(
+        trials.trial(id_trial).steering.edited == "c" &&
+            trials.target().generation.tokens == target().generation.tokens,
+        "retained trial owns edit and preserves original generation");
+    tests::expect_throws<std::length_error>(
+        [&] { (void)trials.append(trial); });
+  }
   const auto bytes_before = completed_record.retained_bytes();
   completed.decoded.tokens.at(0).id = 99;
   tests::expect_throws<std::invalid_argument>(

@@ -36,7 +36,7 @@ def validate(data):
     roles = set()
     for model in data['models']:
         role = model['role']
-        if role not in {'target', 'verbalizer'} or role in roles:
+        if role not in {'target', 'verbalizer', 'reconstructor'} or role in roles:
             raise ValueError('Invalid or duplicate role')
         roles.add(role)
         if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', model['repo']) or not re.fullmatch(r'[a-f0-9]{40}', model['revision']):
@@ -50,9 +50,9 @@ def validate(data):
             if type(item['bytes']) is not int or item['bytes'] < 0 or not re.fullmatch(r'[a-f0-9]{64}', item['sha256']):
                 raise ValueError('Invalid artifact size/digest')
             names.add(name)
-        if model['index'] not in names:
+        if model['index'] not in names and not (role == 'reconstructor' and model['index'] is None):
             raise ValueError('Missing declared index')
-    if roles != {'target', 'verbalizer'}:
+    if not {'target', 'verbalizer'} <= roles:
         raise ValueError('Both model roles are required')
     return data
 

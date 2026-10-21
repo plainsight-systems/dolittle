@@ -1,4 +1,20 @@
 /*
+ * Steering records, R4: retain bounded immutable comparisons alongside the
+ * original target and variants. Resolve source by VariantId and capture key;
+ * preserve exact description bytes, AR IDs, prefix extent and matched settings.
+ * Each branch has its own terminal result and absolute generated segments;
+ * failed/cancelled trials may retain one completed branch. Validate byte/count
+ * budgets and provenance before append, leaving records unchanged on rejection.
+ * replay_prefix returns max(original prompt length,p+1) without retokenization
+ * and rejects a stop ID in the fixed generated prefix. O(prefix) checks; no
+ * GPU work or copying the original captures. Overlay: steering.md, Exact
+ replay.
+ * Header consultation: Core I.1 (#ri-explicit), R.1 (#rr-raii), explicit
+ * inputs and lifetimes; performance GPU.1, resident intermediates, GPU.9,
+ * bounded persistent owners (guidelines/gpu/GPU.1-keep-data-on-device.md;
+ * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md).
+ * Both corpora queried/read, 2026-10-20.
+
  * Axis R4: immutable target capture index and bounded interpretation history.
  * Contract: a record owns target IDs, decoded byte mapping, classifications,
  * capture leases and provenance. It admits bounded variants and validates every
@@ -45,13 +61,17 @@ struct RunId {
 struct VariantId {
   std::uint64_t value;
 };
+struct TrialId {
+  std::uint64_t value;
+};
 struct CaptureKey {
   models::ObservationPoint site;
   models::TokenPosition position;
 };
 struct RecordLimits {
-  std::size_t max_retained_bytes;
-  std::size_t max_variants;
+  std::size_t max_retained_bytes{};
+  std::size_t max_variants{};
+  std::size_t max_trials = 4;
 };
 struct TargetRecord {
   RunId run;
@@ -97,6 +117,40 @@ struct Variant {
   VariantId id{};
   Interpretation interpretation;
 };
+struct SteeringEdit {
+  VariantId variant;
+  std::string explanation;
+  float strength;
+  inference::GenerationSettings settings;
+};
+struct BranchResult {
+  std::optional<inference::GenerationResult> generation;
+  tokenizers::DecodedBytes decoded;
+  std::vector<text::TokenSegment> segments;
+};
+struct SteeringTrial {
+  VariantId variant;
+  CaptureKey capture;
+  std::string original, edited;
+  std::vector<tokenizers::TokenId> original_ar_tokens, edited_ar_tokens;
+  float strength{};
+  inference::GenerationSettings settings{};
+  std::size_t prefix_tokens{}, original_prompt_tokens{};
+  std::optional<tensors::formats::SourceIdentity> reconstructor;
+  std::string numerical_identity =
+      "reconstruction-difference/fp32-eight-lane-v1";
+  BranchResult baseline, steered;
+  AttemptOutcome outcome = AttemptOutcome::failed;
+  std::string message;
+};
+struct Trial {
+  TrialId id{};
+  SteeringTrial steering;
+};
+// Pure replay rule. Keeps the entire original prompt or generated prefix
+// through the selected position, rejects stop-token branches and stale
+// captures.
+[[nodiscard]] std::size_t replay_prefix(const TargetRecord&, CaptureKey);
 class Record {
  public:
   Record(TargetRecord, RecordLimits);
@@ -111,6 +165,9 @@ class Record {
   [[nodiscard]] const Variant& variant(VariantId) const;
   [[nodiscard]] std::size_t retained_bytes() const noexcept;
   [[nodiscard]] VariantId append(Interpretation);
+  [[nodiscard]] std::size_t trial_count() const noexcept;
+  [[nodiscard]] const Trial& trial(TrialId) const;
+  [[nodiscard]] TrialId append(SteeringTrial);
 
  private:
   struct Impl;

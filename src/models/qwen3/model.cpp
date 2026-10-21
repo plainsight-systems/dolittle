@@ -1,4 +1,16 @@
 /*
+ * AR implementation, M6: after the shared L blocks, gather final selected
+ * rows X[C,D], then project X*W_head^T to a vector endpoint. No final norm or
+ * vocabulary weights are constructed for AR. Target output retains its exact
+ * existing arithmetic. Declare each second residual-add producer as a writable
+ * [N,D] boundary; O(L) metadata only. Overlay: steering.md, transformer flow.
+ * Implementation consultation: Core I.7 (#ri-post) makes output and mutation
+ * invariants explicit; GPU.1 keeps results device-owned; GDSA.2 fixes
+ arithmetic
+ * independent of batching. Both corpora queried/read, 2026-10-20. Sources:
+ * guidelines/gpu/GPU.1-keep-data-on-device.md;
+ * guidelines/gpu-dsa/GDSA.2-declare-each-reductions-determinism.md.
+
  * Axis M6, Qwen3 kind: immutable target-model description and forward recipe.
  * Contract: implement model.h for the declared Qwen3 subset only. Validate
  * positive dimensions, checked products, supported dtype, context bound and
@@ -159,7 +171,8 @@ struct BlockParameters {
 
 class Qwen3Model final : public Model {
  public:
-  explicit Qwen3Model(Config config) : config_(config) {
+  explicit Qwen3Model(Config config, bool reconstruction = false)
+      : config_(config), reconstruction_(reconstruction) {
     validate_config(config_);
     const auto q_width =
         checked_product(config_.query_heads, config_.head_width);
@@ -176,9 +189,16 @@ class Qwen3Model final : public Model {
     blocks_.reserve(config_.block_count);
     embedding_ = parameter("token_embedding",
                            {config_.vocabulary_size, config_.residual_width});
-    final_norm_ = parameter("final_norm", {config_.residual_width});
-    vocabulary_ = parameter("vocabulary_projection",
-                            {config_.vocabulary_size, config_.residual_width});
+    if (reconstruction_) {
+      reconstruction_head_ =
+          parameter("reconstruction_head",
+                    {config_.residual_width, config_.residual_width});
+    } else {
+      final_norm_ = parameter("final_norm", {config_.residual_width});
+      vocabulary_ =
+          parameter("vocabulary_projection",
+                    {config_.vocabulary_size, config_.residual_width});
+    }
     for (std::size_t i = 0; i < config_.block_count; ++i) {
       const auto prefix = "blocks." + std::to_string(i) + ".";
       blocks_.push_back({
@@ -205,10 +225,17 @@ class Qwen3Model final : public Model {
   }
 
   std::string_view identity() const noexcept override {
-    return "qwen3-target/full-forward-v1";
+    return reconstruction_ ? "qwen3-reconstructor/vector-v1"
+                           : "qwen3-target/full-forward-v1";
   }
   std::size_t vocabulary_size() const noexcept override {
     return config_.vocabulary_size;
+  }
+  OutputKind output_kind() const noexcept override {
+    return reconstruction_ ? OutputKind::vector : OutputKind::vocabulary;
+  }
+  std::size_t output_width() const noexcept override {
+    return reconstruction_ ? config_.residual_width : config_.vocabulary_size;
   }
   SequenceLength context_limit() const noexcept override {
     return config_.context_limit;
@@ -355,6 +382,9 @@ class Qwen3Model final : public Model {
           add(residual, project(activated, block.down_projection, {n, d}));
       recipe.observations.push_back(
           {site(ObservationBoundary::block_output, i), residual});
+      recipe.residual_boundaries.push_back(
+          {site(ObservationBoundary::block_output, i), residual,
+           recipe.operations.size() - 1});
     }
     if (incremental) {
       incremental->logits_begin = recipe.operations.size();
@@ -368,9 +398,14 @@ class Qwen3Model final : public Model {
       const auto selected = activation({positions.size(), d});
       recipe.operations.emplace_back(
           kernels::GatherRows{residual, selected, std::move(rows)});
-      const auto normalized = norm(selected, final_norm_);
-      recipe.logits = project(normalized, vocabulary_,
-                              {positions.size(), config_.vocabulary_size});
+      if (reconstruction_) {
+        recipe.vector_output =
+            project(selected, reconstruction_head_, {positions.size(), d});
+      } else {
+        const auto normalized = norm(selected, final_norm_);
+        recipe.logits = project(normalized, vocabulary_,
+                                {positions.size(), config_.vocabulary_size});
+      }
     }
     return recipe;
   }
@@ -396,6 +431,8 @@ class Qwen3Model final : public Model {
   }
 
   Config config_;
+  bool reconstruction_;
+  ParameterId reconstruction_head_{};
   std::vector<ParameterSpec> parameters_;
   std::vector<BlockParameters> blocks_;
   ParameterId embedding_{};
@@ -406,5 +443,8 @@ class Qwen3Model final : public Model {
 
 std::unique_ptr<Model> make_model(const Config& config) {
   return std::make_unique<Qwen3Model>(config);
+}
+std::unique_ptr<Model> make_reconstructor(const Config& config) {
+  return std::make_unique<Qwen3Model>(config, true);
 }
 }  // namespace dolittle::models::qwen3

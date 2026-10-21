@@ -1,4 +1,16 @@
 /*
+ * Forward-only and intervention control, X1/X4: forward_only executes prefill
+ * and the final output stage once, then completes without random draws or
+ * decode. Mutation status/count are borrowed device words; stage transitions
+ * latch failures and terminal publication checks exactly one application.
+ * Position stays device-owned. CPU collection cannot schedule continuation.
+ * O(1) extra control metadata, no per-token allocation or transfer.
+ * Overlay: steering.md, Device ownership and model phases.
+ * Header design: Core I.1 (#ri-explicit), R.1 (#rr-raii); performance GPU.1
+ * (guidelines/gpu/GPU.1-keep-data-on-device.md), GPU.9
+ * (guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md).
+ * Both corpora queried and rules read for this design, 2026-10-20.
+
  * Axis X1/X4: autonomous prepared sequence execution and output publication.
  * Contract: Device, Queue and borrowed regions outlive this nonmoving owner.
  * P>0 prompt IDs and G generated IDs fit admitted capacity; B is a positive
@@ -52,7 +64,8 @@ class DeviceSequence {
     float norm{};
   };
   struct Shape {
-    std::size_t prompt, generated, chunk;
+    std::size_t prompt{}, generated{}, chunk{};
+    bool forward_only = false;
   };
   DeviceSequence(gpu::Device&, gpu::Queue&, Shape);
   ~DeviceSequence();
@@ -66,7 +79,9 @@ class DeviceSequence {
   void begin(gpu::ConstDeviceRegion selection, gpu::ConstDeviceRegion terminal,
              gpu::DeviceRegion token_input, gpu::ConstDeviceRegion prompt,
              gpu::ConstDeviceRegion injection_status = {},
-             gpu::ConstDeviceRegion injection_norm = {});
+             gpu::ConstDeviceRegion injection_norm = {},
+             gpu::ConstDeviceRegion intervention_status = {},
+             gpu::ConstDeviceRegion intervention_count = {});
   void begin_stage(Stage);
   void end_stage();
   // Ends the decode forward body and enters its conditional logit/sample tail.

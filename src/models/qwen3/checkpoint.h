@@ -1,4 +1,16 @@
 /*
+ * AR binding, M3: consume a verified archive containing embedding, L sets of
+ * eleven block tensors and a separate value-head weight. Bind [D,D] head by its
+ * explicit role; reject missing/extra tensors, norms and vocabulary heads. The
+ * pinned AR config dtype mismatch has one source-identity-specific exception;
+ * actual tensor dtype remains authoritative and unchanged. Retain archive views
+ * through binding lifetime. O(L log L) metadata and no payload copies.
+ * Overlay: steering.md, Checkpoint acquisition and binding.
+ * Header design: Core I.1 (#ri-explicit), R.1 (#rr-raii); performance GPU.1
+ * (guidelines/gpu/GPU.1-keep-data-on-device.md), GPU.9
+ * (guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md).
+ * Both corpora queried and rules read for this design, 2026-10-20.
+
  * Qwen3 config decoding and target parameter binding.
  * Axis M3, Qwen3 kind. Only this binder knows serialized Qwen3 tensor names.
  * Contract: bind_target takes ownership of an already verified archive and
@@ -90,6 +102,9 @@
 
 namespace dolittle::models::qwen3 {
 [[nodiscard]] std::unique_ptr<BoundCheckpoint> bind_causal_lm(
+    std::shared_ptr<const tensors::formats::TensorArchive> archive,
+    std::string_view configuration_artifact);
+[[nodiscard]] std::unique_ptr<BoundCheckpoint> bind_reconstructor(
     std::shared_ptr<const tensors::formats::TensorArchive> archive,
     std::string_view configuration_artifact);
 struct ParameterBinding {

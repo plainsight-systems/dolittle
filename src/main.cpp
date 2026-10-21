@@ -1,4 +1,13 @@
 /*
+ * Steering composition: open the optional pinned AR archive with its own
+ * tokenizer/provenance and separate value head. Providers bind one model role
+ * at a time; Run schedules GPU residency. Setup verifies all three roles once.
+ * No weight payload is copied by composition; archive mappings are shared.
+ * Steering corpus consultation, header design and implementation 2026-10-20:
+ * Core I.1 (#ri-explicit), typed contracts; performance MEM.9, bounded setup
+ * before execution (guidelines/memory/MEM.9-embedded-allocate-at-init.md).
+ * Both local corpora queried and full rules read.
+ *
  * Axis D2: Linux/NVIDIA composition of the live experiment application.
  * Contract: local operator chooses the manifest/cache/assets, GPU ordinal and
  * listener. HTTP clients cannot change these inputs. Secrets come from a local
@@ -203,7 +212,9 @@ std::shared_ptr<const Request> request(const Json& model,
                  model.at("revision"),
                  {},
                  {},
-                 model.at("index").get<std::string>(),
+                 model.at("index").is_null()
+                     ? std::nullopt
+                     : std::optional(model.at("index").get<std::string>()),
                  safetensors_header_mib * mib,
                  tokenizer_mib * mib,
                  max_tensor_count,
@@ -219,30 +230,37 @@ std::shared_ptr<const Request> request(const Json& model,
   return std::make_shared<const Request>(std::move(result));
 }
 using SharedArchive = std::shared_ptr<const tensors::formats::TensorArchive>;
-experiment::ModelProvider provider(SharedArchive archive) {
-  return [archive = std::move(archive)](std::size_t allowance) {
+experiment::ModelProvider provider(SharedArchive archive,
+                                   bool reconstruction = false) {
+  return [archive = std::move(archive), reconstruction](std::size_t allowance) {
     if (allowance < tokenizer_mib * mib) {
       throw std::length_error("loader allowance");
     }
     auto identity = archive->identity();
     return experiment::LoadedModel{
         std::move(identity),
-        models::qwen3::bind_causal_lm(archive, "config.json"),
+        reconstruction
+            ? models::qwen3::bind_reconstructor(archive, "ar/config.json")
+            : models::qwen3::bind_causal_lm(archive, "config.json"),
         tokenizer_mib * mib};
   };
 }
 struct Sources {
   SharedArchive target;
   SharedArchive verbalizer;
+  SharedArchive reconstructor;
 };
 experiment::RunInputs inputs(const Sources& sources) {
-  const auto& [target_archive, av_archive] = sources;
+  const auto& [target_archive, av_archive, ar_archive] = sources;
   auto target_text = text_helpers(*target_archive),
        av_text = text_helpers(*av_archive);
   auto pair = nla::pairs::make_qwen3_8b(
       {target_archive->identity(), av_archive->identity(),
        av_archive->artifact("nla_meta.yaml"), *av_text.tokenizer,
-       *av_text.protocol},
+       *av_text.protocol,
+       ar_archive ? std::optional(ar_archive->identity()) : std::nullopt,
+       ar_archive ? ar_archive->artifact("ar/nla_meta.yaml")
+                  : std::span<const std::byte>{}},
       {mib, mib, pair_template_tokens});
   const tensors::ComputationMode mode{tensors::ElementType::bfloat16,
                                       tensors::ElementType::float32};
@@ -260,6 +278,17 @@ experiment::RunInputs inputs(const Sources& sources) {
                                "cuda",
                                (metadata_mib + 2 * tokenizer_mib) * mib,
                                inference::sampling::Execution::device};
+  if (ar_archive) {
+    const auto& source = ar_archive->identity();
+    const auto identity = source.repository + "/" + source.revision + "/" +
+                          source.artifact_digest;
+    const auto tokenizer = artifact(*ar_archive, "ar/tokenizer.json");
+    const auto config = artifact(*ar_archive, "ar/tokenizer_config.json");
+    result.reconstructor_tokenizer = tokenizers::make_byte_bpe(
+        {tokenizer, config, identity}, {tokenizer_mib * mib, mib, mib, mib});
+    result.reconstructor = provider(ar_archive, true);
+    result.metadata_host_bytes += tokenizer_mib * mib;
+  }
   return result;
 }
 std::string epoch() {
@@ -313,15 +342,18 @@ int main(int argc, char** argv) try {
                             manifest_allowance_mib * mib)
                             .value;
   if (manifest.at("schema") != 1 || manifest.at("pair") != "qwen3-8b-nla" ||
-      manifest.at("models").size() != 2) {
+      (manifest.at("models").size() != 2 &&
+       manifest.at("models").size() != 3)) {
     throw std::invalid_argument("unsupported production manifest");
   }
-  std::shared_ptr<const Request> target, av;
+  std::shared_ptr<const Request> target, av, ar;
   for (const auto& model : manifest.at("models")) {
     if (model.at("role") == "target" && !target) {
       target = request(model, args.at("--cache"), integrity);
     } else if (model.at("role") == "verbalizer" && !av) {
       av = request(model, args.at("--cache"), integrity);
+    } else if (model.at("role") == "reconstructor" && !ar) {
+      ar = request(model, args.at("--cache"), integrity);
     } else {
       throw std::invalid_argument("duplicate model role");
     }
@@ -352,7 +384,10 @@ int main(int argc, char** argv) try {
   auto av_ready = std::async(std::launch::async, [av] {
     return tensors::formats::safetensors::open(*av);
   });
-  const Sources sources{target_ready.get(), av_ready.get()};
+  auto ar_ready = std::async(std::launch::async, [ar]() -> SharedArchive {
+    return ar ? tensors::formats::safetensors::open(*ar) : nullptr;
+  });
+  const Sources sources{target_ready.get(), av_ready.get(), ar_ready.get()};
   std::cerr << "Model archives ready in "
             << std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                              verification_started)
@@ -380,6 +415,7 @@ int main(int argc, char** argv) try {
       limits,
       "cuda",
       "Qwen3-8B / Qwen3-8B-nla"};
+  options.steering_available = static_cast<bool>(sources.reconstructor);
   server::Server server(session, std::move(options));
   std::signal(SIGINT, signal_handler);
   std::signal(SIGTERM, signal_handler);

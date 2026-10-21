@@ -1,4 +1,13 @@
 /*
+ * Steering wire algorithm: validate bounded edit/strength/settings, decode
+ * variant IDs without numeric loss, and preserve original/edited text plus
+ * baseline/steered stream identities in reconnect pages. Serialize completed
+ * metadata only; no vectors cross HTTP. Cost remains linear in page bytes.
+ * Steering corpus consultation, header design and implementation 2026-10-20:
+ * Core I.1 (#ri-explicit), typed contracts; performance MEM.9, bounded setup
+ * before execution (guidelines/memory/MEM.9-embedded-allocate-at-init.md).
+ * Both local corpora queried and full rules read.
+ *
  * Local live-application HTTP boundary: IMPLEMENTATION, 2026-10-19.
  * Axis A1: assets, wire encoding, request delivery and reconnect pages.
  * Contract: borrow a live Session for Server's full lifetime. Own HTTP
@@ -184,6 +193,10 @@ std::string_view phase(experiment::SessionPhase value) {
                                 "retained",
                                 "loading_verbalizer",
                                 "interpreting",
+                                "loading_reconstructor",
+                                "reconstructing",
+                                "generating_baseline",
+                                "generating_steered",
                                 "stopping",
                                 "unavailable",
                                 "closed"};
@@ -218,7 +231,9 @@ Json event(const experiment::PublishedEvent& event_value) {
               "loading_target",     "generating_target",
               "releasing_target",   "target_retained",
               "loading_verbalizer", "generating_verbalizer",
-              "verbalizer_ready",   "closed"};
+              "verbalizer_ready",   "loading_reconstructor",
+              "reconstructing",     "generating_baseline",
+              "generating_steered", "closed"};
           return {{"type", "phase"},
                   {"phase", names.at(static_cast<std::size_t>(value))}};
         } else if constexpr (std::is_same_v<T, experiment::TokenDelta>) {
@@ -237,9 +252,9 @@ Json event(const experiment::PublishedEvent& event_value) {
                  {"kind", names.at(static_cast<std::size_t>(kind))}});
           }
           return {{"type", "tokens"},
-                  {"role", value.stream.role == experiment::StreamRole::target
-                               ? "target"
-                               : "verbalizer"},
+                  {"role",
+                   std::array{"target", "verbalizer", "baseline", "steered"}.at(
+                       static_cast<std::size_t>(value.stream.role))},
                   {"job", value.stream.job_index},
                   {"first", value.first_position},
                   {"prompt_tokens", value.prompt_tokens},
@@ -285,6 +300,27 @@ Json event(const experiment::PublishedEvent& event_value) {
                                              value.explanation.content->end})
                               : Json(nullptr)},
               {"message", value.message}};
+        } else if constexpr (std::is_same_v<T, experiment::SteeringStarted>) {
+          return {{"type", "steering_started"},
+                  {"variant", std::to_string(value.variant.value)},
+                  {"capture", key(value.capture)},
+                  {"original", value.original},
+                  {"edited", value.edited},
+                  {"strength", value.strength},
+                  {"settings", settings(value.settings)},
+                  {"prefix_tokens", value.prefix_tokens},
+                  {"original_prompt_tokens", value.original_prompt_tokens}};
+        } else if constexpr (std::is_same_v<T, experiment::SteeringAvailable>) {
+          return {{"type", "steering_complete"},
+                  {"trial", std::to_string(value.trial.value)},
+                  {"outcome", outcome(value.outcome)},
+                  {"message", value.message},
+                  {"baseline_stop", value.baseline_stop
+                                        ? Json(reason(*value.baseline_stop))
+                                        : Json(nullptr)},
+                  {"steered_stop", value.steered_stop
+                                       ? Json(reason(*value.steered_stop))
+                                       : Json(nullptr)}};
         } else {
           return {{"type", "request_finished"},
                   {"outcome", outcome(value.outcome)},
@@ -356,6 +392,27 @@ Command decode_command(CommandInput input, WireLimits limits) {
           run,
           {string(document.at("active_request"), limits.max_id_bytes)}};
     }
+    if (suffix == "/steering") {
+      fields(document,
+             {"request", "variant", "explanation", "strength", "settings"});
+      if (!document.at("strength").is_number()) {
+        throw std::invalid_argument("invalid strength");
+      }
+      const auto strength = document.at("strength").get<float>();
+      if (!std::isfinite(strength) || strength < 0 || strength > 2) {
+        throw std::invalid_argument("strength must be between 0 and 2");
+      }
+      auto explanation =
+          string(document.at("explanation"), nla::max_explanation_bytes);
+      if (explanation.empty()) throw std::invalid_argument("empty explanation");
+      return experiment::SteerRequest{
+          {string(document.at("request"), limits.max_id_bytes)},
+          run,
+          {{decimal(string(document.at("variant"), decimal_u64_digits))},
+           std::move(explanation),
+           strength,
+           settings(document.at("settings"))}};
+    }
     if (suffix != "/interpretations") {
       throw std::invalid_argument("unknown command route");
     }
@@ -397,11 +454,13 @@ std::string encode_status(const experiment::SessionStatus& value,
   data.emplace("epoch", options.epoch);
   data.emplace("backend", options.backend_identity);
   data.emplace("pair", options.pair_identity);
+  data.emplace("steering_available", options.steering_available);
   data.emplace(
       "limits",
       Json{{"target_tokens", options.run_limits.max_target_tokens},
            {"verbalizer_tokens", options.run_limits.max_verbalizer_tokens},
            {"variants", options.run_limits.record.max_variants},
+           {"trials", options.run_limits.record.max_trials},
            {"jobs", options.wire.max_jobs}});
   return bounded(data, options.wire.max_response_bytes);
 }

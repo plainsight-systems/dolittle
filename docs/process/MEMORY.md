@@ -1,5 +1,38 @@
 # Project memory
 
+## Causal steering
+
+Andrew accepted the [steering design](../architecture/steering.md) on 2026-10-20.
+It follows the paper's
+original-versus-edited AR reconstruction difference, scaled by the live target
+activation norm and applied once at the selected block output. It preserves
+the original run and compares fresh baseline/steered continuations with matched
+prefix/settings/seed. GPU execution includes AR, difference/normalization,
+mutation and generation; CPU handles setup and observation. The complete feature
+is implemented, including pinned AR acquisition, vector-head execution, retained
+trials, request replay and the comparison interface. Strength zero bypasses AR
+and the intervention and gives identical matched sampled continuations.
+
+Independent frozen steering fixtures pass for tiny FP32/BF16 and the pinned 8B
+pair in native CUDA and forced-PTX execution. The 8B reconstruction, direction
+and selected residual comparisons have zero measured error; continuation IDs
+match. Existing target/AV oracle generators and acceptance limits are unchanged.
+Strict builds, host/CUDA static analysis, host units, Linux ASan/UBSan, CUDA
+memcheck and the real Docker application flow pass. Validation details remain
+in ignored local storage. The integration inventory remains five.
+
+Keep design documents and responses focused on the engineering. Andrew asked
+to remove repeated governance qualifications, review gates and defensive status
+statements, including repeated “this does not prove” commentary. Explain the
+mechanism, implementation and tests directly. State implementation status once;
+keep workflow rules in the workflow document rather than repeating them
+throughout each design.
+
+The pinned AR has 28 blocks, a separate BF16 4096-by-4096 value head and no
+serialized final normalization/vocabulary head. Its config declares FP32 while
+the actual tensors are BF16. Any compatibility exception must be explicit and
+restricted to the verified artifact identity; general binding remains strict.
+
 ## Investigation interface
 
 Andrew accepted the three-region investigation design: point navigation,

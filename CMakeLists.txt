@@ -141,6 +141,7 @@ if(DOLITTLE_CUDA)
         src/kernels/cuda/sampling.cu
         src/kernels/cuda/decode.cu
         src/kernels/cuda/injection.cu
+        src/kernels/cuda/steering.cu
         src/kernels/cuda/normalization.cu
         src/kernels/cuda/rotary.cu
         src/kernels/cuda/attention.cu

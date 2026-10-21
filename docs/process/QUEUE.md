@@ -168,6 +168,14 @@ The existing live service has not been replaced by this source revision.
 
 ## Next
 
+The accepted [steering design](../architecture/steering.md) is implemented:
+pinned AR binding and value-head execution, GPU reconstruction differences and
+residual updates, fresh-KV matched continuations, retained trials and comparison
+UI. Native/forced-PTX independent numerical checks, strict builds, static
+analysis, units, Linux sanitizers, CUDA memcheck and Docker application flow
+pass. Zero-strength sampled branches match exactly; retries and reconnect
+preserve the comparison. Andrew approved committing and pushing the feature.
+
 The browser-access fix is implemented and installed in the live service:
 remembered access across tabs, first-visit/expired-link recovery, and clearer
 launcher instructions. Eleven browser units pass, and the live browser verifies
@@ -203,5 +211,4 @@ remains private.
 
 ## Deferred
 - Browser-only inference.
-- Explanation editing and causal steering.
 - Training an NLA, unless the selected model pairing requires it.

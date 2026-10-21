@@ -1,5 +1,8 @@
 # File and folder mapping
 
+The [steering file mapping](steering.md#change-axes-and-file-mapping) extends
+these families with AR execution, interventions, replay, trial records and UI.
+
 The accepted [GPU execution boundary](execution-boundary.md) defines device ownership,
 GPU normalization/injection and autonomous prefill through final-token
 consumption. Mathematical contracts and independent references remain fixed.

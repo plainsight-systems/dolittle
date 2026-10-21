@@ -1,4 +1,17 @@
 /*
+ * AR endpoint, M6: make_reconstructor owns the same Qwen3 block equations with
+ * embedding, L blocks and a bias-free [D,D] reconstruction_head. For selected
+ * final rows X[C,D], produce X*W^T in activation storage; omit final RMSNorm
+ and
+ * vocabulary head. Target factories and identities remain unchanged. All block
+ * outputs declare intervention boundaries after their second residual addition.
+ * Config determines dimensions; O(L) recipe metadata, no device work here.
+ * Overlay: steering.md, Algorithm and numerical boundaries.
+ * Header design: Core I.1 (#ri-explicit), R.1 (#rr-raii); performance GPU.1
+ * (guidelines/gpu/GPU.1-keep-data-on-device.md), GPU.9
+ * (guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md).
+ * Both corpora queried and rules read for this design, 2026-10-20.
+
  * Axis M6, Qwen3 kind: target-style full causal forward mathematics.
  * Contract: Config describes the supported dense, biasless, untied-vocabulary
  * output kind with Q/K head RMSNorm, SiLU MLP and unscaled split-half RoPE.
@@ -124,5 +137,6 @@ struct Config {
 };
 
 [[nodiscard]] std::unique_ptr<Model> make_model(const Config& config);
+[[nodiscard]] std::unique_ptr<Model> make_reconstructor(const Config& config);
 
 }  // namespace dolittle::models::qwen3

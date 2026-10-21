@@ -193,3 +193,23 @@ repository root so the pinned model manifest can be located. Direct executable
 runs also require that working directory. Keep fixture hashes and reports in
 ignored storage. The generated four-token output is numerical coverage, not an
 interpretation-quality benchmark or proof for arbitrary contexts.
+
+## Independent reconstruction and steering fixtures
+
+`steering_reference.py` extends those same tiny/8B experiment scenarios. It uses
+the pinned kitft `NLACritic` endpoint (last-token raw residual and separate value
+head) and the unchanged forward oracle. It freezes both reconstruction vectors,
+their FP32 normalized difference, and prompt/generated-position replay with zero
+and nonzero strength. The generator rejects existing outputs. The GPU driver
+also checks exact reconstruction equality across prefill chunk sizes and rejects
+a zero reconstruction difference.
+
+```sh
+.venv-validation/bin/python scripts/validation/steering_reference.py --target-fixture .cache/generation-fixtures/tiny-fp32/fixture.json --output .cache/generation-fixtures/tiny-fp32/steering.json
+.venv-validation/bin/python scripts/validation/steering_reference.py --target-fixture .cache/generation-fixtures/tiny-bf16/fixture.json --output .cache/generation-fixtures/tiny-bf16/steering.json
+.venv-validation/bin/python scripts/validation/steering_reference.py --target-fixture .cache/generation-fixtures/qwen3-8b-bf16/fixture.json --ar .cache/validation-8b/models/marco-bazzani--Qwen3-8B-nla/ar --output .cache/generation-fixtures/qwen3-8b-bf16/steering.json
+```
+
+Generate these before running `scripts/check.py gpu`. The runner verifies the
+recorded generator, target fixture and oracle hashes and mounts the AR artifact
+root for container execution. Existing target/AV fixtures and limits stay fixed.

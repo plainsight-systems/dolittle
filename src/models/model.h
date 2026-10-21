@@ -1,4 +1,18 @@
 /*
+ * Steering extension, M6: recipes explicitly distinguish vocabulary rows from
+ * reconstructed vectors and declare writable residual boundaries. Each boundary
+ * names a produced contiguous [N,D] block output and its producer step.
+ Validate
+ * it against the observation catalog and producer before execution; mutation
+ * precedes all consumers. A vector endpoint gathers requested final rows and
+ * projects them to output_width, with no vocabulary or sampling semantics.
+ * Descriptors own metadata only, O(blocks); tensor values stay device-owned.
+ * Overlay: steering.md, Full transformer flow and the mutation boundary.
+ * Header design: Core I.1 (#ri-explicit), R.1 (#rr-raii); performance GPU.1
+ * (guidelines/gpu/GPU.1-keep-data-on-device.md), GPU.9
+ * (guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md).
+ * Both corpora queried and rules read for this design, 2026-10-20.
+
  * Shared model contract and structural recipe validation; concrete equations
  * are separate. Axis M6: model equations, parameter schema and observable
  * values. No backend handles, filenames, tokenizer behavior or NLA-pair
@@ -127,6 +141,12 @@ struct EmbeddingBoundary {
   kernels::TensorId tensor;
   std::size_t producer_step;
 };
+struct ResidualBoundary {
+  ObservationSite site;
+  kernels::TensorId tensor;
+  std::size_t producer_step;
+};
+enum class OutputKind : std::uint8_t { vocabulary, vector };
 struct ForwardRecipe {
   std::vector<tensors::Layout> tensors;
   kernels::TensorId token_input;
@@ -135,6 +155,11 @@ struct ForwardRecipe {
   std::vector<ObservationValue> observations;
   std::optional<kernels::TensorId> logits;
   std::optional<EmbeddingBoundary> embedding_boundary{};
+  std::optional<kernels::TensorId> vector_output{};
+  std::vector<ResidualBoundary> residual_boundaries{};
+  [[nodiscard]] std::optional<kernels::TensorId> terminal_output() const {
+    return logits ? logits : vector_output;
+  }
 };
 
 struct CacheAppend {
@@ -155,6 +180,12 @@ class Model {
   virtual ~Model();
   [[nodiscard]] virtual std::string_view identity() const noexcept = 0;
   [[nodiscard]] virtual std::size_t vocabulary_size() const noexcept = 0;
+  [[nodiscard]] virtual OutputKind output_kind() const noexcept {
+    return OutputKind::vocabulary;
+  }
+  [[nodiscard]] virtual std::size_t output_width() const noexcept {
+    return vocabulary_size();
+  }
   [[nodiscard]] virtual SequenceLength context_limit() const noexcept = 0;
   [[nodiscard]] virtual std::span<const ParameterSpec> parameters()
       const noexcept = 0;

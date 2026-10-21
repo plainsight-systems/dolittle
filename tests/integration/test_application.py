@@ -120,11 +120,11 @@ def run(binary, cache, port, report, hold=False):
                     return json.loads(content) if response.headers.get_content_type() == 'application/json' else content
 
             request('/api/v1/status', authenticated=False, expected=401)
-            assert b'Two views into one generation' in request('/')
+            assert b'What was present before the next word?' in request('/')
             status = request('/api/v1/status')
             epoch = status['epoch']
             settings = dict(mode='greedy', temperature=1, top_k=0, top_p=1, seed='42', max_new_tokens=8)
-            command = dict(request='application-target', prompt=dict(user='What is 2 + 2?', thinking='enabled'), settings=settings)
+            command = dict(request='application-target', prompt=dict(user='A rhyming couplet:\nHe saw a carrot and had to grab it,', thinking='enabled'), settings=settings)
             receipt = request('/api/v1/runs', command, expected=202)
             run_id = receipt['run']
             replay = request('/api/v1/runs', command)
@@ -154,14 +154,48 @@ def run(binary, cache, port, report, hold=False):
             assert target_deltas and retained['capture_ranges']
             prompt_count = target_deltas[0]['prompt_tokens']
             assert any(begin <= prompt_count < end for begin, end in retained['capture_ranges'])
-            capture = {**retained['site'], 'position': prompt_count}
-            interpretation = dict(request='application-interpretation', jobs=[dict(capture=capture, settings={**settings, 'seed':'100', 'max_new_tokens':32})])
+            import base64
+            selected = [e['first']+i for e in target_deltas for i,t in enumerate(e['tokens'])
+                        if e['first']+i < prompt_count and base64.b64decode(e['bytes'])[t['begin']:t['end']].strip()==b'it']
+            assert selected, 'Paper prompt token is missing'
+            capture = {**retained['site'], 'position': selected[-1]}
+            interpretation = dict(request='application-interpretation', jobs=[dict(capture=capture, settings={**settings, 'seed':'100', 'max_new_tokens':256})])
             path = f'/api/v1/runs/{run_id}/interpretations'
             request(path, interpretation, expected=202)
             drain_until(interpretation['request'])
             done = [e for e in events if e['type'] == 'interpretation']
             assert len(done) == 1 and done[0]['outcome'] == 'completed' and done[0]['variant']
             assert any(e['type'] == 'tokens' and e['role'] == 'verbalizer' and e['tokens'] for e in events)
+            assert done[0]['format'] == 'complete' and done[0]['content'], done[0]
+            import base64
+            raw = b''.join(base64.b64decode(e['bytes'])[t['begin']:t['end']]
+                           for e in events if e['type']=='tokens' and e['role']=='verbalizer'
+                           for i,t in enumerate(e['tokens']) if e['first']+i >= e['prompt_tokens'])
+            (report / 'events-before-steering.json').write_text(json.dumps(events))
+            (report / 'sample.bin').write_bytes(raw)
+            original = raw[slice(*done[0]['content'])].decode()
+            steering = dict(request='application-steering',variant=done[0]['variant'],
+                            explanation=original+' The next answer discusses a rabbit.',strength=0.5,
+                            settings={**settings,'max_new_tokens':8})
+            steering_path = f'/api/v1/runs/{run_id}/steering'
+            request(steering_path,steering,expected=202)
+            drain_until(steering['request'])
+            trial = next(e for e in events if e['type']=='steering_complete')
+            assert trial['outcome']=='completed',trial
+            assert request(steering_path,steering)['code']=='replayed'
+            for branch in ('baseline','steered'):
+                assert any(e['type']=='tokens' and e['role']==branch and e['tokens'] for e in events)
+            control = {**steering, 'request':'application-zero-control', 'explanation':original, 'strength':0,
+                       'settings':{**settings,'mode':'categorical','temperature':0.6,'top_p':0.95,'seed':'77'}}
+            request(steering_path,control,expected=202)
+            drain_until(control['request'])
+            control_done = next(e for e in events if e['type']=='steering_complete' and e['request']==control['request'])
+            assert control_done['outcome']=='completed',control_done
+            def continuation_ids(branch):
+                return [t['id'] for e in events if e['type']=='tokens' and e['request']==control['request'] and e['role']==branch
+                        for i,t in enumerate(e['tokens']) if e['first']+i >= e['prompt_tokens']]
+            assert continuation_ids('baseline') == continuation_ids('steered') and continuation_ids('baseline'), 'Zero-strength sampled branches diverged'
+            request(steering_path,{**control,'strength':0.5},expected=409)
             # A lost mutation response and a new reader must not execute a variant twice.
             assert request(path, interpretation)['code'] == 'replayed'
             recovered, after = [], '0'
@@ -174,7 +208,7 @@ def run(binary, cache, port, report, hold=False):
             assert recovered == events and after == cursor
             summary = dict(execution='native' if binary is not None else 'container',
                            run=run_id, events=len(events), target_tokens=sum(len(e['tokens']) for e in target_deltas),
-                           interpretations=len(done), exact_reconnect=True, idempotent_retry=True)
+                           interpretations=len(done), steering_trials=2, exact_reconnect=True, idempotent_retry=True)
             (report / 'result.json').write_text(json.dumps(summary, indent=2) + '\n')
             print(json.dumps(summary), flush=True)
             if hold:

@@ -1,10 +1,21 @@
 /*
- * Axis R4: immutable target capture index and bounded interpretation history.
- * Contract: a record owns target IDs, decoded byte mapping, classifications,
- * capture leases and provenance. It admits bounded variants and validates every
- * count/extent/site before publishing. Capture lookup returns only a completed
- * consumed-token row. Device must outlive device leases, including borrowed
- * row copies held beyond the record. Record contains no execution queue.
+ * Steering retention, R4: validate source sample bytes, exact replay prefix,
+ * independent branch results and matched settings before appending an immutable
+ * bounded trial. Existing captures/variants remain untouched. Byte accounting
+ * includes descriptions, AR IDs, branch token/byte/segment capacities and
+ * source identities. replay_prefix keeps the full original prompt or prefix
+ * through p and rejects generated stop IDs. O(prefix+branch tokens) host
+ * validation, no device work or raw-vector copies. Overlay: steering.md, Exact
+ * replay. Implementation corpora queried/read 2026-10-20: Core I.7 (#ri-post),
+ * explicit retained invariants; GPU.1
+ * (guidelines/gpu/GPU.1-keep-data-on-device.md), keep numerical values with
+ * device owners. Axis R4: immutable target capture index and bounded
+ * interpretation history. Contract: a record owns target IDs, decoded byte
+ * mapping, classifications, capture leases and provenance. It admits bounded
+ * variants and validates every count/extent/site before publishing. Capture
+ * lookup returns only a completed consumed-token row. Device must outlive
+ * device leases, including borrowed row copies held beyond the record. Record
+ * contains no execution queue.
  *
  * Algorithm: logical-overview.md retain/interpret; execution-boundary.md H1/H4.
  * Validate generation provenance and emitted/consumed counts; graceful partial
@@ -162,6 +173,7 @@ struct Record::Impl {
   RecordLimits limits;
   std::vector<Row> rows;
   std::vector<std::unique_ptr<Variant>> variants;
+  std::vector<std::unique_ptr<Trial>> trials;
   std::size_t bytes{};
   Impl(TargetRecord t, RecordLimits l) : target(std::move(t)), limits(l) {}
 };
@@ -192,6 +204,10 @@ Record::Record(TargetRecord target, RecordLimits limits)
     n = add(n, text_bytes(*s));
   }
   n = add(n, add(source_bytes(t.pair.target), source_bytes(t.pair.verbalizer)));
+  if (t.pair.reconstructor) {
+    n = add(n, source_bytes(*t.pair.reconstructor));
+  }
+  n = add(n, text_bytes(t.pair.reconstruction_metadata_sha256));
   std::size_t count = 0;
   for (const auto& c : g.captures) {
     count = add(count, c.positions.size());
@@ -203,6 +219,12 @@ Record::Record(TargetRecord target, RecordLimits limits)
   }
   p.rows.reserve(count);
   p.variants.reserve(limits.max_variants);
+  if (limits.max_trials >
+      limits.max_retained_bytes / sizeof(std::unique_ptr<Trial>)) {
+    throw std::length_error("trial slot budget");
+  }
+  p.trials.reserve(limits.max_trials);
+  n = add(n, allocation(p.trials));
   n = add(n, multiply(p.rows.capacity() - count, sizeof(Impl::Row)));
   n = add(n, multiply(p.variants.capacity() - limits.max_variants,
                       sizeof(std::unique_ptr<Variant>)));
@@ -350,4 +372,144 @@ VariantId Record::append(Interpretation attempt) {
   p.bytes = total;
   return id;
 }
+std::size_t replay_prefix(const TargetRecord& target, CaptureKey capture) {
+  const auto& g = target.generation;
+  if (key({target.capture_site.point, capture.position}) != key(capture) ||
+      !g.prompt_tokens || g.prompt_tokens > g.tokens.size() ||
+      capture.position.value >= g.consumed_tokens ||
+      g.consumed_tokens > g.tokens.size()) {
+    throw std::invalid_argument("invalid steering capture position");
+  }
+  const auto end = std::max(g.prompt_tokens, capture.position.value + 1);
+  for (const auto id :
+       std::span(g.tokens).subspan(g.prompt_tokens, end - g.prompt_tokens)) {
+    if (std::find(g.stop_ids.begin(), g.stop_ids.end(), id) !=
+        g.stop_ids.end()) {
+      throw std::invalid_argument(
+          "cannot branch beyond a generated stop token");
+    }
+  }
+  return end;
+}
+std::size_t Record::trial_count() const noexcept {
+  return impl_->trials.size();
+}
+const Trial& Record::trial(TrialId id) const {
+  if (!id.value || id.value > impl_->trials.size()) {
+    throw std::invalid_argument("unknown steering trial");
+  }
+  return *impl_->trials.at(static_cast<std::size_t>(id.value - 1));
+}
+TrialId Record::append(SteeringTrial attempt) {
+  auto& p = *impl_;
+  const auto& sample = variant(attempt.variant).interpretation;
+  if (sample.outcome != AttemptOutcome::completed ||
+      sample.explanation.format != nla::ExplanationFormat::complete ||
+      !sample.explanation.content ||
+      key(sample.capture) != key(attempt.capture) ||
+      !capture(attempt.capture) ||
+      attempt.prefix_tokens != replay_prefix(p.target, attempt.capture) ||
+      attempt.original_prompt_tokens != p.target.generation.prompt_tokens ||
+      !std::isfinite(attempt.strength) || attempt.strength < 0 ||
+      attempt.strength > 2 || attempt.edited.empty() ||
+      attempt.edited.size() > nla::max_explanation_bytes) {
+    throw std::invalid_argument("invalid steering provenance");
+  }
+  if (!attempt.reconstructor || !p.target.pair.reconstructor ||
+      attempt.reconstructor->repository !=
+          p.target.pair.reconstructor->repository ||
+      attempt.reconstructor->revision !=
+          p.target.pair.reconstructor->revision ||
+      attempt.reconstructor->artifact_digest !=
+          p.target.pair.reconstructor->artifact_digest ||
+      attempt.original_ar_tokens.empty() || attempt.edited_ar_tokens.empty() ||
+      !attempt.settings.max_new_tokens) {
+    throw std::invalid_argument(
+        "missing or mismatched reconstruction provenance");
+  }
+  const auto range = *sample.explanation.content;
+  if (attempt.original !=
+          sample.decoded.bytes.substr(range.begin, range.end - range.begin) ||
+      (attempt.strength > 0 && attempt.original == attempt.edited) ||
+      attempt.original_ar_tokens.size() > nla::max_reconstruction_tokens ||
+      attempt.edited_ar_tokens.size() > nla::max_reconstruction_tokens ||
+      (attempt.outcome != AttemptOutcome::completed &&
+       attempt.outcome != AttemptOutcome::cancelled &&
+       attempt.outcome != AttemptOutcome::failed)) {
+    throw std::invalid_argument("invalid steering description or outcome");
+  }
+  inference::sampling::validate_settings(attempt.settings.sampling);
+  if (p.trials.size() >= p.limits.max_trials) {
+    throw std::length_error("steering trial limit");
+  }
+  auto bytes = add(sizeof(Trial), add(text_bytes(attempt.original),
+                                      text_bytes(attempt.edited)));
+  bytes = add(bytes, add(allocation(attempt.original_ar_tokens),
+                         allocation(attempt.edited_ar_tokens)));
+  bytes = add(bytes, add(text_bytes(attempt.numerical_identity),
+                         text_bytes(attempt.message)));
+  if (attempt.reconstructor) {
+    bytes = add(bytes, source_bytes(*attempt.reconstructor));
+  }
+  for (const auto* branch : {&attempt.baseline, &attempt.steered}) {
+    bytes = add(bytes, add(decoded_bytes(branch->decoded),
+                           allocation(branch->segments)));
+    if (!branch->generation) {
+      if (attempt.outcome == AttemptOutcome::completed ||
+          !branch->decoded.tokens.empty() || !branch->segments.empty()) {
+        throw std::invalid_argument("missing steering branch result");
+      }
+      continue;
+    }
+    const auto& g = *branch->generation;
+    validate_generation(g);
+    if (g.prompt_tokens != attempt.prefix_tokens || !g.captures.empty() ||
+        !same_settings(g.settings, attempt.settings) ||
+        g.checkpoint_identity != p.target.generation.checkpoint_identity ||
+        g.tokenizer_identity != p.target.generation.tokenizer_identity ||
+        g.protocol_identity != p.target.generation.protocol_identity ||
+        g.thinking != p.target.generation.thinking ||
+        g.stop_ids != p.target.generation.stop_ids ||
+        g.numerical_mode.activation_storage !=
+            p.target.generation.numerical_mode.activation_storage ||
+        g.numerical_mode.reduction_accumulation !=
+            p.target.generation.numerical_mode.reduction_accumulation ||
+        !std::equal(
+            g.tokens.begin(),
+            g.tokens.begin() + static_cast<std::ptrdiff_t>(g.prompt_tokens),
+            p.target.generation.tokens.begin())) {
+      throw std::invalid_argument(
+          "steering branch changed fixed input or settings");
+    }
+    if (attempt.outcome == AttemptOutcome::completed &&
+        (g.reason == inference::StopReason::user_stop ||
+         g.reason == inference::StopReason::execution_failure)) {
+      throw std::invalid_argument("incomplete steering branch");
+    }
+    if (attempt.outcome != AttemptOutcome::failed ||
+        !branch->decoded.tokens.empty()) {
+      validate_decoded(branch->decoded,
+                       std::span(g.tokens).subspan(g.prompt_tokens));
+      if (branch->segments.size() != g.tokens.size() - g.prompt_tokens) {
+        throw std::invalid_argument("steering segment count");
+      }
+      for (std::size_t i = 0; i < branch->segments.size(); ++i) {
+        if (branch->segments.at(i).position != g.prompt_tokens + i) {
+          throw std::invalid_argument("steering segment position");
+        }
+      }
+    }
+    bytes = add(bytes, generation_bytes(g));
+  }
+  const auto total = add(p.bytes, bytes);
+  if (total > p.limits.max_retained_bytes) {
+    throw std::length_error("steering retained budget");
+  }
+  const TrialId id{p.trials.size() + 1};
+  auto stored = std::make_unique<Trial>(Trial{id, std::move(attempt)});
+  p.trials.push_back(std::move(stored));
+  p.bytes = total;
+  return id;
+}
+
 }  // namespace dolittle::experiment

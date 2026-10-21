@@ -107,6 +107,17 @@ def main():
                 if digest != expected:
                     parser.error(f"frozen AV provenance mismatch: {source}")
             read_roots.append(Path(reference["root"]).resolve(strict=True))
+            steering = json.loads((fixtures / kind / "steering.json").read_text())
+            for source, expected in (
+                (fixtures / kind / "fixture.json", steering["target_fixture_sha256"]),
+                (ROOT / "scripts/validation/steering_reference.py", steering["generator_sha256"]),
+                (ROOT / "scripts/validation/forward_reference.py", steering["oracle_sha256"]),
+            ):
+                with source.open("rb") as stream:
+                    digest = hashlib.file_digest(stream, "sha256").hexdigest()
+                if digest != expected:
+                    parser.error(f"frozen steering provenance mismatch: {source}")
+            read_roots.append(Path(steering["ar"]["root"]).resolve(strict=True))
         args.report_dir.mkdir(parents=True, exist_ok=True)
         environment = os.environ.copy()
         if args.force_ptx:

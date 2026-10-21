@@ -1,4 +1,11 @@
 /*
+ * AR recipe units check the public vector endpoint and residual mutation
+ * boundaries. They allocate metadata only, never run the transformer.
+ * Steering corpus consultation, header design and implementation 2026-10-20:
+ * Core I.1 (#ri-explicit), typed contracts; performance MEM.9, bounded setup
+ * before execution (guidelines/memory/MEM.9-embedded-allocate-at-init.md).
+ * Both local corpora queried and full rules read.
+ *
  * Axis D3: isolated Qwen3 model-description and recipe-generation contracts.
  * Contract: use small configurations and inspect public owned layouts, semantic
  * parameter roles, observation sites and requested output shapes. Invalid
@@ -259,6 +266,20 @@ void context_and_vocabulary_boundaries() {
 }  // namespace
 
 int main() try {
+  {
+    const auto config = configuration();
+    auto ar = models::qwen3::make_reconstructor(config);
+    check(ar->output_kind() == models::OutputKind::vector &&
+              ar->output_width() == config.residual_width,
+          "AR exposes a residual-width vector endpoint");
+    const auto recipe = ar->incremental_forward(
+        {2}, {ElementType::bfloat16, ElementType::float32});
+    check(!recipe.forward.logits && recipe.forward.vector_output.has_value(),
+          "AR has no vocabulary output");
+    check(recipe.forward.residual_boundaries.size() == config.block_count,
+          "each block declares a writable output boundary");
+  }
+
   descriptions_and_owned_recipes();
   invalid_configuration();
   invalid_requests();

@@ -1,4 +1,12 @@
 /*
+ * Extend the existing tiny/8B experiment with AR and matched steering replay
+ * after releasing the AV. Accumulate its independent numerical verdict into
+ * the existing scenario result; no extra integration scenario is registered.
+ * Steering corpus consultation, header design and implementation 2026-10-20:
+ * Core I.1 (#ri-explicit), typed contracts; performance MEM.9, bounded setup
+ * before execution (guidelines/memory/MEM.9-embedded-allocate-at-init.md).
+ * Both local corpora queried and full rules read.
+ *
  * Axis D3: real target-to-AV CUDA experiment integration driver.
  * Contract: one fixture bundle produced by the independent reference generator;
  * artifacts must pass the production size/hash loader before binding. A run
@@ -850,6 +858,9 @@ Json run(const std::filesystem::path& fixture) {
   auto interpretation = tests::check_interpretation(*device, fixture);
   passed = passed && interpretation.at("passed").get<bool>();
   report.emplace("interpretation", std::move(interpretation));
+  auto steering = tests::check_steering(*device, fixture);
+  passed = passed && steering.at("passed").get<bool>();
+  report.emplace("steering", std::move(steering));
   device.reset();
   for (std::size_t i = 0; i < results.size(); ++i) {
     report.at("cases").at(i).emplace(

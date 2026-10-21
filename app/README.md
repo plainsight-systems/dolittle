@@ -17,7 +17,7 @@ the image does not configure Docker's host GPU runtime. The launcher checks that
 runtime and GPU visibility before loading models.
 
 Use Python 3.11+. The launcher builds the application from this checkout and
-prepares the revision-pinned target/AV cache once, downloading missing files and
+prepares the revision-pinned target/AV/AR cache once, downloading missing files and
 verifying SHA-256 before saving a setup receipt. Later launches check the receipt
 and file metadata without rehashing the weights. Changed files or a new manifest
 trigger setup again. Rebuilding application code does not invalidate model setup.
@@ -31,7 +31,7 @@ completed verification; normal launch does not perform a fresh content hash.
 
 Keep that process running. Model files live in `models/` by default; use
 `--cache /path/to/cache` to choose persistent storage and `--offline` to require
-all verified files to exist. The cache needs 32.8 GB (30.5 GiB) for the selected
+all verified files to exist. The cache needs 44.9 GB (41.8 GiB) for the selected
 weights, plus space for metadata and a partial download. No application
 executable is downloaded. The initial hardware target is a 24 GB NVIDIA GPU.
 
@@ -83,7 +83,7 @@ Selecting a point shows only its samples, with source context directly above.
 choose another point. On narrow screens, the point list becomes a selector and
 comparison stacks vertically. Background completion updates the original point
 without changing the user's selection. Stop reason, raw tags, revisions and
-sampling settings stay under **Generation details**. Format is not a quality score.
+sampling settings stay under **Generation details**.
 
 The browser shows the original prompt when saved submission data uniquely
 matches its retained token groups. Otherwise **Model input** displays the exact
@@ -99,6 +99,22 @@ Interpretation has an independent 256-token default within a 512-token AV contex
 The inspector displays the service's remaining retained-sample capacity and
 per-request job bound before submission. Interpretation becomes available after
 target generation finishes. AV weights remain resident between requests.
+
+Choose **Steer from this sample** on a completed explanation. Edit its copy,
+set strength (default 0.5), and run a comparison. The reconstructor converts both
+explanations to vectors; their normalized difference changes the selected target
+activation once. **Unsteered** and **Steered** continue from the same fixed token
+prefix with matching settings and seed, each showing its thinking and answer.
+The original generation and captures remain available. Strength zero runs a
+no-edit control. Return to comparisons from the point list or retained-trial
+selector; refresh restores their streams from the journal.
+
+Each run retains up to four comparisons. Edits are capped at 32 KiB, reconstructed
+prompts at 4,096 tokens, and each continuation at the remaining space within
+8,192 total tokens. The service checks space for both branches before execution.
+The AV is released before loading AR; AR is released before the target. The two
+branches share resident target weights and use separate fresh caches. Model
+loading, reconstruction and each branch have distinct progress states.
 
 Stop signals the active request and its remaining jobs. Browser disconnects do
 not cancel work. Refresh replays the bounded journal without rerunning inference.

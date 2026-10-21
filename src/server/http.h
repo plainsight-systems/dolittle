@@ -1,4 +1,13 @@
 /*
+ * Steering transport contract: POST /api/v1/runs/{run}/steering carries a
+ * variant, edited text, strength and matched generation settings. The session
+ * resolves source capture/prefix; clients cannot provide activation vectors.
+ * Branch events retain request identity for reconnect and scoped cancellation.
+ * Steering corpus consultation, header design and implementation 2026-10-20:
+ * Core I.1 (#ri-explicit), typed contracts; performance MEM.9, bounded setup
+ * before execution (guidelines/memory/MEM.9-embedded-allocate-at-init.md).
+ * Both local corpora queried and full rules read.
+ *
  * Local live-application HTTP boundary: IMPLEMENTED CONTRACT, 2026-10-19.
  * Axis A1: assets, wire encoding, request delivery and reconnect pages.
  * Contract: borrow a live Session for Server's full lifetime. Own HTTP
@@ -54,7 +63,7 @@
 namespace dolittle::server {
 using Command =
     std::variant<experiment::StartRequest, experiment::InterpretRequest,
-                 experiment::StopRequest>;
+                 experiment::SteerRequest, experiment::StopRequest>;
 struct WireLimits {
   std::size_t max_request_bytes;
   std::size_t max_response_bytes;
@@ -85,6 +94,7 @@ struct HttpOptions {
   experiment::RunLimits run_limits;
   std::string backend_identity;
   std::string pair_identity;
+  bool steering_available = false;
 };
 [[nodiscard]] std::string encode_status(const experiment::SessionStatus&,
                                         const HttpOptions&);

@@ -1,4 +1,12 @@
 /*
+ * Steering transport: route the authenticated versioned steering command
+ * through the same bounded parser and session queue as interpretation. A
+ * socket never waits for either continuation; event polling owns publication.
+ * Steering corpus consultation, header design and implementation 2026-10-20:
+ * Core I.1 (#ri-explicit), typed contracts; performance MEM.9, bounded setup
+ * before execution (guidelines/memory/MEM.9-embedded-allocate-at-init.md).
+ * Both local corpora queried and full rules read.
+ *
  * Local live-application HTTP boundary: IMPLEMENTATION, 2026-10-19.
  * Axis A1: assets, wire encoding, request delivery and reconnect pages.
  * Contract: borrow a live Session for Server's full lifetime. Own HTTP
@@ -186,7 +194,7 @@ struct Server::Impl {
           }
         });
     http.Post(
-        R"(/api/v1/runs(?:/[0-9]+/(?:interpretations|stop))?)",
+        R"(/api/v1/runs(?:/[0-9]+/(?:interpretations|steering|stop))?)",
         [this](const httplib::Request& request, httplib::Response& response) {
           if (request.get_header_value("Content-Type") != "application/json") {
             error(response, http_bad_request, "Expected application/json.");

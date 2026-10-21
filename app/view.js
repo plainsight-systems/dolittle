@@ -5,7 +5,7 @@
 import { createClient, requestId } from './client.js';
 import { newState, applyPage, captureAvailable, interpretationText, selectionJobs,
   generationSettings, outputSummary, selectedText, sourceSection, sourceGroups,
-  findOccurrences, captureKey, investigationSamples, promptExcerpt, samplesAt, nextSampleSeed } from './controller.js';
+  findOccurrences, captureKey, investigationSamples, promptExcerpt, samplesAt, nextSampleSeed, canSteer, continuationText, editedRange } from './controller.js';
 const $ = id => document.getElementById(id);
 const labels = { prompt: 'Prompt', reasoning: 'Thinking', answer: 'Answer', unclassified: 'Other' };
 const client = createClient();
@@ -14,8 +14,9 @@ let retryAction = null, polling = false, pollDelay = 100, capabilities = { jobs:
 let section = 'prompt', comparing = false, lastIdentity = '', restored = false, seedInitialized = false;
 let submitted = [], promptRecord = null, allSamples = [], sampleChoices = new Map();
 let sourceNodes = new Map(), sourceSignature = '', pointsSignature = '', sampleSignature = '';
+let steeringOpen = false, steeringSource = null, steeringRequest = '', trialListSignature = '';
 let matches = [], matchIndex = 0, searchSignature = '';
-const phaseLabels = { idle: 'Ready for a prompt', queued: 'Queued', loading_target: 'Loading target model', generating_target: 'Generating & capturing', releasing_target: 'Retaining captures', retained: 'Captures ready', loading_verbalizer: 'Loading the NLA', interpreting: 'Interpreting', stopping: 'Stopping', unavailable: 'Run unavailable', closed: 'Service closed' };
+const phaseLabels = { idle: 'Ready for a prompt', queued: 'Queued', loading_target: 'Loading target model', generating_target: 'Generating & capturing', releasing_target: 'Retaining captures', retained: 'Captures ready', loading_verbalizer: 'Loading the NLA', interpreting: 'Interpreting', loading_reconstructor: 'Loading reconstructor', reconstructing: 'Reconstructing the edit', generating_baseline: 'Generating unsteered continuation', generating_steered: 'Generating steered continuation', stopping: 'Stopping', unavailable: 'Run unavailable', closed: 'Service closed' };
 function el(tag, text, cls) { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; }
 function write(id, text) { if ($(id).textContent !== text) $(id).textContent = text; }
 function shown(text) { return text.replace(/ /g, '␠').replace(/\n/g, '↵').replace(/\t/g, '⇥'); }
@@ -29,7 +30,7 @@ function requireAccess(error) {
   connected = false; needsAccess = true; $('access').hidden = false;
   $('access-message').textContent = error.message;
   write('connection', 'Access link needed');
-  for (const id of ['generate', 'stop', 'interpret']) $(id).disabled = true;
+  for (const id of ['generate', 'stop', 'interpret', 'steering-run']) $(id).disabled = true;
 }
 function point(position) { return state.target.groups.find(g => g.first <= position && g.last >= position); }
 function owner(position) {
@@ -47,6 +48,7 @@ function groupsFor(current = section) {
   return sourceGroups(state, current, $('show-controls').checked);
 }
 function resetView() {
+  steeringOpen = false; steeringSource = null; steeringRequest = ''; trialListSignature = '';
   section = 'prompt'; comparing = false; sampleChoices = new Map(); seedInitialized = false;
   sourceNodes = new Map(); sourceSignature = ''; pointsSignature = ''; sampleSignature = '';
   $('source').replaceChildren(); $('samples').replaceChildren(); $('sample-output').replaceChildren();
@@ -134,7 +136,7 @@ function renderSource() {
 function renderPoints() {
   const positions = [...new Set(allSamples.map(s => s.capture.position))].sort((a, b) => a - b);
   const signature = `${positions.map(p => `${p}:${listAt(p).length}:${listAt(p).some(s => s.pending)}`).join(',')}/${state.selection?.join('/')}`;
-  write('point-count', `${positions.length} points · ${allSamples.length} samples`);
+  write('point-count', `${positions.length} point${positions.length === 1 ? '' : 's'} · ${allSamples.length} sample${allSamples.length === 1 ? '' : 's'}`);
   if (signature === pointsSignature) return;
   pointsSignature = signature;
   const focus = document.activeElement?.dataset.point;
@@ -169,7 +171,8 @@ function renderSample(container, sample) {
     const meta = el('div', undefined, 'sample-meta'); meta.append(el('span', '', 'sample-number meta'), el('span', '', 'sample-status meta'));
     const prose = el('div', undefined, 'explanation');
     const details = el('details', undefined, 'details'); details.append(el('summary', 'Generation details'), el('p', '', 'metadata'), el('pre', '', 'raw'));
-    container.append(meta, prose, el('p', '', 'sample-message hint'), details);
+    const steer = el('button', 'Steer from this sample', 'steer-sample');
+    container.append(meta, prose, el('p', '', 'sample-message hint'), steer, details);
   }
   container.querySelector('.sample-number').textContent = `Sample ${samples.findIndex(s => s.key === sample.key) + 1} of ${samples.length}`;
   container.querySelector('.sample-status').textContent = status;
@@ -181,9 +184,12 @@ function renderSample(container, sample) {
     paragraphs.forEach((paragraph, i) => { let p = prose.children[i]; if (!p) { p = el('p'); prose.append(p); } if (p.textContent !== paragraph) p.textContent = paragraph; });
     while (prose.children.length > paragraphs.length) prose.lastChild.remove();
   }
+  const steer = container.querySelector('.steer-sample');
+  steer.hidden = !canSteer(sample) || capabilities.steering_available === false; steer.disabled = !connected || submitting || !!state.status?.active_request || !!state.status?.queued_jobs;
+  steer.onclick = () => openSteering(sample);
   const duplicate = sample.settings?.mode === 'greedy' && samples.some(s => s.key !== sample.key && s.settings?.mode === 'greedy');
-  container.querySelector('.sample-message').textContent = sample.message || (duplicate ? 'Greedy decoding repeats the same selection rule; these are not independent random samples.' : '');
-  container.querySelector('.metadata').textContent = `Block ${sample.capture.block} · ${sample.capture.boundary} · position ${sample.capture.position}\nSeed ${sample.settings?.seed} · ${sample.settings?.mode} · temperature ${sample.settings?.temperature}\nStop: ${sample.stop ?? 'pending'} · format: ${sample.format === 'complete' ? 'explanation tags present' : sample.format ?? 'pending'}\nRequest ${sample.request} · job ${sample.job} · variant ${sample.variant ?? 'pending'}\nTarget ${state.retained?.pair?.target_revision ?? 'unavailable'}\nNLA ${state.retained?.pair?.verbalizer_revision ?? 'unavailable'}\nFormat does not establish accuracy.`;
+  container.querySelector('.sample-message').textContent = sample.message || (sample.format === 'complete' && sample.outcome === 'completed' && !canSteer(sample) ? 'Generate another sample to steer: this output has empty or broken text bytes.' : '') || (duplicate ? 'Greedy decoding uses the same selection rule for each sample.' : '');
+  container.querySelector('.metadata').textContent = `Block ${sample.capture.block} · ${sample.capture.boundary} · position ${sample.capture.position}\nSeed ${sample.settings?.seed} · ${sample.settings?.mode} · temperature ${sample.settings?.temperature}\nStop: ${sample.stop ?? 'pending'} · format: ${sample.format === 'complete' ? 'explanation tags present' : sample.format ?? 'pending'}\nRequest ${sample.request} · job ${sample.job} · variant ${sample.variant ?? 'pending'}\nTarget ${state.retained?.pair?.target_revision ?? 'unavailable'}\nNLA ${state.retained?.pair?.verbalizer_revision ?? 'unavailable'}`;
   const raw = sample.stream ? new TextDecoder().decode(Uint8Array.from(sample.stream.generatedBytes)) : '';
   const pre = container.querySelector('.raw'); if (pre.textContent !== raw) pre.textContent = raw;
 }
@@ -258,11 +264,11 @@ function render() {
   write('generate', state.run ? 'Generate again' : 'Generate');
   $('stop').disabled = !connected || !state.status?.active_request;
   $('stop').hidden = !state.status?.active_request;
-  write('stop', state.retained ? 'Stop interpretation' : 'Stop generation');
+  write('stop', state.trials.has(state.status?.active_request) ? 'Stop comparison' : state.retained ? 'Stop interpretation' : 'Stop generation');
   $('replace-note').hidden = !state.run;
   write('run-label', state.run ? `Experiment ${state.run}` : 'New experiment');
   write('experiment-prompt', promptRecord?.prompt?.user ?? (state.run ? 'Explore the retained generation.' : 'Generate, select a point, then explore its activation.'));
-  $('reader').hidden = comparing; $('inspector').hidden = comparing; $('compare').hidden = !comparing;
+  $('reader').hidden = comparing || steeringOpen; $('inspector').hidden = comparing || steeringOpen; $('compare').hidden = !comparing || steeringOpen; $('steering').hidden = !steeringOpen;
   const summary = outputSummary(state);
   write('target-status', state.run ? `${summary.generated.toLocaleString()} generated tokens${state.retained ? ' · captures ready' : ''}` : 'Enter a prompt above to begin.');
   let notice = '';
@@ -272,10 +278,10 @@ function render() {
   if (state.status?.phase === 'unavailable') notice = 'This run is unavailable. Start a new experiment.';
   $('generation-notice').hidden = !notice; write('generation-notice', notice);
   const working = allSamples.filter(s => s.pending), elsewhere = working.filter(s => s.capture.position !== state.selection?.[0]);
-  const unknown = active && state.retained && !working.length;
+  const unknown = active && state.retained && !working.length && !state.trials.has(state.status?.active_request);
   $('background-status').hidden = !elsewhere.length && !unknown;
   write('background-status', elsewhere.length ? `${elsewhere.length} sample jobs in progress at ${[...new Set(elsewhere.map(s => '#' + s.capture.position))].join(', ')}. Your selection stays here.` : unknown ? 'An interpretation is running from another browser. Its point will appear when the service publishes the result.' : '');
-  renderPoints(); if (comparing) renderCompare(); else { renderSource(); renderSelection(); }
+  renderPoints(); renderSteering(); if (comparing) renderCompare(); else { renderSource(); renderSelection(); }
   if (state.status?.publication_failed) showError(new Error('Live publication failed. This transcript may be incomplete; start a new experiment after the operation stops.'));
 }
 function settings(prefix) {
@@ -334,7 +340,7 @@ async function poll() {
       state = newState(status.epoch, status.run); restored = false;
     }
     if (!restored) { restored = true; restoreMetadata(); if (status.run) $('composer').open = false; }
-    capabilities = status.limits; state.status = status; write('pair', status.pair);
+    capabilities = {...status.limits, steering_available: status.steering_available}; state.status = status; write('pair', status.pair);
     if (state.run) {
       const page = await client.events(state.run, state.cursor); applyPage(state, page);
       pollDelay = page.more || state.status.active_request || state.status.queued_jobs ? 100 : 1000;
@@ -343,7 +349,7 @@ async function poll() {
   } catch (error) {
     connected = false; pollDelay = error.status === 401 ? 1000 : Math.min(Math.max(pollDelay * 2, 1000), 10000);
     if (error.status === 401) requireAccess(error);
-    else { needsAccess = false; write('connection', 'Disconnected — reconnecting'); for (const id of ['generate', 'stop', 'interpret']) $(id).disabled = true; }
+    else { needsAccess = false; write('connection', 'Disconnected — reconnecting'); for (const id of ['generate', 'stop', 'interpret', 'steering-run']) $(id).disabled = true; }
   } finally { polling = false; }
 }
 for (const prefix of ['target', 'av']) $(prefix + '-mode').onchange = () => {
@@ -399,5 +405,89 @@ $('compare-open').onclick = () => {
 };
 $('compare-close').onclick = () => { comparing = false; render(); $('compare-open').focus({ preventScroll: true }); };
 $('compare-a').onchange = renderCompare; $('compare-b').onchange = renderCompare;
+
+function openSteering(sample) {
+  steeringSource = sample; steeringRequest = ''; steeringOpen = true; comparing = false;
+  $('steering-original').textContent = interpretationText(sample);
+  $('steering-edited').value = interpretationText(sample);
+  $('steering-strength').value = '0.5';
+  const settings = state.retained?.settings;
+  for (const [id, key] of Object.entries({seed:'seed', mode:'mode', temperature:'temperature', 'top-p':'top_p'})) $('steering-'+id).value = settings?.[key] ?? $('target-'+id).value;
+  const prefix = Math.max(state.target.promptTokens, sample.capture.position + 1);
+  $('steering-cap').value = String(Math.min(4096, capabilities.target_tokens - prefix));
+  render(); $('steering-edited').focus(); $('steering').scrollIntoView({block:'start'});
+}
+function chooseTrial(request) {
+  const trial = state.trials.get(request); if (!trial) return;
+  steeringOpen = true; steeringRequest = request;
+  steeringSource = allSamples.find(s => s.variant === trial.variant) ?? { variant:trial.variant, capture:trial.capture };
+  $('steering-original').textContent = trial.original; $('steering-edited').value = trial.edited;
+  $('steering-strength').value = trial.strength;
+  for (const [id, key] of Object.entries({seed:'seed', cap:'max_new_tokens', mode:'mode', temperature:'temperature', 'top-p':'top_p'})) $('steering-'+id).value = trial.settings[key];
+  render();
+}
+function renderSteering() {
+  const signature = [...state.trials.keys()].join('/');
+  if (signature !== trialListSignature) {
+    trialListSignature = signature; $('steering-trials').replaceChildren(el('option', 'New comparison')); $('mobile-trial').replaceChildren(el('option', 'Choose a comparison'));
+    $('steering-trials').firstChild.value = ''; $('mobile-trial').firstChild.value = '';
+    [...state.trials.values()].forEach((t, i) => { const option = el('option', `Comparison ${i+1} · #${t.capture.position} · strength ${t.strength}`); option.value = t.request; $('steering-trials').append(option); const mobile = option.cloneNode(true); $('mobile-trial').append(mobile); });
+  }
+  let history = $('steering-history');
+  if (!history) { history = el('div'); history.id = 'steering-history'; $('points').after(history); }
+  if (history.dataset.signature !== signature) {
+    history.dataset.signature = signature; history.replaceChildren();
+    if (state.trials.size) history.append(el('h3', 'Comparisons'));
+    [...state.trials.values()].forEach((t,i) => { const b = el('button', `Comparison ${i+1} · #${t.capture.position}`, 'point'); b.onclick = () => chooseTrial(t.request); history.append(b); });
+  }
+  $('mobile-trials-label').hidden = state.trials.size === 0;
+  $('mobile-trial').value = steeringOpen && state.trials.has(steeringRequest) ? steeringRequest : '';
+  if (!steeringOpen || !steeringSource) return;
+  const trial = state.trials.get(steeringRequest), source = trial ?? steeringSource;
+  $('steering-trials').value = trial ? steeringRequest : '';
+  write('steering-title', `Position ${source.capture.position} · block ${source.capture.block} · variant ${source.variant}`);
+  write('steering-context', nearbyContext(source.capture.position));
+  const prefix = trial?.prefix_tokens ?? Math.max(state.target.promptTokens, source.capture.position+1);
+  const strength = Number($('steering-strength').value);
+  write('steering-strength-help', strength === 0 ? 'No-edit control: both branches run without an intervention.' : `The added vector has ${strength} × the activation’s length.`);
+  const remaining = Math.max(0, (capabilities.trials ?? 4) - state.trials.size);
+  write('steering-budget', `${prefix.toLocaleString()} fixed tokens · ${Math.max(0, capabilities.target_tokens-prefix).toLocaleString()} tokens available per continuation · ${remaining} comparisons remaining.`);
+  $('steering-cap').max = Math.max(0, capabilities.target_tokens-prefix);
+  const busy = !!state.status?.active_request || !!state.status?.queued_jobs;
+  const immutable = !!trial;
+  for (const id of ['edited','strength','seed','cap','mode','temperature','top-p']) $('steering-'+id).disabled = immutable;
+  $('steering-temperature').disabled ||= $('steering-mode').value === 'greedy';
+  $('steering-top-p').disabled ||= $('steering-mode').value === 'greedy';
+  $('steering-run').disabled = immutable || !connected || submitting || busy || !!retryAction || remaining === 0 || (strength > 0 && $('steering-edited').value === $('steering-original').textContent);
+  write('steering-run', immutable ? 'Comparison retained' : 'Run comparison');
+  const [before, changed, after] = editedRange($('steering-original').textContent, $('steering-edited').value);
+  const diff = $('steering-diff'); if (diff.dataset.text !== $('steering-edited').value) { diff.dataset.text = $('steering-edited').value; diff.replaceChildren(document.createTextNode(before), el('mark', changed), document.createTextNode(after)); }
+  const prefixText = state.target.groups.filter(g => g.last < prefix && g.kind !== 'control').map(g => g.text).join('');
+  const pre = $('steering-prefix').querySelector('pre'); if (pre.textContent !== prefixText) pre.textContent = prefixText;
+  write('steering-status', trial?.message || state.requests.get(steeringRequest)?.message || (trial?.outcome ? trial.outcome === 'completed' ? 'Comparison complete' : trial.outcome === 'cancelled' ? 'Comparison stopped' : 'Comparison failed' : trial ? phaseLabels[state.status?.phase] ?? 'Comparison queued' : 'Unsteered runs first, then steered. Both use the same prefix, settings and seed.'));
+  write('steered-heading', `Steered · strength ${trial?.strength ?? strength}`);
+  for (const branch of ['baseline','steered']) {
+    const stop = trial?.[branch+'_stop'];
+    write(branch+'-status', stop ? ({stop_token:'Complete',token_limit:'Budget reached',user_stop:'Stopped',execution_failure:'Failed'}[stop] ?? stop) : trial?.outcome ? trial[branch].tokens.length > prefix ? 'Partial output' : 'Not run' : trial?.[branch].tokens.length ? 'Generating…' : branch === 'steered' ? 'Waiting for unsteered continuation' : 'Ready');
+    for (const kind of ['reasoning','answer','unclassified']) write(branch+'-'+kind, trial ? continuationText(trial, branch, kind) : '');
+  }
+}
+$('steering-close').onclick = () => { steeringOpen = false; render(); $('sample-output').querySelector('.steer-sample')?.focus({preventScroll:true}); };
+$('mobile-trial').onchange = event => { if (state.trials.has(event.target.value)) { chooseTrial(event.target.value); $('steering').scrollIntoView({block:'start'}); } };
+$('steering-trials').onchange = event => { if (event.target.value) chooseTrial(event.target.value); else if (steeringSource) { const sample = allSamples.find(s => s.variant === steeringSource.variant); if (sample) openSteering(sample); } };
+for (const id of ['edited','strength','mode']) $('steering-'+id).oninput = renderSteering;
+$('steering-form').onsubmit = event => {
+  event.preventDefault();
+  try {
+    const explanation = $('steering-edited').value;
+    if (new TextEncoder().encode(explanation).length > 32768) throw new Error('Edited explanation exceeds 32 KiB.');
+    const strength = Number($('steering-strength').value);
+    if (!Number.isFinite(strength) || strength < 0 || strength > 2) throw new Error('Strength must be between 0 and 2.');
+    const settings = generationSettings({mode:$('steering-mode').value, seed:$('steering-seed').value, max_new_tokens:Number($('steering-cap').value), temperature:Number($('steering-temperature').value), top_p:Number($('steering-top-p').value)});
+    steeringRequest = requestId();
+    command(`/api/v1/runs/${state.run}/steering`, {request:steeringRequest,variant:steeringSource.variant,explanation,strength,settings});
+  } catch(error) { showError(error); }
+};
+
 async function loop() { await poll(); setTimeout(loop, pollDelay); }
 render(); loop();

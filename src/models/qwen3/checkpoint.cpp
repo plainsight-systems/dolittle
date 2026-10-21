@@ -1,6 +1,15 @@
 /*
- * Implementation of the reviewed ownership and decoding contracts.
- * Axis M3, Qwen3 kind: configuration parsing and checkpoint parameter binding.
+ * AR binding, M3: verify an explicit embedding/block/value-head schema against
+ * named tensor layouts, then retain the archive and ordered parameter views.
+ * The pinned artifact identity alone permits its declared FP32/actual BF16
+ * metadata mismatch; cached bytes and tensor precision stay unchanged. The AR
+ * model supplies its vector endpoint and omits final norm/vocabulary weights.
+ * O(L log L) name matching and O(L) owned metadata; no payload copies.
+ * Overlay: steering.md, Checkpoint acquisition and binding. Implementation
+ * corpora queried/read 2026-10-20: Core I.7 (#ri-post) for complete schemas;
+ * GPU.1 (guidelines/gpu/GPU.1-keep-data-on-device.md) for explicit upload
+ * inputs. Implementation of the reviewed ownership and decoding contracts. Axis
+ * M3, Qwen3 kind: configuration parsing and checkpoint parameter binding.
  * Contract: implement pure parse_config/bind_parameters plus bind_target's
  * ownership transfer. Reject unsupported mathematical settings and every
  * missing, duplicate, unexpected or mis-shaped parameter. Distinguish semantic
@@ -102,6 +111,9 @@ double finite_number(const Json& value) {
 std::string serialized_name(std::string_view role) {
   if (role == "token_embedding") {
     return "model.embed_tokens.weight";
+  }
+  if (role == "reconstruction_head") {
+    return "weight";
   }
   if (role == "final_norm") {
     return "model.norm.weight";
@@ -333,10 +345,13 @@ Config parse_config(std::span<const std::byte> bytes,
   return config;
 }
 
-std::vector<ParameterBinding> bind_parameters(
+namespace {
+std::vector<ParameterBinding> bind_schema(
     const Config& config,
-    std::span<const tensors::formats::NamedTensor> catalog) {
-  const auto model = make_model(config);
+    std::span<const tensors::formats::NamedTensor> catalog,
+    bool reconstruction) {
+  const auto model =
+      reconstruction ? make_reconstructor(config) : make_model(config);
   if (catalog.size() != model->parameters().size()) {
     throw std::invalid_argument("Qwen3 checkpoint parameter count mismatch");
   }
@@ -362,6 +377,40 @@ std::vector<ParameterBinding> bind_parameters(
   return bindings;
 }
 
+}  // namespace
+std::vector<ParameterBinding> bind_parameters(
+    const Config& config,
+    std::span<const tensors::formats::NamedTensor> catalog) {
+  return bind_schema(config, catalog, false);
+}
+std::unique_ptr<BoundCheckpoint> bind_reconstructor(
+    std::shared_ptr<const tensors::formats::TensorArchive> archive,
+    std::string_view configuration_artifact) {
+  if (!archive || archive->tensors().empty()) {
+    throw std::invalid_argument("empty reconstructor archive");
+  }
+  const auto actual = archive->tensors().front().layout.element_type;
+  const auto& source = archive->identity();
+  const bool pinned_dtype =
+      source.repository == "marco-bazzani/Qwen3-8B-nla" &&
+      source.revision == "12c6ed1b1e684bdb8a788c989e2f3d15f9790db3" &&
+      source.artifact_digest ==
+          "7eb232a434cb71c18c60e359901aa2ed4fb872d7e317c94bb0ff802e0b69f393" &&
+      configuration_artifact == "ar/config.json" &&
+      actual == ElementType::bfloat16;
+  constexpr std::size_t metadata_limit = 16 * std::size_t{1024} * 1024;
+  // This exact verified release serialized BF16 weights with an FP32 config.
+  // Validate that declared config, then bind the actual BF16 storage. No bytes
+  // or execution precision are converted; other archives require agreement.
+  auto config = parse_config(archive->artifact(configuration_artifact),
+                             pinned_dtype ? ElementType::float32 : actual,
+                             metadata_limit);
+  config.weight_type = actual;
+  auto bindings = bind_schema(config, archive->tensors(), true);
+  return std::make_unique<TargetCheckpoint>(std::move(archive),
+                                            make_reconstructor(config),
+                                            bindings, configuration_artifact);
+}
 std::unique_ptr<BoundCheckpoint> bind_causal_lm(
     std::shared_ptr<const tensors::formats::TensorArchive> archive,
     std::string_view configuration_artifact) {

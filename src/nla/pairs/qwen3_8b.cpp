@@ -1,4 +1,12 @@
 /*
+ * AR convention, M7: verify ar/ source and metadata identities, encode the
+ * trained Summary/text/summary string with the separately identified tokenizer,
+ * and require its exact five-token suffix. Return owned IDs within 4096 tokens.
+ * AR model validation requires the 28-block vector endpoint. Pair owns no GPU
+ * resources; the two reconstructed vectors feed device difference computation.
+ * Overlay: steering.md. Core I.7 (#ri-post), GPU.1
+ * (guidelines/gpu/GPU.1-keep-data-on-device.md), queried/read during
+ * implementation 2026-10-20: explicit convention and resident vector consumers.
  * Pinned Qwen3-8B target/AV pairing implementation.
  * Axis M7, qwen3_8b kind: strict trained convention, not a generic YAML
  * interpreter. Contract: sources describe archives verified with
@@ -136,33 +144,73 @@ struct QwenPair final : Pair {
                       const tensors::formats::SourceIdentity& source,
                       const models::BoundCheckpoint& checkpoint,
                       tensors::ComputationMode mode) const override {
-    if (role != ModelRole::target && role != ModelRole::verbalizer) {
+    if (role != ModelRole::target && role != ModelRole::verbalizer &&
+        role != ModelRole::reconstructor) {
       throw std::invalid_argument("unknown pair role");
     }
-    const auto& expected =
-        role == ModelRole::target ? provenance.target : provenance.verbalizer;
+    const auto& expected = [&]() -> const tensors::formats::SourceIdentity& {
+      if (role == ModelRole::reconstructor) {
+        if (!provenance.reconstructor) {
+          throw std::invalid_argument("AR source unavailable");
+        }
+        return *provenance.reconstructor;
+      }
+      return role == ModelRole::target ? provenance.target
+                                       : provenance.verbalizer;
+    }();
     if (!same_source(expected, source) ||
         !same_source(source, checkpoint.source_identity()) ||
         mode.activation_storage != tensors::ElementType::bfloat16 ||
         mode.reduction_accumulation != tensors::ElementType::float32) {
       throw std::invalid_argument("pair checkpoint/precision mismatch");
     }
-    const models::qwen3::Config config{blocks,
-                                       width,
-                                       32,
-                                       8,
-                                       128,
-                                       12288,
-                                       vocabulary,
-                                       {40960},
-                                       1e-6F,
-                                       1000000.0,
-                                       tensors::ElementType::bfloat16};
-    if (checkpoint.model().identity() !=
-        models::qwen3::make_model(config)->identity()) {
+    const models::qwen3::Config config{
+        role == ModelRole::reconstructor ? 28 : blocks,
+        width,
+        32,
+        8,
+        128,
+        12288,
+        vocabulary,
+        {40960},
+        1e-6F,
+        1000000.0,
+        tensors::ElementType::bfloat16};
+    const auto expected_model = role == ModelRole::reconstructor
+                                    ? models::qwen3::make_reconstructor(config)
+                                    : models::qwen3::make_model(config);
+    if (checkpoint.model().identity() != expected_model->identity() ||
+        checkpoint.model().parameters().size() !=
+            expected_model->parameters().size() ||
+        checkpoint.model().output_width() != expected_model->output_width()) {
       throw std::invalid_argument(
           "pair requires full pinned Qwen3 mathematical configuration");
     }
+  }
+  std::vector<tokenizers::TokenId> reconstruction_prompt(
+      std::string_view explanation,
+      const tokenizers::Tokenizer& tokenizer) const override {
+    if (!provenance.reconstructor || explanation.empty() ||
+        explanation.size() > nla::max_explanation_bytes) {
+      throw std::invalid_argument(
+          "AR description/source unavailable or too large");
+    }
+    const auto& source = *provenance.reconstructor;
+    if (!tokenizer.identity().starts_with(source.repository + "/" +
+                                          source.revision + "/" +
+                                          source.artifact_digest + "/")) {
+      throw std::invalid_argument("AR tokenizer provenance mismatch");
+    }
+    auto ids = tokenizer.encode("Summary of the following text: <text>" +
+                                std::string(explanation) + "</text> <summary>");
+    constexpr std::array<tokenizers::TokenId, 5> suffix{1318, 29, 366, 1708,
+                                                        29};
+    if (ids.size() > max_reconstruction_tokens || ids.size() < suffix.size() ||
+        !std::equal(suffix.begin(), suffix.end(),
+                    ids.end() - static_cast<std::ptrdiff_t>(suffix.size()))) {
+      throw std::invalid_argument("AR suffix or token budget mismatch");
+    }
+    return ids;
   }
   Injection prepare_injection(CaptureRow row) const override {
     const auto site = target_site();
@@ -212,6 +260,21 @@ std::unique_ptr<Pair> make_qwen3_8b(Qwen3_8bSources sources,
   auto pair = std::make_unique<QwenPair>();
   pair->provenance = {"qwen3-8b-l2-150-actor-v1", target, av,
                       std::string(meta_hash)};
+  if (sources.reconstructor) {
+    const tensors::formats::SourceIdentity expected_ar{
+        "marco-bazzani/Qwen3-8B-nla",
+        "12c6ed1b1e684bdb8a788c989e2f3d15f9790db3",
+        "7eb232a434cb71c18c60e359901aa2ed4fb872d7e317c94bb0ff802e0b69f393"};
+    constexpr std::string_view ar_meta =
+        "92ad7c9dd470ce58d51578d2d21f4c8ed532a433449f993a18a220c92f4d98f9";
+    if (sources.reconstructor_metadata.size() > limits.max_metadata_bytes ||
+        !same_source(*sources.reconstructor, expected_ar) ||
+        hash(sources.reconstructor_metadata) != ar_meta) {
+      throw std::invalid_argument("unsupported AR source or metadata");
+    }
+    pair->provenance.reconstructor = *sources.reconstructor;
+    pair->provenance.reconstruction_metadata_sha256 = ar_meta;
+  }
   pair->prompt = sources.verbalizer_protocol.get().prepare(
       {std::nullopt, std::string(actor), text::ThinkingMode::enabled},
       sources.verbalizer_tokenizer);

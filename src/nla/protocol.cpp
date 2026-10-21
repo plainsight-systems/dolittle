@@ -1,13 +1,18 @@
 /*
- * Pure activation normalization and explanation delimiter extraction.
- * Axis M7: explicit host reference conversion and text delimiter extraction.
- * Live device rows are rejected; their numerical path is DeviceInjection.
- * Contract: borrow one D-element FP32/BF16 row, a separate AV position and a
- * positive finite scale. Return owned replacement bytes and the original norm.
- * Reject empty/malformed/nonfinite rows, zero/overflowed norm, unsupported
- * storage and nonfinite converted output. Leave input bytes unchanged on every
- * outcome. Pair validates trained site/source compatibility before calling this
- * helper; this function checks the numerical row, not checkpoint provenance.
+ * AR capability default, M7: unsupported pairs reject reconstruction before
+ * model loading. No implicit prompt or conversion fallback. Core I.7 (#ri-post)
+ * and GPU.1 (guidelines/gpu/GPU.1-keep-data-on-device.md), queried/read for
+ * implementation 2026-10-20: explicit capability, no hidden host
+ * reconstruction. Overlay: steering.md, Paper method and our model pair. Pure
+ * activation normalization and explanation delimiter extraction. Axis M7:
+ * explicit host reference conversion and text delimiter extraction. Live device
+ * rows are rejected; their numerical path is DeviceInjection. Contract: borrow
+ * one D-element FP32/BF16 row, a separate AV position and a positive finite
+ * scale. Return owned replacement bytes and the original norm. Reject
+ * empty/malformed/nonfinite rows, zero/overflowed norm, unsupported storage and
+ * nonfinite converted output. Leave input bytes unchanged on every outcome.
+ * Pair validates trained site/source compatibility before calling this helper;
+ * this function checks the numerical row, not checkpoint provenance.
  *
  * Algorithm: docs/architecture/logical-overview.md, "4 Interpret selected
  * positions", and transformer-execution.md, "NLA entry and exit paths":
@@ -145,5 +150,9 @@ ExplanationRange explanation_tags(std::string_view raw) {
     --end;
   }
   return {ExplanationFormat::complete, ByteRange{begin, end}};
+}
+std::vector<tokenizers::TokenId> Pair::reconstruction_prompt(
+    std::string_view, const tokenizers::Tokenizer&) const {
+  throw std::invalid_argument("pair has no reconstruction convention");
 }
 }  // namespace dolittle::nla

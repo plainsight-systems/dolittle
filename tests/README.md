@@ -8,9 +8,9 @@ across the repository. A test runner's name does not determine test scope.
 
 The full-forward, cached generation and target-to-AV interpretation paths are implemented. Builds and
 unit checks alone do not establish transformer equivalence: use the independent
-GPU scenarios below. The browser/API use the live application integration below; reconstruction remains later work.
+GPU scenarios below. The browser/API use the live application integration below; the same workflow now includes AR reconstruction and matched steering replay.
 
-The suite contains **nineteen C++ unit executables, twenty Python unit tests, sixteen browser
+The suite contains **nineteen C++ unit executables, twenty Python unit tests, eighteen browser
 unit tests and five integration scenarios**. Fixtures and full weights stay in ignored caches
 with recorded revisions, hashes and reference environment details.
 

@@ -2,7 +2,7 @@
 // Pure functions below run without DOM/network/GPU and are tested as units.
 const decoder = new TextDecoder('utf-8', { fatal: true });
 export function newState(epoch = null, run = null) {
-  return { epoch, run, cursor: '0', status: null, target: stream(), attempts: new Map(), results: [], retained: null, selection: null, requests: new Map() };
+  return { epoch, run, cursor: '0', status: null, target: stream(), attempts: new Map(), results: [], retained: null, selection: null, requests: new Map(), trials: new Map() };
 }
 function stream() { return { tokens: [], groups: [], pending: [], generatedBytes: [], promptTokens: 0, consumed: 0, finished: false }; }
 function group(s, text, contributors, kind, prompt) {
@@ -52,6 +52,10 @@ export function applyPage(state, page) {
         const key = `${event.request}/${event.job}`;
         if (!state.attempts.has(key)) state.attempts.set(key, stream());
         target = state.attempts.get(key);
+      } else if (['baseline', 'steered'].includes(event.role)) {
+        const trial = state.trials.get(event.request);
+        if (!trial) throw new Error('Missing steering trial.');
+        target = trial[event.role];
       } else if (event.role !== 'target') throw new Error('Unknown stream role.');
       append(target, event);
     } else if (event.type === 'target_retained') {
@@ -60,8 +64,20 @@ export function applyPage(state, page) {
       const s = state.attempts.get(`${event.request}/${event.job}`);
       if (s) { flush(s, true); s.finished = true; }
       state.results.push({ ...event, stream: s });
+    } else if (event.type === 'steering_started') {
+      state.trials.set(event.request, { ...event, baseline: stream(), steered: stream() });
+    } else if (event.type === 'steering_complete') {
+      const trial = state.trials.get(event.request);
+      if (!trial) throw new Error('Missing steering trial.');
+      Object.assign(trial, event);
+      for (const s of [trial.baseline, trial.steered]) { flush(s, true); s.finished = true; }
     } else if (event.type === 'request_finished') {
       state.requests.set(event.request, event);
+      const trial = state.trials.get(event.request);
+      if (trial) {
+        if (!trial.outcome) Object.assign(trial, { outcome: event.outcome, message: event.message });
+        for (const s of [trial.baseline, trial.steered]) { flush(s, true); s.finished = true; }
+      }
       // Even a failed request can leave an incomplete final UTF-8 sequence.
       for (const s of [state.target, ...state.attempts.values()]) if (!s.finished) { flush(s, true); s.finished = true; }
     } else if (event.type !== 'phase') throw new Error('Unknown event type.');
@@ -206,4 +222,25 @@ export function nextSampleSeed(samples, initial = '100') {
   for (const seed of used) if (BigInt(seed) >= next) next = BigInt(seed) + 1n;
   if (next > 18446744073709551615n) { next = 0n; while (used.has(next.toString())) next++; }
   return next.toString();
+}
+
+export function canSteer(sample) {
+  if (!sample?.variant || sample.outcome !== 'completed' || sample.format !== 'complete' || !sample.content || !sample.stream) return false;
+  try {
+    const bytes = Uint8Array.from(sample.stream.generatedBytes).subarray(...sample.content);
+    return new TextDecoder('utf-8', {fatal:true}).decode(bytes).trim().length > 0;
+  } catch { return false; }
+}
+// Prefix tokens are delivered for exact reconnect state, but shown once above
+// the branches. Continuation text uses server segment labels and byte mapping.
+export function continuationText(trial, branch, kind) {
+  const s = trial[branch];
+  return s.groups.filter(g => g.last >= trial.prefix_tokens && g.kind === kind).map(g => g.text).join('');
+}
+// One contiguous edit range preserves exact text and handles Unicode boundaries.
+export function editedRange(original, edited) {
+  const a = [...original], b = [...edited]; let first = 0, tail = 0;
+  while (first < a.length && first < b.length && a[first] === b[first]) first++;
+  while (tail < a.length - first && tail < b.length - first && a[a.length-1-tail] === b[b.length-1-tail]) tail++;
+  return [b.slice(0, first).join(''), b.slice(first, b.length-tail).join(''), b.slice(b.length-tail).join('')];
 }

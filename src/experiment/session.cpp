@@ -1,4 +1,12 @@
 /*
+ * Steering extension: resolve a completed variant, publish its edit and replay
+ * boundary, preflight both bounded streams, then execute AR and matched
+ * branches on the worker. Events distinguish baseline/steered and retain trial
+ * completion. Core I.1 (#ri-explicit): typed command/stream identities;
+ * Performance MEM.9 (guidelines/memory/MEM.9-embedded-allocate-at-init.md):
+ * reserve before execution. Both corpora queried/read for this implementation,
+ * 2026-10-20.
+ *
  * Live experiment session: IMPLEMENTATION, 2026-10-19.
  * Axes R3/R4: command admission, single-worker Run ownership and bounded
  * publication. HTTP framing and presentation layout belong to their own axes.
@@ -93,6 +101,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <condition_variable>
 #include <deque>
 #include <iostream>
@@ -105,11 +114,14 @@
 namespace dolittle::experiment {
 namespace {
 constexpr std::size_t json_escape_expansion = 6;
-using Command = std::variant<StartRequest, InterpretRequest, StopRequest>;
+using Command =
+    std::variant<StartRequest, InterpretRequest, SteerRequest, StopRequest>;
 constexpr std::size_t event_overhead = 4096;
 constexpr std::size_t token_wire_bound = 256;
 constexpr std::size_t progress_chunk = 64;
 constexpr std::size_t max_request_id_bytes = 128;
+constexpr std::size_t max_failure_message_bytes = 1024;
+constexpr std::size_t event_reserve = 32;
 bool same(inference::GenerationSettings a, inference::GenerationSettings b) {
   return a.seed == b.seed && a.max_new_tokens == b.max_new_tokens &&
          a.sampling.mode == b.sampling.mode &&
@@ -139,6 +151,13 @@ bool same(const InterpretRequest& a, const InterpretRequest& b) {
     }
   }
   return true;
+}
+bool same(const SteerRequest& a, const SteerRequest& b) {
+  return a.run.value == b.run.value &&
+         a.edit.variant.value == b.edit.variant.value &&
+         a.edit.explanation == b.edit.explanation &&
+         a.edit.strength == b.edit.strength &&
+         same(a.edit.settings, b.edit.settings);
 }
 bool same(const StopRequest& a, const StopRequest& b) {
   return a.run.value == b.run.value &&
@@ -193,6 +212,15 @@ void validate(const Command& command, const RunLimits& limits,
               throw std::length_error("interpretation token limit");
             }
           }
+        } else if constexpr (std::is_same_v<T, SteerRequest>) {
+          inference::sampling::validate_settings(value.edit.settings.sampling);
+          if (!std::isfinite(value.edit.strength) || value.edit.strength < 0 ||
+              value.edit.strength > 2 || value.edit.explanation.empty() ||
+              value.edit.explanation.size() > nla::max_explanation_bytes ||
+              !value.edit.settings.max_new_tokens ||
+              value.edit.settings.max_new_tokens > limits.max_target_tokens) {
+            throw std::invalid_argument("invalid steering edit/settings");
+          }
         } else {
           if (value.active_request.value.empty() ||
               value.active_request.value.size() > max_request_id_bytes) {
@@ -240,8 +268,12 @@ std::size_t event_bound(const EventBody& body) {
                                  text_bound(value.pair.metadata_sha256)));
           return add(bytes, text_bound(value.backend_identity));
         } else if constexpr (std::is_same_v<T, AttemptAvailable> ||
-                             std::is_same_v<T, RequestFinished>) {
+                             std::is_same_v<T, RequestFinished> ||
+                             std::is_same_v<T, SteeringAvailable>) {
           return add(event_overhead, text_bound(value.message));
+        } else if constexpr (std::is_same_v<T, SteeringStarted>) {
+          return add(event_overhead,
+                     add(text_bound(value.original), text_bound(value.edited)));
         } else {
           return event_overhead;
         }
@@ -424,12 +456,74 @@ struct Session::Impl final : RunObserver {
         case WorkPhase::verbalizer_ready:
           state.phase = SessionPhase::retained;
           break;
+        case WorkPhase::loading_reconstructor:
+          state.phase = SessionPhase::loading_reconstructor;
+          break;
+        case WorkPhase::reconstructing:
+          state.phase = SessionPhase::reconstructing;
+          break;
+        case WorkPhase::generating_baseline:
+          state.phase = SessionPhase::generating_baseline;
+          break;
+        case WorkPhase::generating_steered:
+          state.phase = SessionPhase::generating_steered;
+          break;
         case WorkPhase::closed:
           state.phase = SessionPhase::unavailable;
           break;
       }
     }
     return emit(phase_value);
+  }
+  bool comparison_started(const SteeringTrial& trial) noexcept override {
+    try {
+      return emit(SteeringStarted{trial.variant, trial.capture, trial.original,
+                                  trial.edited, trial.strength, trial.settings,
+                                  trial.prefix_tokens,
+                                  trial.original_prompt_tokens});
+    } catch (...) {
+      publication_failed();
+      return false;
+    }
+  }
+  void prepare_comparison(StreamBounds bounds) override {
+    // Only this worker publishes. Preflight both streams before loading AR;
+    // per-stream reservations below then consume this same remaining capacity.
+    const auto prompt_events =
+        (bounds.prompt_tokens + progress_chunk - 1) / progress_chunk;
+    const auto count = add(
+        add(prompt_events, (bounds.prompt_tokens + bounds.prefill_chunk - 1) /
+                               bounds.prefill_chunk),
+        add(multiply(bounds.generated_tokens, 2), 1));
+    const auto token_bytes =
+        bounds.token_bytes ? bounds.token_bytes : bounds.decoded_bytes;
+    const auto event_count = add(multiply(2, count), event_reserve);
+    auto pool =
+        multiply(count, sizeof(PublishedEvent) + request.value.size() + 1);
+    pool =
+        add(pool, multiply(add(multiply(prompt_events, progress_chunk),
+                               count - prompt_events),
+                           add(token_bytes, sizeof(tokenizers::TokenBytes) +
+                                                sizeof(text::TokenSegment))));
+    auto bytes = add(
+        multiply(2, pool),
+        multiply(event_count, add(event_overhead, text_bound(request.value))));
+    bytes = add(
+        bytes,
+        multiply(
+            2, add(multiply(bounds.decoded_bytes, json_escape_expansion),
+                   multiply(add(bounds.prompt_tokens, bounds.generated_tokens),
+                            2 * token_wire_bound))));
+    bytes = add(
+        bytes, multiply(2 * nla::max_explanation_bytes, json_escape_expansion));
+    std::lock_guard lock(mutex);
+    if (event_count > setup.session.max_events - journal.size() ||
+        bytes > setup.session.max_publication_bytes - reserved_stream_bytes -
+                    publication_bytes) {
+      throw std::length_error(
+          "Comparison exceeds remaining session capacity; start a new run or "
+          "reduce the continuation budget.");
+    }
   }
   bool prepare_stream(StreamBounds bounds) noexcept override {
     try {
@@ -620,6 +714,24 @@ struct Session::Impl final : RunObserver {
       (void)emit(std::move(done), true);
     }
   }
+  void execute(const SteerRequest& value, RunId, const std::stop_token& stop) {
+    if (!run || !run->record() || run->phase() == Phase::closed) {
+      throw std::invalid_argument("No retained run for steering.");
+    }
+    const auto& record = *run->record();
+    const auto id = run->steer(value.edit, *this, stop);
+    const auto& trial = record.trial(id).steering;
+    (void)emit(
+        SteeringAvailable{id, trial.outcome,
+                          trial.baseline.generation
+                              ? std::optional(trial.baseline.generation->reason)
+                              : std::nullopt,
+                          trial.steered.generation
+                              ? std::optional(trial.steered.generation->reason)
+                              : std::nullopt,
+                          trial.message},
+        true);
+  }
   void work() noexcept {
     try {
       for (;;) {
@@ -661,7 +773,8 @@ struct Session::Impl final : RunObserver {
         } catch (const std::exception& error) {
           std::cerr << "Request failure: " << error.what() << '\n';
           outcome = AttemptOutcome::failed;
-          message = "Request failed; inspect the local service log.";
+          message =
+              std::string(error.what()).substr(0, max_failure_message_bytes);
         }
         (void)emit(RequestFinished{outcome, std::move(message)}, true);
         {
@@ -797,6 +910,9 @@ Receipt Session::submit(StartRequest request) {
   return impl_->submit(std::move(request));
 }
 Receipt Session::submit(InterpretRequest request) {
+  return impl_->submit(std::move(request));
+}
+Receipt Session::submit(SteerRequest request) {
   return impl_->submit(std::move(request));
 }
 Receipt Session::stop(StopRequest request) {

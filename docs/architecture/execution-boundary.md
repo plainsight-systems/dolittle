@@ -12,6 +12,10 @@ dependencies part of the algorithm. It covers target generation and activation
 verbalization (AV), including their handoff. Reconstruction (AR) is shown as a
 future extension, not included in implementation acceptance for this change.
 
+The [steering boundary](steering.md#full-transformer-flow-and-the-mutation-boundary)
+extends autonomous GPU execution with forward-only AR inference and a declared
+residual mutation.
+
 The earlier [experiment overlay](logical-overview.md),
 [transformer overlay](transformer-execution.md) and
 [file mapping](file-mapping.md) describe the surrounding algorithms and file families. This boundary supersedes

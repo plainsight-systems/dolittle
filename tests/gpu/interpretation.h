@@ -1,4 +1,12 @@
 /*
+ * Steering verification takes a sibling frozen fixture. It returns owned
+ * numerical metrics after AR/direction/replay checks, releasing each model
+ * before switching roles. The device outlives all temporary owners.
+ * Steering corpus consultation, header design and implementation 2026-10-20:
+ * Core I.1 (#ri-explicit), typed contracts; performance MEM.9, bounded setup
+ * before execution (guidelines/memory/MEM.9-embedded-allocate-at-init.md).
+ * Both local corpora queried and full rules read.
+ *
  * Verification axis D3: AV continuation of the existing tiny/8B experiment
  * scenarios. Input is a frozen target fixture; the sibling AV fixture supplies
  * independently frozen injection/logit/capture expectations. Returns owned
@@ -32,6 +40,8 @@
 
 #include "gpu/device.h"
 namespace dolittle::tests {
+[[nodiscard]] nlohmann::json check_steering(
+    gpu::Device&, const std::filesystem::path& target_fixture);
 [[nodiscard]] nlohmann::json check_interpretation(
     gpu::Device&, const std::filesystem::path& target_fixture);
-}
+}  // namespace dolittle::tests

@@ -1,4 +1,21 @@
 /*
+ * Steering scheduling, R3: resolve the retained sample; admit two branch
+ * results and fresh sequence capacities before releasing AV. Tokenize both AR
+ * descriptions, run sequential GPU forwards with shared resident AR weights,
+ * compute their normalized difference on device and retain its small owner.
+ * Release AR, load target once, replay identical fixed IDs with fresh KV/RNG
+ * for baseline and steered continuations. Apply the edit once in the second
+ * branch. Restore text-classification state from the original generated prefix.
+ * Retain trial results without replacing the original run. Cancellation stops
+ * the current phase and preserves completed branch output. Budget all retained
+ * device owners alongside active model resources. No CPU vector processing.
+ * Overlay: steering.md, Device ownership and model phases.
+ * Header consultation: Core I.1 (#ri-explicit), R.1 (#rr-raii), explicit
+ * inputs and lifetimes; performance GPU.1, resident intermediates, GPU.9,
+ * bounded persistent owners (guidelines/gpu/GPU.1-keep-data-on-device.md;
+ * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md).
+ * Both corpora queried/read, 2026-10-20.
+
  * Axis R3: sequential target/AV phases with durable experiment records.
  * Contract: Run owns pairing, providers, text helpers, records and optional
  * resident AV weights; it borrows Device, which must outlive capture leases.
@@ -77,20 +94,22 @@ struct RunInputs {
                                       // provider metadata.
   inference::sampling::Execution selection_execution =
       inference::sampling::Execution::device;
+  ModelProvider reconstructor{};
+  std::unique_ptr<tokenizers::Tokenizer> reconstructor_tokenizer{};
 };
 struct RunLimits {
-  std::size_t max_device_bytes;
-  std::size_t max_host_bytes;
-  std::size_t max_prefill_chunk;
+  std::size_t max_device_bytes{};
+  std::size_t max_host_bytes{};
+  std::size_t max_prefill_chunk{};
   std::size_t
-      max_target_tokens;  // Prompt + generated, not a truncation policy.
-  std::size_t max_verbalizer_tokens;
-  std::size_t max_decoded_bytes;
+      max_target_tokens{};  // Prompt + generated, not a truncation policy.
+  std::size_t max_verbalizer_tokens{};
+  std::size_t max_decoded_bytes{};
   RecordLimits record;
 };
 enum class Phase : std::uint8_t { empty, retained, verbalizer_ready, closed };
 // Live progress contract: borrowed values expire when the callback returns.
-enum class StreamRole : std::uint8_t { target, verbalizer };
+enum class StreamRole : std::uint8_t { target, verbalizer, baseline, steered };
 enum class WorkPhase : std::uint8_t {
   loading_target,
   generating_target,
@@ -99,6 +118,10 @@ enum class WorkPhase : std::uint8_t {
   loading_verbalizer,
   generating_verbalizer,
   verbalizer_ready,
+  loading_reconstructor,
+  reconstructing,
+  generating_baseline,
+  generating_steered,
   closed
 };
 struct RunProgress {
@@ -123,6 +146,10 @@ class RunObserver {
   RunObserver& operator=(RunObserver&&) = delete;
   virtual ~RunObserver() = default;
   [[nodiscard]] virtual bool phase(WorkPhase) noexcept = 0;
+  virtual void prepare_comparison(StreamBounds) {}
+  [[nodiscard]] virtual bool comparison_started(const SteeringTrial&) noexcept {
+    return true;
+  }
   [[nodiscard]] virtual bool prepare_stream(StreamBounds) noexcept {
     return true;
   }
@@ -146,6 +173,8 @@ class Run {
                 RunObserver&, const std::stop_token& = {});
   [[nodiscard]] VariantId interpret(CaptureKey, inference::GenerationSettings,
                                     RunObserver&, const std::stop_token& = {});
+  [[nodiscard]] TrialId steer(SteeringEdit, RunObserver&,
+                              const std::stop_token& = {});
   [[nodiscard]] Phase phase() const noexcept;
   [[nodiscard]] const Record* record()
       const noexcept;  // Null until target result retained.

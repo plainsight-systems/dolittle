@@ -1,4 +1,14 @@
 /*
+ * Steering verification extends the same target/AV experiment: independently
+ * frozen AR vectors and difference direction, fresh replay at prompt/generated
+ * positions, zero-strength control and changed-row comparisons. AR chunk sizes
+ * 1 and 7 must yield identical vectors. Reject zero difference before target
+ * loading. Diagnostics download completed rows only; live math stays on GPU.
+ * Steering corpus consultation, header design and implementation 2026-10-20:
+ * Core I.1 (#ri-explicit), typed contracts; performance MEM.9, bounded setup
+ * before execution (guidelines/memory/MEM.9-embedded-allocate-at-init.md).
+ * Both local corpora queried and full rules read.
+ *
  * Verification axis D3: AV continuation of the existing tiny/8B experiment
  * scenarios. Input is a frozen target fixture; the sibling AV fixture supplies
  * independently frozen injection/logit/capture expectations. Returns owned
@@ -49,6 +59,7 @@
 #include "experiment/run.h"
 #include "inference/injection/device.h"
 #include "inference/sampling/categorical.h"
+#include "inference/steering/device.h"
 #include "models/qwen3/checkpoint.h"
 #include "nla/pairs/qwen3_8b.h"
 #include "tensors/formats/safetensors.h"
@@ -647,4 +658,126 @@ Json check_interpretation(gpu::Device& device,
       {"normalization_max_absolute", normalization.maximum_absolute_error},
       {"target_capture_max_absolute", target_metric.maximum_absolute_error}};
 }
+Json check_steering(gpu::Device& device,
+                    const std::filesystem::path& target_fixture) {
+  const auto fixture = read(target_fixture.parent_path() / "steering.json");
+  const auto target = read(target_fixture);
+  const auto& ar_data = fixture.at("ar");
+  const auto storage = type(fixture.at("dtype"));
+  const tensors::ComputationMode mode{storage, tensors::ElementType::float32};
+  const auto width = ar_data.at("vectors").at(0).at("width").get<std::size_t>();
+  const auto row_bytes = width * tensors::element_bytes(storage);
+  Json metrics = Json::array();
+  bool passed = true;
+  const auto compare_row = [&](const Json& values,
+                               std::span<const std::byte> actual,
+                               const Json& tolerance,
+                               tensors::ElementType dtype) {
+    const auto decoded = decode(actual, dtype);
+    const auto expected = values.get<std::vector<float>>();
+    const auto metric = compare_values(
+        expected, decoded,
+        {tolerance.at("max_absolute_error"), tolerance.at("max_relative_l2")});
+    passed = passed && metric.passed;
+    metrics.push_back(
+        {{"passed", metric.passed},
+         {"max_absolute", metric.maximum_absolute_error},
+         {"relative_l2",
+          metric.relative_l2 ? Json(*metric.relative_l2) : Json(nullptr)}});
+  };
+  inference::DeviceCapture direction;
+  {
+    auto ar_archive = tensors::formats::safetensors::open(
+        request(ar_data, ar_data.at("root").get<std::string>()));
+    auto checkpoint = models::qwen3::bind_reconstructor(
+        std::move(ar_archive), ar_data.at("config").get<std::string>());
+    auto ar = inference::load_resident_model(device, std::move(checkpoint),
+                                             {mode, 23 * gib, 64 * mib});
+    std::array<inference::DeviceCapture, 2> vectors;
+    for (std::size_t i = 0; i < vectors.size(); ++i) {
+      const auto ids =
+          ar_data.at("prompts").at(i).get<std::vector<std::uint32_t>>();
+      std::vector<std::byte> previous;
+      for (const auto chunk : {std::size_t{1}, std::size_t{7}}) {
+        inference::CachedForwardOptions options{
+            mode, {100 + i}, ids.size(), std::min(ids.size(), chunk),
+            {},   {0, 0},    23 * gib,   256 * mib};
+        auto plan = inference::prepare_cached_forward(*ar, options);
+        auto vector = plan.reconstruct(ids);
+        const auto bytes = export_capture(device, vector, {}, row_bytes);
+        compare_row(ar_data.at("vectors").at(i).at("values"), bytes,
+                    ar_data.at("vectors").at(i).at("tolerance"), storage);
+        if (!previous.empty()) {
+          check(bytes == previous,
+                "AR reconstruction changed with prefill chunk");
+        }
+        previous = bytes;
+        vectors.at(i) = std::move(vector);
+      }
+    }
+    auto queue = device.create_queue();
+    inference::DeviceDirection difference(device, queue, vectors.at(0),
+                                          vectors.at(1), storage, width);
+    difference.submit();
+    direction = difference.finish();
+    const auto bytes =
+        export_capture(device, direction, {}, width * sizeof(float));
+    compare_row(fixture.at("direction"), bytes,
+                fixture.at("direction_tolerance"),
+                tensors::ElementType::float32);
+    inference::DeviceDirection zero(device, queue, vectors.at(0), vectors.at(0),
+                                    storage, width);
+    zero.submit();
+    expect_throws<std::invalid_argument>([&] { (void)zero.finish(); });
+  }
+  auto archive = tensors::formats::safetensors::open(
+      request(target, target_fixture.parent_path()));
+  auto resident = inference::load_resident_model(
+      device, models::qwen3::bind_causal_lm(std::move(archive), "config.json"),
+      {mode, 23 * gib, 64 * mib});
+  const models::ObservationPoint site{models::ObservationBoundary::block_output,
+                                      {fixture.at("block").get<std::size_t>()}};
+  for (const auto& c : fixture.at("cases")) {
+    const auto ids = c.at("prefix").get<std::vector<std::uint32_t>>();
+    const auto expected = c.at("generated").get<std::vector<std::uint32_t>>();
+    const auto position = c.at("position").get<std::size_t>();
+    const auto capacity = ids.size() + expected.size();
+    inference::CachedForwardOptions options{
+        mode,     {201},
+        capacity, std::min(ids.size(), std::size_t{7}),
+        {site},   {capacity * row_bytes, capacity},
+        23 * gib, 256 * mib};
+    auto plan = inference::prepare_cached_forward(*resident, options);
+    plan.prepare_intervention(
+        {site, {position}, direction, width, c.at("strength")});
+    std::uint32_t stop_id = 0;
+    while (std::ranges::find(expected, stop_id) != expected.end()) {
+      ++stop_id;
+    }
+    const text::PreparedPrompt prompt{
+        "fixture", "fixture", {}, ids, {stop_id}, text::ThinkingMode::disabled};
+    const inference::GenerationSettings settings{
+        {inference::sampling::SelectionMode::greedy, 1, 0, 1},
+        42,
+        expected.size()};
+    const auto result =
+        inference::generate(plan, prompt, settings, {}, {201}, {},
+                            inference::sampling::Execution::device);
+    check(result.reason == inference::StopReason::token_limit,
+          "steering generation failed: " + result.failure_message);
+    check(std::ranges::equal(std::span(result.tokens).subspan(ids.size()),
+                             expected),
+          "steering generated IDs disagree with independent reference");
+    const auto& capture = result.captures.at(0);
+    const auto bytes = export_capture(device, capture.device, capture.bytes,
+                                      capacity * row_bytes);
+    compare_row(c.at("after"),
+                std::span(bytes).subspan(position * row_bytes, row_bytes),
+                c.at("tolerance"), storage);
+  }
+  return {{"passed", passed},
+          {"numerical", metrics},
+          {"cases", fixture.at("cases").size()}};
+}
+
 }  // namespace dolittle::tests

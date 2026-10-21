@@ -1,4 +1,17 @@
 /*
+ * Steering scheduling, R3 (steering.md): resolve exact retained explanation and
+ * replay IDs, admit both results, then release AV. Load AR once, forward both
+ * descriptions with fresh KV, and normalize their difference on GPU. Retain
+ * only the direction while switching to target. Reuse target weights for two
+ * fresh-KV sequences with matched seed/settings, applying one residual update
+ * in the steered branch. Classification replays the fixed generated prefix
+ * before observing new IDs. Exceptions/cancellation retain a partial trial.
+ * All vector operations and per-token decisions stay on GPU; CPU phase changes
+ * follow completion. Budgets include original captures and surviving vectors.
+ * Implementation corpora queried/read 2026-10-20: Core I.7 (#ri-post), explicit
+ * results/lifetimes; GPU.1 (guidelines/gpu/GPU.1-keep-data-on-device.md),
+ resident
+ * intermediates; GDSA.2, unchanged fixed transformer arithmetic.
  * Axis R3: sequential target/AV phases with durable experiment records.
  * Contract: Run owns pairing, providers, text helpers, records and optional
  * resident AV weights; it borrows Device, which must outlive capture leases.
@@ -50,10 +63,12 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 
 #include "gpu/device.h"
+#include "inference/steering/device.h"
 #include "tensors/tensor.h"
 
 namespace dolittle::experiment {
@@ -105,7 +120,8 @@ class ProgressAdapter final : public inference::GenerationObserver {
                   const text::Protocol* protocol,
                   const text::PreparedPrompt& prompt, std::size_t byte_limit,
                   std::size_t max_generated, std::size_t prefill_chunk,
-                  std::optional<models::ObservationSite> site = {})
+                  std::optional<models::ObservationSite> site = {},
+                  std::optional<std::size_t> original_prompt = {})
       : observer_(observer),
         role_(role),
         tokenizer_(tokenizer),
@@ -124,9 +140,16 @@ class ProgressAdapter final : public inference::GenerationObserver {
       }
     }
     if (observer && protocol) {
-      cursor_ = protocol->make_cursor(prompt.ids.size(), prompt.thinking);
+      const auto first = original_prompt.value_or(prompt.ids.size());
+      if (first > prompt.ids.size()) {
+        throw std::invalid_argument("replay prompt boundary");
+      }
+      cursor_ = protocol->make_cursor(first, prompt.thinking);
       if (!cursor_) {
         throw std::invalid_argument("protocol lacks incremental segmentation");
+      }
+      if (first < prompt.ids.size()) {
+        (void)cursor_->append(std::span(prompt.ids).subspan(first), first);
       }
     }
   }
@@ -234,7 +257,9 @@ struct Run::Impl {
   LoadedModel load(nla::ModelRole role, std::size_t allowance) {
     auto result =
         (role == nla::ModelRole::target ? inputs.target
-                                        : inputs.verbalizer)(allowance);
+                                        : (role == nla::ModelRole::reconstructor
+                                               ? inputs.reconstructor
+                                               : inputs.verbalizer))(allowance);
     if (!result.checkpoint || result.host_working_bytes > allowance ||
         !same_source(result.source, result.checkpoint->source_identity())) {
       throw std::invalid_argument(
@@ -600,4 +625,202 @@ VariantId Run::interpret(CaptureKey key, inference::GenerationSettings settings,
                          RunObserver& observer, const std::stop_token& stop) {
   return interpret_impl(key, settings, &observer, stop);
 }
+TrialId Run::steer(SteeringEdit edit, RunObserver& observer,
+                   const std::stop_token& external_stop) {
+  auto& p = *impl_;
+  if (!p.record || p.phase == Phase::closed || !p.inputs.reconstructor ||
+      !p.inputs.reconstructor_tokenizer ||
+      !p.inputs.pair->identity().reconstructor ||
+      p.inputs.selection_execution != inference::sampling::Execution::device) {
+    throw std::invalid_argument("steering unavailable");
+  }
+  const auto& sample = p.record->variant(edit.variant).interpretation;
+  if (sample.outcome != AttemptOutcome::completed ||
+      sample.explanation.format != nla::ExplanationFormat::complete ||
+      !sample.explanation.content || !p.record->capture(sample.capture) ||
+      !std::isfinite(edit.strength) || edit.strength < 0 || edit.strength > 2 ||
+      edit.explanation.empty() ||
+      edit.explanation.size() > nla::max_explanation_bytes) {
+    throw std::invalid_argument(
+        "steering needs a complete sample and valid edit");
+  }
+  const auto& target = p.record->target();
+  const auto& g = target.generation;
+  const auto prefix = replay_prefix(target, sample.capture);
+  const auto capacity = add(prefix, edit.settings.max_new_tokens);
+  inference::sampling::validate_settings(edit.settings.sampling);
+  if (!edit.settings.max_new_tokens || capacity > p.limits.max_target_tokens ||
+      p.record->trial_count() >= p.limits.record.max_trials) {
+    throw std::length_error("steering trial/context limit");
+  }
+  SteeringTrial trial{};
+  trial.variant = edit.variant;
+  trial.capture = sample.capture;
+  const auto range = *sample.explanation.content;
+  trial.original =
+      sample.decoded.bytes.substr(range.begin, range.end - range.begin);
+  trial.edited = std::move(edit.explanation);
+  trial.strength = edit.strength;
+  trial.settings = edit.settings;
+  trial.prefix_tokens = prefix;
+  trial.original_prompt_tokens = g.prompt_tokens;
+  trial.reconstructor = p.inputs.pair->identity().reconstructor;
+  if (trial.strength > 0 && trial.original == trial.edited) {
+    throw std::invalid_argument("edit the explanation before steering");
+  }
+  trial.original_ar_tokens = p.inputs.pair->reconstruction_prompt(
+      trial.original, *p.inputs.reconstructor_tokenizer);
+  trial.edited_ar_tokens = p.inputs.pair->reconstruction_prompt(
+      trial.edited, *p.inputs.reconstructor_tokenizer);
+  const auto pending =
+      add(multiply(2, p.result_allowance(capacity, 0)),
+          add(trial.original.capacity(),
+              add(trial.edited.capacity(),
+                  multiply(add(trial.original_ar_tokens.capacity(),
+                               trial.edited_ar_tokens.capacity()),
+                           sizeof(std::uint32_t)))));
+  if (pending >
+      p.limits.record.max_retained_bytes - p.record->retained_bytes()) {
+    throw std::length_error("steering retained budget");
+  }
+  auto host = p.available_host(pending);
+  observer.prepare_comparison({prefix, edit.settings.max_new_tokens,
+                               std::min(capacity, p.limits.max_prefill_chunk),
+                               p.inputs.target_tokenizer->max_token_bytes(),
+                               p.limits.max_decoded_bytes});
+  if (!observer.comparison_started(trial)) {
+    observer.publication_failed();
+    throw std::runtime_error("comparison publication failed");
+  }
+  Publication publication(&observer, external_stop);
+  const auto stop = publication.token();
+  p.verbalizer.reset();
+  p.verbalizer_host_bytes = 0;
+  p.phase = Phase::retained;
+  host = p.available_host(pending);
+  try {
+    inference::DeviceCapture direction{};
+    const auto check_stop = [&] {
+      if (stop.stop_requested()) {
+        throw std::runtime_error("Comparison stopped.");
+      }
+    };
+    check_stop();
+    if (trial.strength > 0) {
+      publication.phase(WorkPhase::loading_reconstructor);
+      auto loaded = p.load(nla::ModelRole::reconstructor, host);
+      if (loaded.host_working_bytes >= host) {
+        throw std::length_error("AR host budget");
+      }
+      auto ar = inference::load_resident_model(
+          p.device, std::move(loaded.checkpoint),
+          {p.inputs.target_mode, p.available_device(),
+           std::min(upload_allowance, host - loaded.host_working_bytes)});
+      check_stop();
+      publication.phase(WorkPhase::reconstructing);
+      const auto reconstruct = [&](std::span<const std::uint32_t> ids,
+                                   std::size_t retained) {
+        const auto execution = p.next_id();
+        auto options = p.options(ids.size(), execution, false,
+                                 host - loaded.host_working_bytes);
+        options.max_device_bytes = p.available_device() - retained;
+        auto plan = inference::prepare_cached_forward(*ar, options);
+        return plan.reconstruct(ids, stop);
+      };
+      auto original = reconstruct(trial.original_ar_tokens, 0);
+      check_stop();
+      auto edited =
+          reconstruct(trial.edited_ar_tokens, original.owner->size_bytes());
+      check_stop();
+      const auto width = p.inputs.pair->target_site().vector_width;
+      const auto vectors =
+          add(original.owner->size_bytes(), edited.owner->size_bytes());
+      const auto extra = inference::DeviceDirection::required_bytes(width);
+      if (add(add(ar->resident_device_bytes(), vectors), extra) >
+          p.available_device()) {
+        throw std::length_error("direction device budget");
+      }
+      auto queue = p.device.get().create_queue();
+      inference::DeviceDirection difference(
+          p.device, queue, std::move(original), std::move(edited),
+          p.inputs.target_mode.activation_storage, width);
+      difference.submit();
+      direction = difference.finish();
+    }
+    check_stop();
+    publication.phase(WorkPhase::loading_target);
+    auto loaded = p.load(nla::ModelRole::target, host);
+    if (loaded.host_working_bytes >= host) {
+      throw std::length_error("branch host budget");
+    }
+    const auto direction_bytes =
+        direction.owner ? direction.owner->size_bytes() : 0;
+    const auto device_budget = p.available_device() - direction_bytes;
+    auto resident = inference::load_resident_model(
+        p.device, std::move(loaded.checkpoint),
+        {p.inputs.target_mode, device_budget,
+         std::min(upload_allowance, host - loaded.host_working_bytes)});
+    text::PreparedPrompt prompt{
+        g.protocol_identity,
+        g.tokenizer_identity,
+        {},
+        {g.tokens.begin(),
+         g.tokens.begin() + static_cast<std::ptrdiff_t>(prefix)},
+        g.stop_ids,
+        g.thinking};
+    const auto branch = [&](BranchResult& result, StreamRole role) {
+      check_stop();
+      const auto execution = p.next_id();
+      auto options = p.options(capacity, execution, false,
+                               host - loaded.host_working_bytes);
+      options.max_device_bytes = device_budget;
+      auto plan = inference::prepare_cached_forward(*resident, options);
+      if (role == StreamRole::steered && trial.strength > 0) {
+        plan.prepare_intervention(
+            {trial.capture.site, trial.capture.position, direction,
+             p.inputs.pair->target_site().vector_width, trial.strength});
+      }
+      publication.phase(role == StreamRole::baseline
+                            ? WorkPhase::generating_baseline
+                            : WorkPhase::generating_steered);
+      ProgressAdapter adapter(
+          publication.observer(), role, *p.inputs.target_tokenizer,
+          p.inputs.target_protocol.get(), prompt, p.limits.max_decoded_bytes,
+          edit.settings.max_new_tokens, plan.max_prefill_chunk(), {},
+          g.prompt_tokens);
+      result.generation = inference::generate(
+          plan, prompt, edit.settings, p.inputs.selector, execution, adapter,
+          stop, inference::sampling::Execution::device);
+      const auto& output = *result.generation;
+      result.decoded = decode_bounded(*p.inputs.target_tokenizer,
+                                      std::span(output.tokens).subspan(prefix),
+                                      p.limits.max_decoded_bytes);
+      auto segments = p.inputs.target_protocol->segment(
+          std::span(output.tokens).subspan(g.prompt_tokens), g.prompt_tokens,
+          g.thinking);
+      result.segments.assign(segments.begin() + static_cast<std::ptrdiff_t>(
+                                                    prefix - g.prompt_tokens),
+                             segments.end());
+      if (output.reason == inference::StopReason::execution_failure) {
+        throw std::runtime_error(output.failure_message.empty()
+                                     ? "Branch execution failed."
+                                     : output.failure_message);
+      }
+      check_stop();
+    };
+    branch(trial.baseline, StreamRole::baseline);
+    branch(trial.steered, StreamRole::steered);
+    trial.outcome = AttemptOutcome::completed;
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const std::exception& error) {
+    trial.outcome = stop.stop_requested() ? AttemptOutcome::cancelled
+                                          : AttemptOutcome::failed;
+    trial.message = error.what();
+  }
+  const auto id = p.record->append(std::move(trial));
+  publication.phase(WorkPhase::target_retained);
+  return id;
+}
+
 }  // namespace dolittle::experiment

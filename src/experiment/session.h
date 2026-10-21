@@ -1,4 +1,17 @@
 /*
+ * Steering commands, R3/R4: deduplicate source variant, exact edit, strength
+ * and settings under the request ID. One worker resolves run-owned data and
+ * executes both branches. Publish source/edit/prefix before model loading and
+ * tag token streams baseline/steered under that request. Reserve bounded output
+ * resources before the comparison; cursor replay recovers both branches and
+ * partial cancellation. Transport never owns mutable captures or device values.
+ * Overlay: steering.md, Interface and retained trials.
+ * Header consultation: Core I.1 (#ri-explicit), R.1 (#rr-raii), explicit
+ * inputs and lifetimes; performance GPU.1, resident intermediates, GPU.9,
+ * bounded persistent owners (guidelines/gpu/GPU.1-keep-data-on-device.md;
+ * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md).
+ * Both corpora queried/read, 2026-10-20.
+
  * Live experiment session: IMPLEMENTED CONTRACT, 2026-10-19.
  * Axes R3/R4: command admission, single-worker Run ownership and bounded
  * publication. HTTP framing and presentation layout belong to their own axes.
@@ -118,6 +131,11 @@ struct InterpretRequest {
   RunId run{};
   std::vector<InterpretationJob> jobs;
 };
+struct SteerRequest {
+  RequestId request;
+  RunId run{};
+  SteeringEdit edit;
+};
 struct StopRequest {
   RequestId request;
   RunId run{};
@@ -146,6 +164,10 @@ enum class SessionPhase : std::uint8_t {
   retained,
   loading_verbalizer,
   interpreting,
+  loading_reconstructor,
+  reconstructing,
+  generating_baseline,
+  generating_steered,
   stopping,
   unavailable,
   closed
@@ -200,8 +222,23 @@ struct RequestFinished {
   AttemptOutcome outcome;
   std::string message;
 };
-using EventBody = std::variant<WorkPhase, TokenDelta, TargetAvailable,
-                               AttemptAvailable, RequestFinished>;
+struct SteeringStarted {
+  VariantId variant;
+  CaptureKey capture;
+  std::string original, edited;
+  float strength;
+  inference::GenerationSettings settings;
+  std::size_t prefix_tokens, original_prompt_tokens;
+};
+struct SteeringAvailable {
+  TrialId trial;
+  AttemptOutcome outcome;
+  std::optional<inference::StopReason> baseline_stop, steered_stop;
+  std::string message;
+};
+using EventBody =
+    std::variant<WorkPhase, TokenDelta, TargetAvailable, AttemptAvailable,
+                 RequestFinished, SteeringStarted, SteeringAvailable>;
 struct PublishedEvent {
   EventCursor sequence{};
   RequestId request;
@@ -265,6 +302,7 @@ class Session {
   Session& operator=(Session&&) = delete;
   [[nodiscard]] Receipt submit(StartRequest);
   [[nodiscard]] Receipt submit(InterpretRequest);
+  [[nodiscard]] Receipt submit(SteerRequest);
   [[nodiscard]] Receipt stop(StopRequest);
   [[nodiscard]] SessionStatus status() const;
   [[nodiscard]] EventPage read(RunId, EventCursor after) const;

@@ -17,15 +17,16 @@ captured at selected positions. The first hardware target is a
 pairing is **Qwen3 8B with marco-bazzani's natural language autoencoder**,
 interpreting activations at block 24 (zero-based).
 
-**Status: target generation, AV interpretation and the live interface are implemented.** The
+**Status: generation, interpretation, steering and the live interface are implemented.** The
 C++20/CUDA engine loads verified checkpoints, formats and tokenizes Qwen3 prompts,
 generates with a contiguous KV cache, and retains configurable raw captures.
 It releases the target before loading the AV, normalizes a selected capture and
 replaces one AV embedding row, then retains each interpretation as a separate
 variant. AV weights stay resident between requests; each gets a fresh cache.
 A bounded HTTP session streams exact token progress, retains captures and
-serves the browser interface. Reconstruction remains later work. Numerical fixture checks
-are separate from whether the generated interpretations are faithful.
+serves the browser interface. Edit a completed interpretation to reconstruct an
+activation difference and compare matched unsteered and steered continuations.
+The original experiment stays available alongside its retained comparisons.
 
 CUDA 13.2 builds retain native Ampere code and PTX. Use the
 [build and verification commands](tests/README.md) to check your environment.

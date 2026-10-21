@@ -207,6 +207,17 @@ to commands. Presentation maps retained and pending states to a readable view.
 All three preserve exact token/capture identity rather than deriving it from
 rendered character offsets alone.
 
+### Steering extension
+
+The [steering design](steering.md#change-axes-and-file-mapping) adds
+**R6 Intervention semantics**: a different activation-update law or application
+policy. Its first kind adds a norm-scaled reconstruction difference at one
+declared residual row. M7 supplies trained pair/site conventions; M6 advertises
+legal mutation boundaries; X1 resolves ordering and lifetimes; X5 performs the
+device math. R3 schedules model phases and matched branches; R4 retains trials.
+Thus replacing the update law does not require changing tokenizer, model
+weights, presentation or the underlying block equations.
+
 Launch orchestration calls acquisition and build mechanisms; it does not copy
 their logic. The initial source-build path remains Linux/Docker/NVIDIA. A
 future native Metal launch path must not force NLA conversion or token

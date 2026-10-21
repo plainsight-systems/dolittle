@@ -1,5 +1,8 @@
 # NLA experiment algorithmic overlay
 
+The [steering extension](steering.md) adds reconstruction of original/edited
+descriptions and matched target continuations to the interpretation flow below.
+
 The accepted [GPU execution boundary](execution-boundary.md) defines device ownership,
 GPU normalization/injection and autonomous prefill through final-token
 consumption. Mathematical contracts and independent references remain fixed.

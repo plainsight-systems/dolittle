@@ -1,4 +1,17 @@
 /*
+ * Reconstruction, M7: optional pinned AR identity and trained text-to-vector
+ * convention. reconstruction_prompt encodes the complete description template
+ * through the AR tokenizer, validates its suffix and returns owned exact IDs.
+ * Unsupported pairs reject; no target chat formatting or generic prompt guess.
+ * Pair validation checks role, schema and mode before uploading weights.
+ * O(description bytes/tokens) host work only; AR arithmetic remains GPU work.
+ * Overlay: steering.md, Paper method and our model pair.
+ * Header consultation: Core I.1 (#ri-explicit), R.1 (#rr-raii), explicit
+ * inputs and lifetimes; performance GPU.1, resident intermediates, GPU.9,
+ * bounded persistent owners (guidelines/gpu/GPU.1-keep-data-on-device.md;
+ * guidelines/gpu/GPU.9-suballocate-and-alias-transient-gpu-memory.md).
+ * Both corpora queried/read, 2026-10-20.
+
  * Axis M7: pairing, activation-injection descriptors and explanation
  extraction.
  * Contract: a Pair owns model/source identities and its exact trained AV
@@ -49,13 +62,17 @@
 #include "text/protocol.h"
 
 namespace dolittle::nla {
-enum class ModelRole : std::uint8_t { target, verbalizer };
+inline constexpr std::size_t max_explanation_bytes = 32 * std::size_t{1024};
+inline constexpr std::size_t max_reconstruction_tokens = 4096;
+enum class ModelRole : std::uint8_t { target, verbalizer, reconstructor };
 struct PairIdentity {
   std::string
       convention;  // Versioned normalization/template/extraction policy.
   tensors::formats::SourceIdentity target;
   tensors::formats::SourceIdentity verbalizer;
   std::string metadata_sha256;
+  std::optional<tensors::formats::SourceIdentity> reconstructor{};
+  std::string reconstruction_metadata_sha256{};
 };
 struct CaptureRow {
   models::ObservationSite site;
@@ -102,6 +119,8 @@ class Pair {
                               const models::BoundCheckpoint&,
                               tensors::ComputationMode) const = 0;
   [[nodiscard]] virtual Injection prepare_injection(CaptureRow) const = 0;
+  [[nodiscard]] virtual std::vector<tokenizers::TokenId> reconstruction_prompt(
+      std::string_view explanation, const tokenizers::Tokenizer&) const;
   [[nodiscard]] virtual ExplanationRange explanation(
       std::string_view raw_bytes) const = 0;
 };
