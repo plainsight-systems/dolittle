@@ -10,7 +10,7 @@ The full-forward, cached generation and target-to-AV interpretation paths are im
 unit checks alone do not establish transformer equivalence: use the independent
 GPU scenarios below. The browser/API use the live application integration below; reconstruction remains later work.
 
-The suite contains **nineteen C++ unit executables, twenty Python unit tests, five browser-controller
+The suite contains **nineteen C++ unit executables, twenty Python unit tests, sixteen browser
 unit tests and five integration scenarios**. Fixtures and full weights stay in ignored caches
 with recorded revisions, hashes and reference environment details.
 
@@ -189,7 +189,7 @@ executable or Docker Compose (which builds the application from source):
 ```sh
 python3 tests/integration/test_application.py --binary build/cuda/dolittle --cache models
 python3 tests/integration/test_application.py --container --cache models
-node --test tests/app/controller.test.mjs
+node --test tests/app/*.test.mjs
 ```
 
 CTest registers the application scenario when `DOLITTLE_APPLICATION_CACHE` is

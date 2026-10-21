@@ -1,221 +1,403 @@
-// A3: DOM presentation. The controller owns identity/state; model output is
-// always assigned through textContent. Nothing here interprets model control IDs.
+// A3: investigation presentation. The reducer owns exact capture identity and
+// UTF-8 mapping; this view owns navigation, sample choice and DOM lifetimes.
+// Model text is always inserted as text nodes. Existing source spans and sample
+// articles survive polling so focus, text selection and scroll do not reset.
 import { createClient, requestId } from './client.js';
-import { newState, applyPage, captureAvailable, interpretationText, selectionJobs, generationSettings, outputSummary, selectedText } from './controller.js';
+import { newState, applyPage, captureAvailable, interpretationText, selectionJobs,
+  generationSettings, outputSummary, selectedText, sourceSection, sourceGroups,
+  findOccurrences, captureKey, investigationSamples, promptExcerpt, samplesAt, nextSampleSeed } from './controller.js';
 const $ = id => document.getElementById(id);
+const labels = { prompt: 'Prompt', reasoning: 'Thinking', answer: 'Answer', unclassified: 'Other' };
 const client = createClient();
-let state = newState(), connected = false, retryAction = null, pollDelay = 100;
-let capabilities = { jobs: 16 }, needsAccess = false;
-let rendered = new Map(), resultCount = 0, lastRun = null, submitting = false;
-let pendingInterpretation = null, restored = false;
-const phaseLabels = { idle: 'Ready for a prompt', queued: 'Queued', loading_target: 'Loading target model', generating_target: 'Generating & capturing', releasing_target: 'Retaining captures', retained: 'Ready to explore', loading_verbalizer: 'Loading activation verbalizer', interpreting: 'Interpreting selection', stopping: 'Stopping after capture finalization', unavailable: 'Run unavailable — start a new experiment', closed: 'Service closed' };
+let state = newState(), connected = false, needsAccess = false, submitting = false;
+let retryAction = null, polling = false, pollDelay = 100, capabilities = { jobs: 16, variants: 16 };
+let section = 'prompt', comparing = false, lastIdentity = '', restored = false, seedInitialized = false;
+let submitted = [], promptRecord = null, allSamples = [], sampleChoices = new Map();
+let sourceNodes = new Map(), sourceSignature = '', pointsSignature = '', sampleSignature = '';
+let matches = [], matchIndex = 0, searchSignature = '';
+const phaseLabels = { idle: 'Ready for a prompt', queued: 'Queued', loading_target: 'Loading target model', generating_target: 'Generating & capturing', releasing_target: 'Retaining captures', retained: 'Captures ready', loading_verbalizer: 'Loading the NLA', interpreting: 'Interpreting', stopping: 'Stopping', unavailable: 'Run unavailable', closed: 'Service closed' };
+function el(tag, text, cls) { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; }
+function write(id, text) { if ($(id).textContent !== text) $(id).textContent = text; }
+function shown(text) { return text.replace(/ /g, '␠').replace(/\n/g, '↵').replace(/\t/g, '⇥'); }
+function short(text) { const label = text.trim() || shown(text) || '[empty]'; return label.length > 40 ? label.slice(0, 37) + '…' : label; }
+function remember(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* Optional metadata; journal remains authoritative. */ } }
+function saved(key) { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } }
 function showError(error, retry = null) { $('error').hidden = false; $('error').querySelector('span').textContent = error.message; retryAction = retry; $('retry').hidden = !retry; }
 function clearError() { $('error').hidden = true; retryAction = null; }
-function resetView() { rendered = new Map(); resultCount = 0; for (const id of ['prompt-tokens', 'reasoning', 'answer', 'unclassified', 'interpretations']) $(id).replaceChildren(); for (const id of ['prompt-section', 'reasoning-section', 'answer-section', 'unclassified-section']) $(id).hidden = true; }
-function select(first, last = first) {
+function requireAccess(error) {
+  if (!needsAccess) clearError();
+  connected = false; needsAccess = true; $('access').hidden = false;
+  $('access-message').textContent = error.message;
+  write('connection', 'Access link needed');
+  for (const id of ['generate', 'stop', 'interpret']) $(id).disabled = true;
+}
+function point(position) { return state.target.groups.find(g => g.first <= position && g.last >= position); }
+function owner(position) {
+  const group = point(position);
+  if (!group || group.prompt || group.kind !== 'control') return group ? sourceSection(group) : 'prompt';
+  return sourceGroups(state, 'reasoning', true).includes(group) ? 'reasoning' : sourceGroups(state, 'answer', true).includes(group) ? 'answer' : 'unclassified';
+}
+function capture(position) { return { ...(state.retained?.site ?? state.site), position }; }
+function listAt(position) { return samplesAt(allSamples, capture(position)); }
+function groupsFor(current = section) {
+  if (current === 'prompt' && !$('show-controls').checked) {
+    const excerpt = promptExcerpt(state, promptRecord?.prompt?.user);
+    if (excerpt) return excerpt;
+  }
+  return sourceGroups(state, current, $('show-controls').checked);
+}
+function resetView() {
+  section = 'prompt'; comparing = false; sampleChoices = new Map(); seedInitialized = false;
+  sourceNodes = new Map(); sourceSignature = ''; pointsSignature = ''; sampleSignature = '';
+  $('source').replaceChildren(); $('samples').replaceChildren(); $('sample-output').replaceChildren();
+  $('compare-a').replaceChildren(); $('compare-b').replaceChildren();
+  matches = []; searchSignature = ''; write('search-status', ''); $('find').value = '';
+}
+function select(first, last = first, locate = false) {
   if (!Number.isSafeInteger(first) || !Number.isSafeInteger(last) || first < 0 || last < first || first >= state.target.tokens.length) return;
   state.selection = [first, Math.min(last, state.target.tokens.length - 1)];
-  $('position').value = String(first); $('end-position').value = String(state.selection[1]); renderSelection();
+  section = owner(first); comparing = false;
+  if (point(first)?.kind === 'control') $('show-controls').checked = true;
+  $('position').value = String(first); $('end-position').value = String(state.selection[1]);
+  render(); if (locate) locateSelection();
+}
+function locateSelection() {
+  const target = $('source').querySelector('.selected');
+  if (target) $('source').scrollTop += target.getBoundingClientRect().top - $('source').getBoundingClientRect().top - $('source').clientHeight / 2;
+}
+function nearbyContext(position) {
+  const current = owner(position);
+  const groups = current === 'prompt' ? promptExcerpt(state, promptRecord?.prompt?.user) ?? sourceGroups(state, current, false) : sourceGroups(state, current, false);
+  const text = groups.filter(g => g.first <= position).map(g => g.text).join('');
+  // Clip by Unicode code points rather than splitting surrogate pairs.
+  return [...text].slice(-220).join('');
+}
+function renderSource() {
+  const groups = groupsFor(), controls = $('show-controls').checked;
+  const signature = `${section}/${controls}/${groups[0]?.first}`;
+  if (sourceSignature !== signature) { $('source').replaceChildren(); sourceNodes.clear(); sourceSignature = signature; }
+  for (const g of groups) {
+    const key = `${g.first}/${g.last}`;
+    let span = sourceNodes.get(key);
+    if (!span) {
+      span = el('span', undefined, 'token' + (g.kind === 'control' ? ' control-token' : ''));
+      span.setAttribute('role', 'button'); span.tabIndex = -1;
+      span.onclick = event => {
+        if (event.shiftKey && state.selection) select(Math.min(state.selection[0], g.first), Math.max(state.selection[1], g.last));
+        else select(g.first, g.last);
+      };
+      span.onkeydown = event => {
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); select(g.first, g.last); }
+        if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+        event.preventDefault();
+        const current = groupsFor(), index = current.indexOf(g), next = current[index + (event.key === 'ArrowRight' ? 1 : -1)];
+        if (!next) return;
+        if (event.shiftKey && state.selection) select(Math.min(state.selection[0], next.first), Math.max(state.selection[1], next.last));
+        else select(next.first, next.last);
+        sourceNodes.get(`${next.first}/${next.last}`)?.focus({ preventScroll: true }); locateSelection();
+      };
+      sourceNodes.set(key, span); $('source').append(span);
+    }
+    if (span.textContent !== g.text) span.textContent = g.text;
+    const range = g.first === g.last ? String(g.first) : `${g.first}–${g.last}`;
+    span.title = `${shown(g.text)} · ${labels[section]} position ${range}`;
+    span.setAttribute('aria-label', span.title);
+    const selected = !!state.selection && g.first <= state.selection[1] && g.last >= state.selection[0];
+    span.classList.toggle('selected', selected); span.setAttribute('aria-pressed', String(selected)); span.tabIndex = -1;
+  }
+  const focusTarget = $('source').querySelector('.selected') ?? $('source').firstElementChild;
+  if (focusTarget) focusTarget.tabIndex = 0;
+  const original = section === 'prompt' && !controls && !!promptExcerpt(state, promptRecord?.prompt?.user);
+  write('source-title', section === 'prompt' ? original ? 'Original prompt' : 'Model input' : section === 'reasoning' ? 'Model thinking' : section === 'answer' ? 'Answer' : 'Unclassified output');
+  write('source-meta', state.selection && owner(state.selection[0]) === section ? `Selected #${state.selection.join('–').replace(/^(\d+)–\1$/, '$1')}` : 'Choose a point');
+  write('source-note', section === 'prompt' ? original ? '' : 'Exact retained input, including the chat template. Positions refer to this full sequence.' : !groups.length ? section === 'answer' && state.status?.active_request && !state.retained ? 'The answer will appear after thinking finishes.' : 'No text in this section yet.' : '');
+  document.querySelectorAll('[data-section]').forEach(button => {
+    const key = button.dataset.section, selected = section === key;
+    const count = state.target.tokens.filter(t => t.position < state.target.promptTokens ? key === 'prompt' : t.kind === key).length;
+    button.setAttribute('aria-selected', String(selected)); button.tabIndex = selected ? 0 : -1;
+    button.id = `tab-${key}`; button.setAttribute('aria-controls', 'source');
+    button.querySelector('small').textContent = count ? count.toLocaleString() : '';
+    button.hidden = key === 'unclassified' && !count;
+  });
+  $('source').setAttribute('aria-labelledby', `tab-${section}`);
+  const laterKey = `${state.selection?.join('/')}/${state.target.tokens.length}`;
+  if ($('later').dataset.key !== laterKey) {
+    $('later').dataset.key = laterKey;
+    const wasOpen = $('later').querySelector('details')?.open;
+    $('later').replaceChildren();
+    if (state.selection) {
+      const p = state.selection[1], later = state.target.groups.filter(g => g.first > p && g.kind !== 'control' && !g.prompt).map(g => g.text).join('');
+      if (later) { const d = el('details', undefined, 'later'); d.open = !!wasOpen; d.append(el('summary', 'Generated afterward')); d.append(el('p', 'This text was not available at the selected position.', 'hint'), el('div', later, 'later-text')); $('later').append(d); }
+    }
+  }
+}
+function renderPoints() {
+  const positions = [...new Set(allSamples.map(s => s.capture.position))].sort((a, b) => a - b);
+  const signature = `${positions.map(p => `${p}:${listAt(p).length}:${listAt(p).some(s => s.pending)}`).join(',')}/${state.selection?.join('/')}`;
+  write('point-count', `${positions.length} points · ${allSamples.length} samples`);
+  if (signature === pointsSignature) return;
+  pointsSignature = signature;
+  const focus = document.activeElement?.dataset.point;
+  $('points').replaceChildren(); $('mobile-point').replaceChildren(el('option', 'Choose an investigated point'));
+  for (const current of Object.keys(labels)) {
+    const selectedPoints = positions.filter(p => owner(p) === current); if (!selectedPoints.length) continue;
+    $('points').append(el('h3', labels[current]));
+    for (const p of selectedPoints) {
+      const samples = listAt(p), selected = state.selection?.[0] === p, button = el('button', undefined, 'point'), row = el('span', undefined, 'row');
+      button.dataset.point = String(p); button.setAttribute('aria-current', String(selected));
+      row.append(el('span', short(selectedText(state, p)), 'word'), el('span', String(samples.length), 'count'));
+      button.append(row, el('span', `#${p} · ${samples.length} ${samples.length === 1 ? 'sample' : 'samples'}${samples.some(s => s.pending) ? ' · working' : ''}`, 'meta'));
+      button.onclick = () => select(p, p, true); $('points').append(button);
+      const option = el('option', `${labels[current]} · ${short(selectedText(state, p))} · #${p}`); option.value = String(p); option.selected = selected; $('mobile-point').append(option);
+    }
+  }
+  if (!positions.length) $('points').append(el('p', 'Interpret a point to keep its samples here.', 'hint'));
+  if (focus) $('points').querySelector(`[data-point="${focus}"]`)?.focus({ preventScroll: true });
+}
+function sampleStatus(sample) {
+  if (sample.pending) return sample.stream?.generatedBytes.length ? 'Generating…' : state.status?.phase === 'loading_verbalizer' ? 'Loading the NLA…' : 'Queued…';
+  if (sample.outcome === 'failed') return 'Interpretation failed';
+  if (sample.outcome === 'cancelled' || sample.stop === 'user_stop') return 'Stopped · partial output';
+  if (sample.stop === 'token_limit') return 'Budget reached · partial output';
+  return sample.stream ? 'Finished generating' : 'No output';
+}
+function renderSample(container, sample) {
+  if (!sample) { if (container.dataset.key !== 'empty') { container.replaceChildren(el('p', 'No interpretation at this point yet.', 'empty')); container.dataset.key = 'empty'; } return; }
+  const samples = listAt(sample.capture.position), text = sample.pending && !sample.stream?.generatedBytes.length ? 'Waiting for NLA output…' : interpretationText(sample), status = sampleStatus(sample);
+  if (container.dataset.key !== sample.key) {
+    container.replaceChildren(); container.dataset.key = sample.key;
+    const meta = el('div', undefined, 'sample-meta'); meta.append(el('span', '', 'sample-number meta'), el('span', '', 'sample-status meta'));
+    const prose = el('div', undefined, 'explanation');
+    const details = el('details', undefined, 'details'); details.append(el('summary', 'Generation details'), el('p', '', 'metadata'), el('pre', '', 'raw'));
+    container.append(meta, prose, el('p', '', 'sample-message hint'), details);
+  }
+  container.querySelector('.sample-number').textContent = `Sample ${samples.findIndex(s => s.key === sample.key) + 1} of ${samples.length}`;
+  container.querySelector('.sample-status').textContent = status;
+  const prose = container.querySelector('.explanation');
+  if (prose.dataset.text !== text) {
+    prose.dataset.text = text;
+    // Preserve paragraphs during streaming; update only the changed tail.
+    const paragraphs = text.split(/\n\s*\n/);
+    paragraphs.forEach((paragraph, i) => { let p = prose.children[i]; if (!p) { p = el('p'); prose.append(p); } if (p.textContent !== paragraph) p.textContent = paragraph; });
+    while (prose.children.length > paragraphs.length) prose.lastChild.remove();
+  }
+  const duplicate = sample.settings?.mode === 'greedy' && samples.some(s => s.key !== sample.key && s.settings?.mode === 'greedy');
+  container.querySelector('.sample-message').textContent = sample.message || (duplicate ? 'Greedy decoding repeats the same selection rule; these are not independent random samples.' : '');
+  container.querySelector('.metadata').textContent = `Block ${sample.capture.block} · ${sample.capture.boundary} · position ${sample.capture.position}\nSeed ${sample.settings?.seed} · ${sample.settings?.mode} · temperature ${sample.settings?.temperature}\nStop: ${sample.stop ?? 'pending'} · format: ${sample.format === 'complete' ? 'explanation tags present' : sample.format ?? 'pending'}\nRequest ${sample.request} · job ${sample.job} · variant ${sample.variant ?? 'pending'}\nTarget ${state.retained?.pair?.target_revision ?? 'unavailable'}\nNLA ${state.retained?.pair?.verbalizer_revision ?? 'unavailable'}\nFormat does not establish accuracy.`;
+  const raw = sample.stream ? new TextDecoder().decode(Uint8Array.from(sample.stream.generatedBytes)) : '';
+  const pre = container.querySelector('.raw'); if (pre.textContent !== raw) pre.textContent = raw;
 }
 function renderSelection() {
   const selection = state.selection;
   $('selection-help').hidden = !!selection; $('selection-controls').hidden = !selection;
-  $('selection-jump').hidden = !selection;
-  for (const [index, button] of rendered) {
-    const group = state.target.groups[index];
-    const selected = !!selection && group.first <= selection[1] && group.last >= selection[0];
-    button.classList.toggle('selected', selected);
-    button.setAttribute('aria-pressed', String(selected));
-    button.tabIndex = -1;
-  }
-  const focusEntry = [...rendered].filter(([, button]) => !button.closest('details:not([open])')).find(([index]) => !state.target.groups[index].prompt && state.target.groups[index].kind !== 'control' && (selection ? state.target.groups[index].last >= selection[0] : state.target.groups[index].text.trim()));
-  if (focusEntry) focusEntry[1].tabIndex = 0;
   if (!selection) return;
-  const [first, last] = selection, token = state.target.tokens[first];
-  $('selection-text').textContent = selectedText(state, first, last) || '[empty token]';
-  $('token-detail').textContent = `Token ID ${token.id} · ${token.bytes.length} raw bytes. Each position is interpreted separately.`;
-  const site = state.retained?.site ?? state.site;
-  const count = last - first + 1, jobs = count * Number($('variant-count').value);
+  const [first, last] = selection, count = last - first + 1, site = capture(first);
+  const identityKey = `${first}/${last}/${state.retained?.site?.block ?? state.site?.block}`;
+  if ($('identity').dataset.key !== identityKey) {
+    $('identity').dataset.key = identityKey; $('identity').replaceChildren(el('div', 'Selected activation', 'eyebrow'));
+    const line = el('div', undefined, 'selected-label'); line.append(el('strong', short(selectedText(state, first, last))), el('span', `${labels[owner(first)]} · #${first}${count > 1 ? '–' + last : ''}`, 'meta'));
+    const ctx = el('p', nearbyContext(last), 'context');
+    $('identity').append(line, ctx, el('p', `Context through this position · block ${site.block ?? 'pending'}${owner(first) === 'answer' ? ' · preceding thinking also belongs to this context' : ''}`, 'boundary'));
+    $('token-strip').replaceChildren();
+    for (let p = Math.max(0, first - 2); p <= Math.min(state.target.tokens.length - 1, last + 2, first + 10); p++) {
+      const b = el('button', shown(selectedText(state, p)) || '[empty]'); b.title = `Position ${p}`; b.setAttribute('aria-label', `Position ${p}: ${shown(selectedText(state, p))}`); b.setAttribute('aria-pressed', String(p >= first && p <= last)); b.onclick = () => select(p, p, true); $('token-strip').append(b);
+    }
+  }
+  $('previous-token').disabled = first === 0; $('next-token').disabled = first + 1 >= state.target.tokens.length;
+  write('range-status', count === 1 ? 'One token · one capture' : `${count} positions · ${count} separate captures`);
   const available = Array.from({ length: count }, (_, i) => captureAvailable(state, first + i)).every(Boolean);
-  $('capture-status').textContent = state.retained
-    ? available ? `Position ${first}${count > 1 ? '–' + last : ''} · block ${site.block} · ${count} ${count === 1 ? 'token' : 'tokens'}` : 'No completed capture for this selection.'
-    : 'You can interpret this selection when generation finishes.';
-  $('interpret').disabled = !connected || submitting || !available || jobs > capabilities.jobs || jobs < 1 || !Number.isSafeInteger(jobs) || !!state.status?.active_request || !!state.status?.queued_jobs || !!state.status?.publication_failed;
-  $('interpret').textContent = jobs > capabilities.jobs ? `Select up to ${capabilities.jobs} token / variant pairs` : count === 1 ? 'Interpret this token' : `Interpret ${count} tokens`;
-  $('previous').disabled = first === 0; $('next').disabled = first + 1 >= state.target.tokens.length;
+  const jobs = count * Number($('variant-count').value);
+  const remaining = Math.max(0, capabilities.variants - state.results.filter(r => r.variant).length);
+  write('capacity', `${remaining} of ${capabilities.variants} retained sample slots remaining · up to ${capabilities.jobs} jobs per request.`);
+  write('token-detail', `Token ID ${state.target.tokens[first].id} · ${state.target.tokens[first].bytes.length} bytes. Each position is interpreted separately.`);
+  write('capture-status', !state.retained ? 'Available to interpret when generation finishes.' : !available ? 'No completed capture for this selection.' : count > 1 ? `Interpretations below belong to position ${first}. Use the point list to read each position separately.` : '');
+  $('interpret').disabled = !connected || submitting || !!retryAction || !available || !!state.status?.active_request || !!state.status?.queued_jobs || !!state.status?.publication_failed || !Number.isSafeInteger(jobs) || jobs < 1 || jobs > Math.min(capabilities.jobs, remaining);
+  const samples = listAt(first);
+  write('interpret', jobs > remaining ? 'Sample capacity reached' : jobs > capabilities.jobs ? 'Reduce positions or sample count' : count > 1 ? `Interpret ${count} positions` : samples.length ? 'Generate another sample' : 'Interpret this point');
+  const chosen = samples.find(s => s.key === sampleChoices.get(captureKey(site))) ?? samples[0];
+  const signature = samples.map(s => s.key).join(',') + '/' + chosen?.key;
+  if (signature !== sampleSignature) {
+    const focusKey = document.activeElement?.dataset.sample;
+    sampleSignature = signature; $('samples').replaceChildren();
+    samples.forEach((s, index) => { const b = el('button', String(index + 1)); b.dataset.sample = s.key; b.setAttribute('aria-label', `Sample ${index + 1}`); b.setAttribute('aria-pressed', String(s.key === chosen?.key)); b.onclick = () => { sampleChoices.set(captureKey(site), s.key); renderSelection(); $('samples').children[index]?.focus({ preventScroll: true }); }; $('samples').append(b); });
+    if (focusKey) [...$('samples').children].find(b => b.dataset.sample === focusKey)?.focus({ preventScroll: true });
+  }
+  renderSample($('sample-output'), chosen);
+  $('compare-open').disabled = allSamples.length < 2;
 }
-function renderOutputState() {
-  const summary = outputSummary(state), hasRun = !!state.run;
-  const busy = !state.retained && !!state.status?.active_request;
-  $('empty-target').hidden = hasRun;
-  $('answer-section').hidden = !hasRun;
-  $('answer-placeholder').hidden = !hasRun || !!summary.answer;
-  $('answer-placeholder').textContent = busy ? 'The answer will appear after thinking finishes.' : 'No answer was generated.';
-  if (!summary.thinking && busy) $('answer-placeholder').textContent = 'Waiting for model output…';
-  $('reasoning-status').textContent = `${summary.thinking} tokens · ${summary.answer ? 'Finished' : busy ? 'In progress' : 'Stopped'}`;
-  $('answer-link').hidden = !summary.answer;
-  $('answer-status').textContent = summary.answer ? busy ? 'In progress' : summary.stop === 'stop_token' ? 'Complete' : 'Partial' : '';
-  $('target-status').textContent = hasRun ? `${summary.generated} generated tokens${busy ? ' · ' + (phaseLabels[state.status?.phase] ?? 'Working') : state.retained ? ' · Captures ready' : ''}` : 'Your output will appear here.';
-  let notice = '';
-  if (summary.stop === 'token_limit') notice = summary.answer
-    ? 'Output budget reached. The answer may be incomplete. Increase the budget and generate again to allow more room.'
-    : 'Output budget reached before an answer was generated. Increase the budget and generate again. You can still explore the captured thinking.';
-  else if (summary.stop === 'user_stop') notice = 'Generation stopped. Completed captures are available to explore.';
-  else if (summary.stop === 'execution_failure') notice = 'Generation failed. Any completed captures remain available.';
-  $('generation-notice').hidden = !notice; $('generation-notice').textContent = notice;
-  $('selection-guide').hidden = !summary.generated;
+function comparisonLabel(sample) { return `${labels[owner(sample.capture.position)]} · ${short(selectedText(state, sample.capture.position))} #${sample.capture.position} · sample ${listAt(sample.capture.position).findIndex(s => s.key === sample.key) + 1}`; }
+function renderCompare() {
+  for (const side of ['a', 'b']) {
+    const select = $('compare-' + side), value = select.value;
+    if (select.options.length !== allSamples.length) {
+      select.replaceChildren(...allSamples.map(s => { const option = el('option', comparisonLabel(s)); option.value = s.key; return option; }));
+      if (allSamples.some(s => s.key === value)) select.value = value;
+    }
+    const sample = allSamples.find(s => s.key === select.value); if (!sample) continue;
+    const container = $('compare-output-' + side);
+    if (container.dataset.key !== sample.key) {
+      container.dataset.key = sample.key; container.replaceChildren();
+      const context = el('div', undefined, 'compare-context'); context.append(el('strong', `${labels[owner(sample.capture.position)]} · “${short(selectedText(state, sample.capture.position))}” · #${sample.capture.position}`), el('span', nearbyContext(sample.capture.position), 'meta'));
+      container.append(context, el('div', undefined, 'comparison-sample'));
+    }
+    renderSample(container.querySelector('.comparison-sample'), sample);
+  }
+  const a = allSamples.find(s => s.key === $('compare-a').value), b = allSamples.find(s => s.key === $('compare-b').value);
+  write('comparison-title', a?.key === b?.key ? 'Same sample selected twice' : a && b && captureKey(a.capture) === captureKey(b.capture) ? 'Same activation, different samples' : 'Two points in the same generation');
 }
-function renderLiveInterpretation() {
-  const pending = pendingInterpretation && !state.requests.has(pendingInterpretation.request);
-  const phase = state.status?.phase;
-  const active = phase === 'loading_verbalizer' || phase === 'interpreting';
-  const streams = [...state.attempts].filter(([, stream]) => !stream.finished);
-  const current = streams.at(-1)?.[1];
-  $('live-interpretation').hidden = !pending && !active;
-  $('live-title').textContent = phase === 'loading_verbalizer' ? 'Loading the NLA…' : current ? 'NLA output · generating' : 'Interpretation queued…';
-  $('live-output').textContent = current ? new TextDecoder().decode(Uint8Array.from(current.generatedBytes)) || 'Reading the selected activation…' : pending ? `Selected text: “${pendingInterpretation.text}”` : 'Reading the selected activation…';
-  if (pendingInterpretation && state.requests.has(pendingInterpretation.request)) pendingInterpretation = null;
-}
-
 function render() {
-  if (lastRun !== state.run) { resetView(); $('reasoning-section').open = true; lastRun = state.run; }
+  const identity = `${state.epoch}/${state.run}`;
+  if (lastIdentity !== identity) { lastIdentity = identity; resetView(); }
+  allSamples = investigationSamples(state, submitted);
+  if (!seedInitialized && state.status && state.cursor === state.status.latest) {
+    $('av-seed').value = nextSampleSeed(allSamples); seedInitialized = true;
+  }
   const active = !!state.status?.active_request || !!state.status?.queued_jobs;
-  $('connection').textContent = connected ? (phaseLabels[state.status?.phase] ?? 'Connecting…') : 'Disconnected — reconnecting';
+  write('connection', connected ? phaseLabels[state.status?.phase] ?? 'Working' : needsAccess ? 'Access link needed' : 'Disconnected — reconnecting');
   $('generate').disabled = !connected || active || submitting || !!retryAction;
-  $('generate').textContent = state.run ? 'Generate again' : 'Generate';
+  write('generate', state.run ? 'Generate again' : 'Generate');
   $('stop').disabled = !connected || !state.status?.active_request;
   $('stop').hidden = !state.status?.active_request;
-  $('stop').textContent = state.status?.phase === 'interpreting' || state.status?.phase === 'loading_verbalizer' ? 'Stop interpretation' : 'Stop generation';
+  write('stop', state.retained ? 'Stop interpretation' : 'Stop generation');
   $('replace-note').hidden = !state.run;
-  $('run-label').textContent = state.run ? `Experiment ${state.run}` : 'No active experiment';
-  const controls = $('show-controls').checked;
-  state.target.groups.forEach((group, index) => {
-    const control = group.prompt || group.kind === 'control';
-    if (control && !controls) return;
-    const section = control ? 'prompt' : group.kind === 'reasoning' ? 'reasoning' : group.kind === 'answer' ? 'answer' : 'unclassified';
-    const container = $(section === 'prompt' ? 'prompt-tokens' : section); $(section + '-section').hidden = false;
-    let button = rendered.get(index);
-    if (!button) { button = document.createElement('button'); button.type = 'button'; button.className = 'token' + (control ? ' control-token' : ''); button.addEventListener('click', event => {
-      if (event.shiftKey && state.selection) select(Math.min(state.selection[0], group.first), Math.max(state.selection[1], group.last));
-      else select(group.first, group.last);
-    });
-    button.addEventListener('keydown', event => {
-      if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
-      event.preventDefault();
-      const visible = [...rendered].filter(([, button]) => !button.closest('details:not([open])')).map(([key]) => key), nextIndex = visible[visible.indexOf(index) + (event.key === 'ArrowRight' ? 1 : -1)];
-      if (nextIndex === undefined) return;
-      const next = state.target.groups[nextIndex];
-      if (event.shiftKey && state.selection) select(Math.min(state.selection[0], next.first), Math.max(state.selection[1], next.last));
-      else select(next.first, next.last);
-      rendered.get(nextIndex).focus();
-    }); container.append(button); rendered.set(index, button); }
-    button.textContent = group.text; button.title = `Position ${group.first}${group.last !== group.first ? '–' + group.last : ''}`;
-  });
-  while (resultCount < state.results.length) {
-    const result = state.results[resultCount++];
-    const article = document.createElement('article'); article.className = 'interpretation';
-    const title = document.createElement('h3'); title.textContent = `Position ${result.capture.position} · interpretation ${result.variant ?? 'unavailable'}`;
-    const excerpt = document.createElement('blockquote'); excerpt.textContent = selectedText(state, result.capture.position) || '[empty token]';
-    const text = document.createElement('p'); text.textContent = interpretationText(result);
-    const status = document.createElement('p'); status.className = 'hint';
-    status.textContent = result.outcome === 'failed' ? 'Interpretation failed.' : result.outcome === 'cancelled' ? 'Interpretation stopped.' : result.stop === 'token_limit' ? 'Output budget reached.' : 'Interpretation complete.';
-    if (result.format !== 'complete') status.textContent += ' Showing unfinished or unstructured NLA output.';
-    article.append(title, excerpt, text, status);
-    const details = document.createElement('details'), detailSummary = document.createElement('summary'), metadata = document.createElement('p');
-    detailSummary.textContent = 'Generation details'; metadata.className = 'hint';
-    metadata.textContent = `Block ${result.capture.block} · seed ${result.settings.seed} · temperature ${result.settings.temperature} · ${result.format} explanation tags`;
-    details.append(detailSummary, metadata);
-    if (result.stream) { const raw = document.createElement('pre'); raw.textContent = new TextDecoder().decode(Uint8Array.from(result.stream.generatedBytes)); details.append(raw); }
-    article.append(details);
-    $('interpretations').prepend(article);
-  }
-  renderOutputState();
-  renderLiveInterpretation();
-  renderSelection();
-  if (state.status?.publication_failed) showError(new Error('Live publication failed. The displayed transcript may be incomplete; start a new experiment after the operation stops.'));
+  write('run-label', state.run ? `Experiment ${state.run}` : 'New experiment');
+  write('experiment-prompt', promptRecord?.prompt?.user ?? (state.run ? 'Explore the retained generation.' : 'Generate, select a point, then explore its activation.'));
+  $('reader').hidden = comparing; $('inspector').hidden = comparing; $('compare').hidden = !comparing;
+  const summary = outputSummary(state);
+  write('target-status', state.run ? `${summary.generated.toLocaleString()} generated tokens${state.retained ? ' · captures ready' : ''}` : 'Enter a prompt above to begin.');
+  let notice = '';
+  if (summary.stop === 'token_limit') notice = summary.answer ? 'Output budget reached. The answer may be incomplete.' : 'Output budget reached before an answer. Captured thinking is still available to explore.';
+  if (summary.stop === 'user_stop') notice = 'Generation stopped. Completed captures remain available.';
+  if (summary.stop === 'execution_failure') notice = 'Generation failed. Any completed captures remain available.';
+  if (state.status?.phase === 'unavailable') notice = 'This run is unavailable. Start a new experiment.';
+  $('generation-notice').hidden = !notice; write('generation-notice', notice);
+  const working = allSamples.filter(s => s.pending), elsewhere = working.filter(s => s.capture.position !== state.selection?.[0]);
+  const unknown = active && state.retained && !working.length;
+  $('background-status').hidden = !elsewhere.length && !unknown;
+  write('background-status', elsewhere.length ? `${elsewhere.length} sample jobs in progress at ${[...new Set(elsewhere.map(s => '#' + s.capture.position))].join(', ')}. Your selection stays here.` : unknown ? 'An interpretation is running from another browser. Its point will appear when the service publishes the result.' : '');
+  renderPoints(); if (comparing) renderCompare(); else { renderSource(); renderSelection(); }
+  if (state.status?.publication_failed) showError(new Error('Live publication failed. This transcript may be incomplete; start a new experiment after the operation stops.'));
 }
 function settings(prefix) {
-  return generationSettings({
-    mode: $(prefix + '-mode').value,
-    seed: $(prefix + '-seed').value,
-    max_new_tokens: Number($(prefix + '-cap').value),
-    temperature: Number($(prefix + '-temperature').value),
-    top_p: prefix === 'av' ? 1 : Number($('target-top-p').value)
-  });
+  return generationSettings({ mode: $(prefix + '-mode').value, seed: $(prefix + '-seed').value, max_new_tokens: Number($(prefix + '-cap').value), temperature: Number($(prefix + '-temperature').value), top_p: prefix === 'av' ? 1 : Number($('target-top-p').value) });
+}
+function restoreMetadata() {
+  submitted = saved('dolittle-jobs') ?? [];
+  if (!Array.isArray(submitted)) submitted = [];
+  submitted = submitted.filter(r => r.epoch === state.epoch && r.run === state.run && Array.isArray(r.jobs));
+  promptRecord = saved('dolittle-prompt');
+  if (!promptRecord) { try { promptRecord = JSON.parse(sessionStorage.getItem('dolittle-prompt')); } catch { /* Legacy metadata is optional. */ } }
+  if (promptRecord?.epoch !== state.epoch || promptRecord?.run !== state.run) promptRecord = null;
+  if (promptRecord) {
+    $('prompt').value = promptRecord.prompt.user; $('system').value = promptRecord.prompt.system ?? '';
+    $('thinking').checked = promptRecord.prompt.thinking === 'enabled';
+    for (const [name, key] of Object.entries({ cap: 'max_new_tokens', mode: 'mode', seed: 'seed', temperature: 'temperature', 'top-p': 'top_p' })) $('target-' + name).value = promptRecord.settings[key];
+    remember('dolittle-prompt', promptRecord); write('prompt-preview', promptRecord.prompt.user);
+    $('target-temperature').disabled = promptRecord.settings.mode === 'greedy';
+    $('target-top-p').disabled = promptRecord.settings.mode === 'greedy';
+  } else write('prompt-preview', state.run ? 'Retained experiment · open to start another prompt' : 'Start with a question or a small puzzle.');
 }
 async function command(path, body, requestEpoch = state.epoch) {
   const retry = () => command(path, body, requestEpoch);
-  try { clearError(); submitting = true; render(); const receipt = await client.command(path, body, requestEpoch);
+  try {
+    clearError(); submitting = true; render();
+    const receipt = await client.command(path, body, requestEpoch);
     if (body.prompt) {
-      $('composer').open = false; $('prompt-preview').textContent = body.prompt.user;
-      try { sessionStorage.setItem('dolittle-prompt', JSON.stringify({ epoch: state.epoch, run: receipt.run, prompt: body.prompt, settings: body.settings })); } catch { /* A private browser may disable storage. */ }
+      promptRecord = { epoch: requestEpoch, run: receipt.run, prompt: body.prompt, settings: body.settings };
+      remember('dolittle-prompt', promptRecord); $('composer').open = false; write('prompt-preview', body.prompt.user);
     }
-    if (body.jobs?.length) pendingInterpretation = { request: body.request, text: selectedText(state, body.jobs[0].capture.position) };
     if (body.jobs?.length && $('av-seed').value === body.jobs[0].settings.seed) {
       const next = BigInt(body.jobs[0].settings.seed) + BigInt(body.jobs.length);
       if (next <= 18446744073709551615n) $('av-seed').value = next.toString();
     }
-    if (receipt.run !== state.run) { pendingInterpretation = null; state = newState(state.epoch, receipt.run); resetView(); } await poll(); }
-  catch (error) { showError(error, error.status ? null : retry); }
-  finally { submitting = false; render(); }
+    if (receipt.run !== state.run) {
+      state = newState(state.epoch, receipt.run); submitted = []; remember('dolittle-jobs', submitted); resetView();
+      lastIdentity = `${state.epoch}/${state.run}`;
+      if (body.prompt) section = body.prompt.thinking === 'enabled' ? 'reasoning' : 'answer';
+    }
+    await poll();
+  } catch (error) {
+    if (error.status) {
+      submitted = submitted.filter(r => r.request !== body.request); remember('dolittle-jobs', submitted);
+      if (error.status === 401) requireAccess(error); else showError(error);
+    } else showError(error, retry);
+  } finally { submitting = false; render(); }
 }
-let polling = false;
 async function poll() {
   if (polling) return;
   polling = true;
   try {
-    const status = await client.status(); connected = true;
-    if (needsAccess) { clearError(); needsAccess = false; }
-    if (status.epoch !== state.epoch || status.run !== state.run) { pendingInterpretation = null; state = newState(status.epoch, status.run); resetView(); }
-    if (!restored) {
-      restored = true;
-      if (status.run) {
-        $('composer').open = false;
-        $('prompt-preview').textContent = 'Retained experiment · open to start another prompt';
-        try {
-          const saved = JSON.parse(sessionStorage.getItem('dolittle-prompt'));
-          if (saved?.epoch === status.epoch && saved.run === status.run) {
-            $('prompt').value = saved.prompt.user; $('system').value = saved.prompt.system ?? '';
-            $('thinking').checked = saved.prompt.thinking === 'enabled';
-            $('target-cap').value = saved.settings.max_new_tokens;
-            $('target-mode').value = saved.settings.mode;
-            $('target-seed').value = saved.settings.seed;
-            $('target-temperature').value = saved.settings.temperature;
-            $('target-top-p').value = saved.settings.top_p;
-            $('target-temperature').disabled = saved.settings.mode === 'greedy';
-            $('target-top-p').disabled = saved.settings.mode === 'greedy';
-            $('prompt-preview').textContent = saved.prompt.user;
-          }
-        } catch { /* Stored prompt context is optional. */ }
-      }
+    const status = await client.status(); connected = true; needsAccess = false;
+    if (!$('access').hidden) clearError(); $('access').hidden = true;
+    if (status.epoch !== state.epoch || status.run !== state.run) {
+      if (state.epoch && state.run) showError(new Error('The service restarted or the experiment changed. Previous captures are no longer available.'));
+      state = newState(status.epoch, status.run); restored = false;
     }
-    capabilities = status.limits; state.status = status; $('pair').textContent = status.pair === 'qwen3-8b-nla' ? 'Qwen3-8B · Qwen3-8B-nla' : status.pair;
+    if (!restored) { restored = true; restoreMetadata(); if (status.run) $('composer').open = false; }
+    capabilities = status.limits; state.status = status; write('pair', status.pair);
     if (state.run) {
-      const page = await client.events(state.run, state.cursor);
-      applyPage(state, page); pollDelay = page.more || state.status.active_request || state.status.queued_jobs ? 100 : 1000;
+      const page = await client.events(state.run, state.cursor); applyPage(state, page);
+      pollDelay = page.more || state.status.active_request || state.status.queued_jobs ? 100 : 1000;
     } else pollDelay = 1000;
     render();
-  } catch (error) { connected = false; pollDelay = Math.min(Math.max(pollDelay * 2, 1000), 10000); if (error.status === 401) { needsAccess = true; showError(error); } $('connection').textContent = 'Disconnected — reconnecting'; $('generate').disabled = true; $('stop').disabled = true; $('interpret').disabled = true; }
-  finally { polling = false; }
+  } catch (error) {
+    connected = false; pollDelay = error.status === 401 ? 1000 : Math.min(Math.max(pollDelay * 2, 1000), 10000);
+    if (error.status === 401) requireAccess(error);
+    else { needsAccess = false; write('connection', 'Disconnected — reconnecting'); for (const id of ['generate', 'stop', 'interpret']) $(id).disabled = true; }
+  } finally { polling = false; }
 }
-for (const prefix of ['target', 'av']) {
-  $(prefix + '-mode').addEventListener('change', () => {
-    const greedy = $(prefix + '-mode').value === 'greedy';
-    $(prefix + '-temperature').disabled = greedy;
-    if (prefix === 'target') $('target-top-p').disabled = greedy;
-  });
+for (const prefix of ['target', 'av']) $(prefix + '-mode').onchange = () => {
+  const greedy = $(prefix + '-mode').value === 'greedy'; $(prefix + '-temperature').disabled = greedy;
+  if (prefix === 'target') $('target-top-p').disabled = greedy;
+};
+$('prompt-form').addEventListener('invalid', event => { for (let d = event.target.closest('details'); d; d = d.parentElement.closest('details')) d.open = true; }, true);
+$('prompt-form').onsubmit = event => {
+  event.preventDefault();
+  try { const system = $('system').value; command('/api/v1/runs', { request: requestId(), replace: state.run, prompt: { user: $('prompt').value, thinking: $('thinking').checked ? 'enabled' : 'disabled', ...(system ? { system } : {}) }, settings: settings('target') }); } catch (error) { showError(error); }
+};
+$('stop').onclick = () => { if (state.status?.active_request) command(`/api/v1/runs/${state.run}/stop`, { request: requestId(), active_request: state.status.active_request }); };
+$('interpret').onclick = () => {
+  try {
+    const jobs = selectionJobs(state, state.selection[0], state.selection[1], Number($('variant-count').value), settings('av'), capabilities.jobs), request = requestId();
+    submitted.push({ epoch: state.epoch, run: state.run, request, jobs }); remember('dolittle-jobs', submitted);
+    // The initiating point selects its new slot once; later polling never steals selection.
+    for (let index = 0; index < jobs.length; index++) if (!jobs.slice(0, index).some(j => captureKey(j.capture) === captureKey(jobs[index].capture))) sampleChoices.set(captureKey(jobs[index].capture), `${request}/${index}`);
+    command(`/api/v1/runs/${state.run}/interpretations`, { request, jobs });
+  } catch (error) { showError(error); }
+};
+$('previous-token').onclick = () => select(state.selection[0] - 1, state.selection[0] - 1, true);
+$('next-token').onclick = () => select(state.selection[0] + 1, state.selection[0] + 1, true);
+$('position').onchange = () => select(Number($('position').value), Number($('position').value), true);
+$('end-position').onchange = () => select(Number($('position').value), Number($('end-position').value), true);
+$('variant-count').oninput = renderSelection;
+$('av-seed').oninput = () => { seedInitialized = true; };
+$('show-controls').onchange = renderSource;
+$('mobile-point').onchange = event => { if (/^\d+$/.test(event.target.value)) select(Number(event.target.value), Number(event.target.value), true); };
+$('back-text').onclick = () => { section = owner(state.selection[0]); renderSource(); $('reader').scrollIntoView({ block: 'start' }); locateSelection(); $('source').querySelector('.selected')?.focus({ preventScroll: true }); };
+$('retry').onclick = () => retryAction?.();
+$('access-form').onsubmit = async event => { event.preventDefault(); try { client.connect($('access-link').value); $('access-link').value = ''; clearError(); write('access-message', 'Connecting…'); await poll(); } catch (error) { showError(error); } };
+$('composer').ontoggle = () => write('composer-action', $('composer').open ? 'Collapse' : state.run ? 'New generation' : 'Edit prompt');
+const tabs = [...document.querySelectorAll('[data-section]')];
+function switchSection(button) { section = button.dataset.section; matches = []; searchSignature = ''; write('search-status', ''); renderSource(); }
+for (const button of tabs) {
+  button.onclick = () => switchSection(button);
+  button.onkeydown = event => { if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return; event.preventDefault(); const visible = tabs.filter(b => !b.hidden), next = visible[(visible.indexOf(button) + (event.key === 'ArrowRight' ? 1 : visible.length - 1)) % visible.length]; switchSection(next); next.focus(); };
 }
-$('prompt-form').addEventListener('invalid', event => { const details = event.target.closest('details'); if (details) details.open = true; }, true);
-$('prompt-form').addEventListener('submit', event => { event.preventDefault(); try { const system = $('system').value; const body = { request: requestId(), replace: state.run, prompt: { user: $('prompt').value, thinking: $('thinking').checked ? 'enabled' : 'disabled', ...(system ? { system } : {}) }, settings: settings('target') }; command('/api/v1/runs', body); } catch (error) { showError(error); } });
-$('stop').addEventListener('click', () => { if (state.status?.active_request) command(`/api/v1/runs/${state.run}/stop`, { request: requestId(), active_request: state.status.active_request }); });
-$('interpret').addEventListener('click', () => { try { const jobs = selectionJobs(state, Number($('position').value), Number($('end-position').value), Number($('variant-count').value), settings('av'), capabilities.jobs); command(`/api/v1/runs/${state.run}/interpretations`, { request: requestId(), jobs }); } catch (error) { showError(error); } });
-$('previous').addEventListener('click', () => select(state.selection[0] - 1)); $('next').addEventListener('click', () => select(state.selection[0] + 1));
-$('position').addEventListener('change', () => select(Number($('position').value))); $('end-position').addEventListener('change', () => select(Number($('position').value), Number($('end-position').value)));
-$('show-controls').addEventListener('change', () => { resetView(); render(); });
-$('retry').addEventListener('click', () => retryAction?.());
-$('reasoning-section').addEventListener('toggle', renderSelection);
-$('composer').addEventListener('toggle', () => { $('composer-action').textContent = $('composer').open ? 'Collapse' : 'Edit prompt'; });
-$('variant-count').addEventListener('input', renderSelection);
-$('clear-selection').addEventListener('click', () => { state.selection = null; renderSelection(); });
+function search(delta = 0) {
+  const signature = `${section}/${$('show-controls').checked}/${$('find').value}/${state.target.tokens.length}`;
+  if (signature !== searchSignature || !delta) { matches = findOccurrences(groupsFor(), $('find').value); matchIndex = 0; searchSignature = signature; }
+  else if (matches.length) matchIndex = (matchIndex + delta + matches.length) % matches.length;
+  if (!matches.length) { write('search-status', 'No match'); return; }
+  const [first, last] = matches[matchIndex]; select(first, last, true); write('search-status', `${matchIndex + 1}/${matches.length}`);
+}
+$('search-form').onsubmit = event => { event.preventDefault(); search(); };
+$('next-match').onclick = () => search(1); $('previous-match').onclick = () => search(-1);
+$('compare-open').onclick = () => {
+  comparing = true; render();
+  const list = listAt(state.selection[0]), a = list.find(s => s.key === sampleChoices.get(captureKey(capture(state.selection[0])))) ?? list[0] ?? allSamples[0], b = list.find(s => s.key !== a.key) ?? allSamples.find(s => s.key !== a.key);
+  $('compare-a').value = a.key; $('compare-b').value = b.key; renderCompare(); $('compare-close').focus();
+};
+$('compare-close').onclick = () => { comparing = false; render(); $('compare-open').focus({ preventScroll: true }); };
+$('compare-a').onchange = renderCompare; $('compare-b').onchange = renderCompare;
 async function loop() { await poll(); setTimeout(loop, pollDelay); }
-loop();
+render(); loop();

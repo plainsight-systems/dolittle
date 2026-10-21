@@ -173,8 +173,14 @@ Default published port binds host loopback. Docker may listen on all container
 interfaces while Compose publishes only `127.0.0.1`. Explicit LAN binding is an
 operator choice. Check allowed Host/Origin and a startup access token for API
 requests; no wildcard CORS. Hand the token to the local browser in a URL fragment,
-remove it after reading and retain it in session storage; never put it in logs or
-query strings. Serve generated text as text nodes, never HTML. This is a local
+remove it after reading and retain it in origin-scoped local storage so the plain
+URL works across tabs and browser restarts. Migrate existing session credentials;
+fall back to memory if storage is blocked. Discard rejected tokens and show a
+connection panel instead of repeatedly sending unauthorized requests. The panel
+accepts a full same-origin launcher link; credentials are never sent to an address
+supplied by the user. A new launcher session requires its new link. Keep tokens
+out of application logs and query strings; the launcher's private access link is
+the explicit handoff. Serve generated text as text nodes, never HTML. This is a local
 experiment service, not an internet-facing multi-user deployment.
 
 ## Bounds and cost
@@ -215,23 +221,25 @@ agreement with an independent oracle.
 
 ## Browser responsibilities
 
-The browser has one prompt/settings area, a target transcript with reasoning and
-answer sections, and an interpretation inspector for the selected position or
-bounded window. Exact position, block, capture availability and variant settings
-are inspectable. Comparing views does not imply that either is ground truth.
+The accepted [investigation interface](investigation-interface.md) separates
+investigated-point navigation, the Prompt/Thinking/Answer reader, and samples of
+the selected activation. Comparison opens two unedited samples with their own
+source identity. Streaming updates preserve focus, sample choice and scroll.
 
-`client.js` owns wire validation, epoch/cursor handling and retries. It does not
-retry a mutation with a new request ID. `controller.js` owns selection and pending
-jobs. `view.js` renders that state, accessible keyboard navigation, progress,
-stop, errors and raw-tag fallback. Disconnected, queued, loading, generating,
-finalizing and retained states are distinct. Refresh rebuilds state from events;
-no browser state can declare generation complete ahead of the service.
+`client.js` owns same-origin transport, remembered access and idempotent command
+retries. `controller.js` reduces ordered events and projects exact byte/token
+ranges, search matches and sample identities. `view.js` owns accessible DOM
+presentation, navigation and optional submission metadata. Model-specific
+thinking classification remains in the server protocol. Missing original-prompt
+provenance falls back to labelled full input; no delimiter stripping is used.
 
-The inspector supports previous/next position, multiple variants and comparison
-of neighboring tokens. Selection during generation may queue work, but it is
-labeled waiting for target completion. Stop is not pause/resume. New experiment
-explicitly replaces retained state. Visual composition can be reviewed with the
-working interface; this document fixes behavior and data ownership.
+Every provisional sample is keyed by epoch/run/request/job and its submitted
+capture, never by current selection. Terminal journal events supply authoritative
+outcomes. Work from another browser has global progress until its capture is
+published. Refresh replays the journal without rerunning inference. Selection is
+allowed while the target streams; interpretation is enabled after capture
+finalization. Stop is not pause/resume. A new experiment explicitly replaces
+retained state, and changing epoch/run clears old selection and comparison.
 
 ## Files and implementation boundary
 

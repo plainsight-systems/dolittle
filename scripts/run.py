@@ -84,7 +84,9 @@ def main():
             else:
                 raise RuntimeError('Service did not become ready')
             access = url + '/#token=' + token
-            print('Open this private access link in your browser:\n' + access, flush=True)
+            print('Open Dolittle — use this full access link the first time in each browser:\n' + access, flush=True)
+            print('After connecting, this browser remembers access at ' + url + '/\n'
+                  'Keep this terminal running. If you restart the launcher, open its new access link.', flush=True)
             if not args.no_browser:
                 webbrowser.open(access)
             return process.wait()

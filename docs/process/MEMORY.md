@@ -1,5 +1,26 @@
 # Project memory
 
+## Investigation interface
+
+Andrew accepted the three-region investigation design: point navigation,
+Prompt/Thinking/Answer reader, and samples for the selected activation. Samples
+retain full block/boundary/position identity and request/job association; polling
+never moves selection to a completed background job. Comparison shows two full
+samples. Inline spans preserve source whitespace and split-glyph positions.
+Original-prompt presentation requires matching saved provenance; otherwise the
+reader shows labelled full model input. The server currently does not publish
+separate original-message ranges. The accepted design records this limitation.
+
+## Browser access
+
+The browser remembers the launcher's access key per origin across tabs and
+browser restarts, migrating existing tab credentials. Storage-disabled browsers
+retain access only for the page lifetime. First visits and rejected keys show
+an explicit connection panel with a launcher-link field; authentication failures
+do not masquerade as connection retries. Rejected keys are discarded. Restarting
+the launcher still rotates access and requires its new link. API authentication
+and Host/Origin checks remain enforced.
+
 ## Prefill projection strategy
 
 CUDA multi-row projections with input width divisible by 128 stage eight

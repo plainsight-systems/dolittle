@@ -65,3 +65,66 @@ test('selection excerpts preserve characters whose bytes span tokens', async () 
   assert.equal(selectedText(state, 0, 2), '€A');
   assert.equal(selectedText(state, 8), '');
 });
+
+test('search preserves positions across subwords and split Unicode without partial word matches', async () => {
+  const { findOccurrences } = await import('../../app/controller.js');
+  const groups = [
+    { first: 0, last: 0, text: 'with ' }, { first: 1, last: 1, text: 'w' },
+    { first: 2, last: 2, text: 'it ' }, { first: 3, last: 4, text: '€' },
+    { first: 5, last: 5, text: ' WIT. [x]' }
+  ];
+  assert.deepEqual(findOccurrences(groups, 'wit'), [[1, 2], [5, 5]]);
+  assert.deepEqual(findOccurrences(groups, '€'), [[3, 4]]);
+  assert.deepEqual(findOccurrences(groups, '[x]'), [[5, 5]]);
+  assert.deepEqual(findOccurrences(groups, ''), []);
+});
+test('samples keep full capture identity and pending jobs retain their submitted point', async () => {
+  const { samplesAt, investigationSamples } = await import('../../app/controller.js');
+  const state = newState('e', '1'), capture = { position: 8, block: 24, boundary: 'block_output' };
+  const complete = { request: 'r', job: 0, capture };
+  state.results = [complete, { request: 'q', job: 0, capture: { ...capture, block: 7 } }];
+  assert.deepEqual(samplesAt(state.results, capture), [complete]);
+  state.selection = [99, 99];
+  const requests = [{ epoch: 'e', run: '1', request: 'r', jobs: [{ capture }, { capture: { ...capture, position: 9 } }] },
+    { epoch: 'old', run: '1', request: 'stale', jobs: [{ capture }] }];
+  let samples = investigationSamples(state, requests);
+  assert.equal(samples.length, 3);
+  assert.equal(samples[2].capture.position, 9);
+  assert.equal(samples[2].pending, true);
+  state.requests.set('r', { outcome: 'cancelled' });
+  samples = investigationSamples(state, requests);
+  assert.equal(samples[2].pending, false);
+  assert.equal(samples[2].outcome, 'cancelled');
+});
+test('optional control tokens retain their sequence location and all text is preserved', async () => {
+  const { sourceGroups } = await import('../../app/controller.js');
+  const state = newState();
+  state.target.groups = [
+    { prompt: true, kind: 'unclassified', text: 'input' },
+    { prompt: false, kind: 'control', text: '<think>' },
+    { prompt: false, kind: 'reasoning', text: 'a\n b' },
+    { prompt: false, kind: 'control', text: '</think>' },
+    { prompt: false, kind: 'answer', text: 'reply' },
+    { prompt: false, kind: 'control', text: '<end>' }
+  ];
+  assert.equal(sourceGroups(state, 'reasoning').map(g => g.text).join(''), 'a\n b');
+  assert.equal(sourceGroups(state, 'reasoning', true).map(g => g.text).join(''), '<think>a\n b</think>');
+  assert.equal(sourceGroups(state, 'answer', true).map(g => g.text).join(''), 'reply<end>');
+});
+test('prompt presentation requires unambiguous provenance on exact token boundaries', async () => {
+  const { promptExcerpt } = await import('../../app/controller.js');
+  const state = newState();
+  state.target.groups = [{ prompt: true, text: 'prefix' }, { prompt: true, text: 'hello' }, { prompt: true, text: 'suffix' }];
+  assert.deepEqual(promptExcerpt(state, 'hello'), [state.target.groups[1]]);
+  assert.equal(promptExcerpt(state, 'ell'), null);
+  assert.equal(promptExcerpt(state, undefined), null);
+  state.target.groups.push({ prompt: true, text: 'hello' });
+  assert.equal(promptExcerpt(state, 'hello'), null);
+});
+test('new samples advance past retained seeds without precision loss or overflow', async () => {
+  const { nextSampleSeed } = await import('../../app/controller.js');
+  assert.equal(nextSampleSeed([]), '100');
+  assert.equal(nextSampleSeed([{ settings: { seed: '104' } }]), '105');
+  assert.equal(nextSampleSeed([{ settings: { seed: '9007199254740993' } }]), '9007199254740994');
+  assert.equal(nextSampleSeed([{ settings: { seed: '18446744073709551615' } }, { settings: { seed: '0' } }]), '1');
+});

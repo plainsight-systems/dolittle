@@ -121,3 +121,89 @@ export function outputSummary(state) {
 export function selectedText(state, first, last = first) {
   return state.target.groups.filter(g => g.first <= last && g.last >= first).map(g => g.text).join('');
 }
+
+// A2 presentation projections preserve the reducer's byte-derived ranges.
+// No model IDs or delimiter text are reclassified by these helpers.
+export function sourceSection(group) {
+  return group.prompt ? 'prompt' : ['reasoning', 'answer'].includes(group.kind) ? group.kind : 'unclassified';
+}
+export function sourceGroups(state, section, controls = false) {
+  // Generated controls stay next to the segment they delimit. Their actual
+  // positions remain available through the numeric navigator and token strip.
+  let preceding = 'reasoning';
+  return state.target.groups.filter(g => {
+    if (!g.prompt && g.kind !== 'control') preceding = sourceSection(g);
+    const owner = g.kind === 'control' && !g.prompt ? preceding : sourceSection(g);
+    return owner === section && (controls || g.kind !== 'control');
+  });
+}
+export function findOccurrences(groups, query) {
+  if (!query) return [];
+  const text = groups.map(g => g.text).join(''), matches = [];
+  // Unicode regex case folding preserves original string offsets, unlike
+  // lowercasing which can change the length of a code point.
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(escaped, 'giu');
+  const word = /^[\p{L}\p{N}_]+$/u.test(query), offsets = [];
+  let offset = 0;
+  for (const g of groups) { offsets.push({ start: offset, end: offset + g.text.length, g }); offset += g.text.length; }
+  for (const match of text.matchAll(pattern)) {
+    const begin = match.index, end = begin + match[0].length;
+    const before = [...text.slice(0, begin)].at(-1) ?? '', after = [...text.slice(end)][0] ?? '';
+    if (word && (/[\p{L}\p{N}_]/u.test(before) || /[\p{L}\p{N}_]/u.test(after))) continue;
+    const contributors = offsets.filter(o => o.end > begin && o.start < end);
+    if (contributors.length) matches.push([contributors[0].g.first, contributors.at(-1).g.last]);
+  }
+  return matches;
+}
+export function captureKey(capture) { return `${capture.block}/${capture.boundary}/${capture.position}`; }
+export function samplesAt(samples, capture) {
+  return samples.filter(r => captureKey(r.capture) === captureKey(capture));
+}
+// Submitted job metadata can supplement the journal during streaming. A terminal
+// server result always wins. Never attach a stream to the current UI selection.
+export function investigationSamples(state, submitted = []) {
+  const samples = state.results.map(result => ({ ...result, key: `${result.request}/${result.job}`, pending: false }));
+  const completed = new Set(samples.map(s => s.key));
+  for (const request of submitted) {
+    if (request.epoch !== state.epoch || request.run !== state.run) continue;
+    request.jobs.forEach((job, index) => {
+      const key = `${request.request}/${index}`;
+      if (completed.has(key)) return;
+      const terminal = state.requests.get(request.request);
+      const stream = state.attempts.get(key);
+      samples.push({ ...job, request: request.request, job: index, key, stream, pending: !terminal,
+        outcome: terminal?.outcome, message: terminal?.message, format: 'missing' });
+    });
+  }
+  return samples;
+}
+
+// The submitted user text is optional presentation provenance, never inferred
+// from delimiter spellings. Only a unique, whole-group match may hide template
+// text. Ambiguous/missing provenance falls back to the exact retained input.
+export function promptExcerpt(state, user) {
+  if (typeof user !== 'string' || !user.length) return null;
+  const groups = state.target.groups.filter(g => g.prompt), text = groups.map(g => g.text).join('');
+  const start = text.indexOf(user);
+  if (start < 0 || text.indexOf(user, start + 1) !== -1) return null;
+  let offset = 0;
+  const selected = [];
+  for (const g of groups) {
+    const end = offset + g.text.length;
+    if (end > start && offset < start + user.length) {
+      if (offset < start || end > start + user.length) return null;
+      selected.push(g);
+    }
+    offset = end;
+  }
+  return selected.length ? selected : null;
+}
+
+export function nextSampleSeed(samples, initial = '100') {
+  const used = new Set(samples.map(s => s.settings?.seed).filter(s => /^(0|[1-9]\d*)$/.test(s)));
+  let next = BigInt(initial);
+  for (const seed of used) if (BigInt(seed) >= next) next = BigInt(seed) + 1n;
+  if (next > 18446744073709551615n) { next = 0n; while (used.has(next.toString())) next++; }
+  return next.toString();
+}

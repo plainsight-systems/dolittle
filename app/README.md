@@ -53,30 +53,52 @@ forward the same port over SSH or explicitly opt into a trusted LAN:
 python3 scripts/run.py --bind 0.0.0.0 --host my-linux-host --no-browser
 ```
 
-Open the printed access link on that browser. The token is carried in its URL
-fragment, removed from the address bar and retained in that tab's session
-storage. The service checks Host/Origin and authenticates API requests. The
+Open the full link under **Open Dolittle** in the launcher terminal. You can
+also paste it into the connection panel at the regular app address. This browser
+remembers access for that address across tabs and browser restarts, so subsequent
+visits can use the regular URL. Restarting the launcher creates a new link; the
+page will ask for it when the previous access expires. Different browsers,
+profiles and addresses need their own initial connection. With browser storage
+disabled, access lasts only for the current page.
+
+The token is carried in the URL fragment, removed from the address bar and
+retained in origin-scoped local storage. Existing tab credentials migrate
+automatically. Rejected credentials are discarded without repeated API requests.
+The service checks Host/Origin and authenticates API requests. The
 current transport is HTTP; use an SSH tunnel for connections outside a trusted
 LAN. Do not expose this single-user service directly to the internet.
 
-Enter a prompt and choose thinking/sampling settings. Target output streams into
-thinking and answer sections. The prompt folds away during generation, and
-thinking can be collapsed independently. A visible token budget covers both
-thinking and the answer; reaching it before an answer is reported explicitly.
-The default output budget is 4,096 tokens. Prompt (including the chat template)
-plus requested output must fit within the 8,192-token target context; requests
-that exceed it are rejected rather than silently shortened. Generation stops
-at the model's end marker even if budget remains. Interpretation settings have
-an independent 256-token output default within a 512-token AV context.
-Click a text fragment to inspect its exact token positions; Shift-click extends
-a range and arrow keys move between fragments. Numeric positions and variants
-remain available under details. The selected excerpt stays beside the NLA
-output, which streams while it is generated.
-“Show prompt & control tokens” reveals the full input and delimiters. A window becomes separate
-position jobs, never an averaged activation. The interface enables interpretation
-after target generation finishes. Each interpretation has its own seed and cache; AV
-weights remain resident between requests. Raw output remains visible when the
-trained explanation tags are absent or incomplete.
+Enter a prompt and choose thinking/sampling settings. The composer folds away
+during generation. Read the **Prompt**, **Thinking** and **Answer** tabs, then
+select a point to inspect its captured activation. Search finds whole words or
+phrases and maps the match to exact token positions. Arrow keys move between
+text fragments; Shift-click extends a range. The nearby token strip makes spaces
+and newlines visible without changing the prose. Numeric positions and multiple
+samples per position remain under details. A range requests separate captures,
+never an averaged activation.
+
+The **Investigated points** list keeps samples under their original activation.
+Selecting a point shows only its samples, with source context directly above.
+**Compare samples** opens two explanations side by side; either selector can
+choose another point. On narrow screens, the point list becomes a selector and
+comparison stacks vertically. Background completion updates the original point
+without changing the user's selection. Stop reason, raw tags, revisions and
+sampling settings stay under **Generation details**. Format is not a quality score.
+
+The browser shows the original prompt when saved submission data uniquely
+matches its retained token groups. Otherwise **Model input** displays the exact
+input, including the chat template. It does not guess prompt boundaries by
+stripping delimiter text. **Show control tokens** exposes generated delimiters
+in sequence. Characters split across tokens retain all contributing positions.
+
+A visible output budget covers both thinking and the answer; reaching it before
+an answer is reported explicitly. The default is 4,096 tokens. Prompt (including
+the chat template) plus requested output must fit within the 8,192-token target
+context. Generation stops at the model's end marker even if budget remains.
+Interpretation has an independent 256-token default within a 512-token AV context.
+The inspector displays the service's remaining retained-sample capacity and
+per-request job bound before submission. Interpretation becomes available after
+target generation finishes. AV weights remain resident between requests.
 
 Stop signals the active request and its remaining jobs. Browser disconnects do
 not cancel work. Refresh replays the bounded journal without rerunning inference.

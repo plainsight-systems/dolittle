@@ -168,7 +168,29 @@ The existing live service has not been replaced by this source revision.
 
 ## Next
 
-1. Use the experiment before pursuing further performance work.
+The browser-access fix is implemented and installed in the live service:
+remembered access across tabs, first-visit/expired-link recovery, and clearer
+launcher instructions. Eleven browser units pass, and the live browser verifies
+connection recovery and plain-URL return in a new tab. The idle service was
+restarted with its existing key to reload cached UI assets. Included with the
+accepted investigation-interface change.
+
+Andrew accepted the [investigation interface](../architecture/investigation-interface.md).
+It is implemented: point-based sample grouping, source tabs/search, exact token
+navigation, comparison, request-scoped streaming and capacity display. Sixteen
+browser contract units pass. Live browser checks cover journal replay, background
+completion without selection changes, comparisons and cancellation. The new
+frontend connects to the retained service without restarting it. Bundled service
+assets reload on the next service launch. Andrew approved committing and pushing
+the interface and browser-access changes.
+
+An independent BF16 Transformers verbalization of the exact retained prompt
+activation reproduces the invented classroom context. Matching prompt tokens
+and the first 92 generated tokens support that narrow result; this is not a
+target-capture validation or a full numerical-parity result. Detailed evidence
+remains private.
+
+1. Review the implemented interface; the retained rhyming experiment is available.
 2. Add the public workflow walkthrough when requested. Long-context numerical
    comparison and additional GPU validation remain future evidence.
 
