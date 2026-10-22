@@ -4,51 +4,50 @@
 
 # Dolittle
 
-Dolittle is an inference engine being built to show a language model's
-generated reasoning beside natural language interpretations of its internal
-activations. One prompt, one generation, two views of the model working
-through it.
+Dolittle puts Qwen3’s generated thinking beside natural language explanations
+of its internal activations. Enter a prompt, select a token and read what the
+NLA describes. Edit that explanation, then compare the model’s continuation
+with and without the change.
 
-The engine runs on Linux/NVIDIA through a source-built Docker image and
-natively on Apple Silicon with Metal. AMD support is undecided. The
-browser interface lets you follow the thinking text and inspect activations
-captured at selected positions. The first hardware target is a
-24 GB Ampere GPU, with reference measurements on an RTX 3090 Ti. The selected
-pairing is **Qwen3 8B with marco-bazzani's natural language autoencoder**,
-interpreting activations at block 24 (zero-based).
+The C++20 engine runs **Qwen3 8B with marco-bazzani’s natural language
+autoencoder**, capturing the output of block 24 (zero-based). Generation,
+interpretation and steering run on CUDA and Metal through the same browser
+interface. Each experiment keeps the original response, interpretation samples
+and steering comparisons available to explore.
 
-**Status: generation, interpretation, steering and the live interface are implemented.** The
-C++20/CUDA/Metal engine loads verified checkpoints, formats and tokenizes Qwen3 prompts,
-generates with a contiguous KV cache, and retains configurable raw captures.
-It retains idle models when memory permits, normalizes a selected capture and
-replaces one AV embedding row, then retains each interpretation as a separate
-variant. AV weights stay resident between requests; each gets a fresh cache.
-A bounded HTTP session streams exact token progress, retains captures and
-serves the browser interface. Edit a completed interpretation to reconstruct an
-activation difference and compare matched unsteered and steered continuations.
-The original experiment stays available alongside its retained comparisons.
+## Run Dolittle
 
-CUDA 13.2 builds retain native Ampere code and PTX. Use the
-[build and verification commands](tests/README.md) to check your environment.
-Container GPU execution requires the NVIDIA Container Toolkit. The current
-numerical scenarios cover short sequences; they do not establish full-context
-behavior or performance on other NVIDIA hardware.
-
-On Linux/NVIDIA or macOS/Apple Silicon, build and launch from source:
+Use Python 3.11+ and Git, then run the same command on either supported host:
 
 ```sh
+git clone https://github.com/plainsight-systems/dolittle.git
+cd dolittle
 python3 scripts/run.py
 ```
 
-See [application setup](app/README.md) for driver/Container Toolkit requirements,
-persistent model storage, native Metal prerequisites and remote browser access.
-The runtime image builds locally; no prebuilt application executable is fetched.
-Setup downloads and hash-verifies models once. Later launches reuse the prepared
-cache; `--verify-models` forces a full verification and repair.
-The Docker application flow is verified on the RTX 3090 Ti with NVIDIA
-Container Toolkit 1.20.1, including target generation and AV interpretation.
-The native Metal flow is verified on an M3 Max with 128 GB unified memory,
-including interpretation, reconstruction and matched steering.
+| Platform | Status and launch path | Tested hardware |
+| --- | --- | --- |
+| Linux/NVIDIA | Available. Builds and runs in Docker with NVIDIA Container Toolkit. | RTX 3090 Ti, 24 GB VRAM |
+| macOS/Apple Silicon | Available. Builds and runs natively with Metal. Requires macOS 26+, Xcode 26 with Metal toolchain, CMake 3.24+ and OpenSSL 3. | M3 Max, 128 GB unified memory |
+| Windows/NVIDIA | Native build planned. | — |
+| AMD | Undecided. | — |
+
+The launcher builds from source, downloads about 45 GB of model files and checks
+their hashes. Later launches reuse those files and the saved verification result.
+Use `--verify-models` to check every file again and repair the cache.
+
+Open the full **Open Dolittle** link printed by the launcher and keep that
+terminal running. The public project website explains the experiment; the local
+service runs it. A browser on another machine can connect to that service.
+See [application setup](app/README.md) for prerequisites, cache options and remote
+access, then follow the [rhyming walkthrough](https://dolittle.plainsight-systems.com/writing/running-an-investigation/).
+
+The engine uses BF16 tensors and FP32 reductions. It keeps model weights on the
+GPU between requests when there is room for the next model, its cache and working
+buffers. Each generation gets a fresh KV cache. CUDA builds include native
+Ampere code and PTX that a compatible NVIDIA driver can compile for newer cards.
+
+## Development
 
 Development checks:
 
@@ -61,9 +60,8 @@ python3 scripts/check.py cuda-build
 See [build and verification commands](tests/README.md) and
 [VS Code setup](tests/README.md#vs-code-and-compiler-settings). The historical
 [4B/8B reference comparison](docs/research/2026-10-16-nla-comparison/README.md)
-used PyTorch, with 15.4 GiB peak allocation for separate BF16 phases and about
-45 GB of checkpoint downloads. Those results describe feasibility of the
-selected model pair; they are separate from verification of this implementation.
+used PyTorch to compare the model pairs before building this engine. The 8B
+run used 15.4 GiB peak allocation with the models running in separate BF16 phases.
 
 The project site can be previewed independently:
 
@@ -103,7 +101,7 @@ easy to interact with. Dolittle is R&D under Plainsight Systems LLC.
 | `docs/writeups/` | Explanations, explorations, and milestone articles |
 | `docs/assets/` | Project artwork and its provenance |
 
-Downloaded weights will live in ignored `models/`; build output and local
+Downloaded weights live in ignored `models/`; build output and local
 experiments also stay out of Git.
 
 ## Working on Dolittle
@@ -113,12 +111,9 @@ Start with [project memory](docs/process/MEMORY.md), the
 [local workflow](docs/process/workflow.md). Agent entry points are
 [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md).
 
-The reference checkpoint paths run on the 3090 Ti. Dolittle will let visitors
-explore agreement and disagreement between the two views. Neither view is
-ground truth for the other; interpretation faithfulness remains unverified.
-Newer NVIDIA cards are intended to have a PTX fallback path, subject to driver
-and memory requirements; hardware support and performance will be reported
-against actual verification.
+The [architecture overview](docs/architecture/README.md) explains the computation
+and how the CUDA and Metal backends share it. [Verification](tests/README.md)
+covers numerical comparisons, tests and build checks.
 
 ## Background
 

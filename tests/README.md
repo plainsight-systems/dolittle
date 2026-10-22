@@ -34,7 +34,7 @@ obtains completed results through the production loading/execution path.
 
 Open the repository root as a VS Code folder, or add it as its own folder in a
 multi-root workspace. Install the recommended C/C++ and CMake Tools extensions.
-Choose **CMake: Select Configure Preset**, then `host-debug` on macOS/Linux or
+Choose **CMake: Select Configure Preset**, then `host-debug` for host-only work, `metal-debug` on Apple Silicon or
 `cuda-debug` in a Linux environment with CUDA installed. Configuration runs on
 open; **CMake: Configure** reruns it after dependency or preset changes.
 

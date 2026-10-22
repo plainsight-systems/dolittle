@@ -228,7 +228,7 @@ remains private.
   model retention and live streaming use the shared application contracts.
   Strict Metal/CUDA builds, 22 host units, device/tiny/8B workflows, native
   source-launch application, formatting and 68 Metal tidy entries pass. Tiny
-  target/AV/AR also passes Metal API validation. Accepted for commit and push.
+  target/AV/AR also passes Metal API validation. Committed and pushed as `34f921f`.
 
 ## Later platform work
 

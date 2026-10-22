@@ -1,5 +1,5 @@
 +++
-title = 'Choosing a model we can run'
+title = 'Choosing a model I can run'
 description = 'Why I chose the Qwen3 8B NLA pair, and how three models fit on a 24 GB GPU.'
 date = '2026-10-16T08:00:00Z'
 lastmod = '2026-10-21T00:00:00-07:00'
@@ -15,25 +15,25 @@ Two Qwen3 pairs were worth trying. Both support thinking, but they package
 their NLA weights differently. That affects how much memory they need and how
 the application switches between generating text and interpreting it.
 
-## What we needed to run
+## What I needed to run
 
 There are three model roles in this experiment. The **target** generates the
 thinking text and answer. The NLA’s **activation verbalizer** reads a vector
 from inside the target and describes it in words. Its **activation
 reconstructor** takes those words and predicts the vector they describe.
-That last step lets us turn an edited explanation back into numbers we can
+That last step lets me turn an edited explanation back into numbers I can
 use to steer the target.
 
-Before building the engine, we tried the published weights in Python with
+Before building the engine, I tried the published weights in Python with
 PyTorch and Hugging Face Transformers. PyTorch runs the tensor operations;
-Transformers supplies the model implementation and generation code. We added
+Transformers supplies the model implementation and generation code. I added
 a hook to the chosen transformer block to save its output at selected token
 positions. For the 8B model, that saved the 4,096-value residual stream after
 block 24’s attention and feed-forward updates had both been added.
-We then passed the saved vector to the verbalizer and its description to the
+I then passed the saved vector to the verbalizer and its description to the
 reconstructor.
 
-This let us check memory use, generation time and the descriptions themselves
+This let me check memory use, generation time and the descriptions themselves
 before choosing which pair to implement in Dolittle.
 
 ## Two available pairs
@@ -54,7 +54,7 @@ reconstruct activations from block 24 of the target model.
 
 The 4B pair can reuse one base model in memory. The 8B pair needs separate
 weights for the target, verbalizer and reconstructor. That difference determines
-how we run them on the GPU.
+how I run them on the GPU.
 
 ## One GPU, three models
 
@@ -63,7 +63,7 @@ weight storage. The PyTorch experiment fitted them into 24 GB of VRAM by loading
 one role at a time: generate the response and save its activations, release
 the target, then load the verbalizer or reconstructor when needed.
 
-The saved text and activations remain available while models switch. We can
+The saved text and activations remain available while models switch. I can
 therefore read a response, select a token, and request an explanation without
 keeping all three models on the GPU. The 8B weights stay at BF16 precision
 throughout, without quantization.
@@ -106,7 +106,7 @@ names, countries and objects absent from the prompt.
 
 In the [key example]({{< relref "/writing/two-views-of-a-thinking-model#when-the-views-disagree" >}}),
 the NLA described the right kind of task while changing the story around it.
-That mix of recognizable subject and invented detail gave us a reason to
+That mix of recognizable subject and invented detail gave me a reason to
 compare several samples and token positions in the interface.
 
 ## Why I chose 8B
@@ -116,7 +116,7 @@ finished within the 160-token interpretation budget, and it fits the available G
 roles run separately. Those were the reasons I chose it.
 
 The cost is a larger download and time spent switching model weights. It also
-gives us one trained capture layer, block 24. That is enough to run the
+gives me one trained capture layer, block 24. That is enough to run the
 experiment: generate thinking, read an activation, edit its explanation and
 see how the next output changes.
 
@@ -124,28 +124,27 @@ see how the next output changes.
 
 *21 October 2026*
 
-PyTorch already gave us access to the activations. Hooks can also replace a
-block’s output, so we could have built the interaction around that Python
+PyTorch already gave me access to the activations. Hooks can also replace a
+block’s output, so I could have built the interaction around that Python
 implementation. Building the inference engine was part of what I wanted to
 explore, as it was with Charlotte and Serenity. I wanted to implement the
 computation that makes the experiment work and give people a way to interact
 with it.
 
-Dolittle’s custom harness runs the published weights through a C++/CUDA
-transformer. It handles loading, attention, the cache of earlier tokens, and
+Dolittle’s custom harness runs the published weights through a C++ transformer with CUDA and Metal backends. It handles loading, attention, the cache of earlier tokens, and
 sampling the next token. Capture hooks save the activations for inspection;
 a steering hook changes the selected activation before the next block runs.
 The transformer computation stays on the GPU, while the CPU prepares requests,
 encodes and decodes text, and passes results to the browser.
 
-Owning that execution path lets us work directly on GPU scheduling, memory
+Owning that execution path lets me work directly on GPU scheduling, memory
 reuse and model switching. The same engine runs the target and both NLA
 components, one role at a time, to fit the 24 GB card.
 
 PyTorch remains useful as an independent numerical reference: it produces
-expected activations and outputs that we compare with the custom engine.
+expected activations and outputs that I compare with the custom engine.
 That is a separate job from the model-selection measurements above. It checks
-whether our implementation performs the intended computation.
+whether my implementation performs the intended computation.
 
 The application now gives thinking and the answer a shared default budget of
 4,096 tokens. The [rhyming walkthrough]({{< relref "/writing/running-an-investigation" >}})

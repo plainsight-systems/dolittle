@@ -68,10 +68,21 @@ whole-model budget failures remain in reports. All 68 Metal clang-tidy entries,
 Google formatting and the native source-launch application flow pass. The latter
 covers complete interpretation, edited-text steering, exact zero-strength
 sampled branches, reconnect/idempotency and clean shutdown on the M3 Max.
-Andrew approved committing and pushing the complete Metal port. Do not reopen
+The complete Metal port is committed and pushed as `34f921f`. Do not reopen
 numerical acceptance research.
 
 ## Project site documentation
+
+Current-status documentation now covers both shipped backends and the common
+source launcher. Home, About, the illustrated walkthrough, README/setup and
+architecture summaries describe Metal as implemented, model retention as
+budget-aware, Windows/NVIDIA as planned and AMD as undecided. Preserve historical
+reference results and article publication dates; revisions use `lastmod`.
+Use singular first person for Andrew’s work: I tried, I chose, this let me.
+Reserve tutorial “we” for steps taken with the reader.
+Public explanations should name the action and its effect. Keep model-role,
+admission and numerical-test terminology in engineering docs; avoid repeating
+status inventories or adding general disclaimers to the experiment walkthrough.
 
 Steering was committed and pushed as `52192cd`. Andrew requested the next public
 workflow documentation in his voice, using the Andrew voice skill. The new
@@ -493,7 +504,8 @@ The application integration explicitly replaces standalone archive integration,
 keeping five scenarios. Successful real-file verification/binding remains covered;
 the retired adversarial filesystem cases are not claimed as preserved. Pure
 parser and byte/state contracts remain units. Frozen numerical oracles, fixtures
-and limits are unchanged. Reconstruction remains optional later work. Verification
+and limits are unchanged. Reconstruction was deferred at this milestone; it is
+now implemented through the steering workflow on CUDA and Metal. Verification
 status is recorded in the queue. The existing application integration supports
 native and Docker execution modes; container verification uses the default source
 launcher, read-only model mounts and a localhost-published service. Host NVIDIA

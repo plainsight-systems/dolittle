@@ -1,72 +1,63 @@
 # Architecture
 
-The accepted [native Metal port](metal-port.md) draws on Vigil, Serenity's
-Metal-to-CUDA port, llama.cpp and vLLM-Metal. It covers execution, memory
-retention, native residency, kernels and file ownership. Its execution foundation
-is implemented and verified on the M3. Full transformer kernels and the native
-inference application follow.
+Dolittle implements the complete Qwen3-8B/NLA experiment on CUDA and Metal:
+target generation, block-24 activation capture, verbalization, reconstruction
+and matched steering. Both backends use BF16 tensors and FP32 reductions and
+serve the same browser application.
 
-The [steering design](steering.md) covers edited-explanation reconstruction,
-a GPU residual update and matched unsteered/steered continuations.
+The CUDA workflow runs on Linux through Docker or a source-built native binary.
+The Metal workflow runs natively on Apple Silicon. The application has
+been tested on an RTX 3090 Ti with 24 GB VRAM and an M3 Max with 128 GB unified
+memory. Native Windows/NVIDIA remains planned; AMD support is undecided.
 
-The accepted [GPU execution boundary and complete transformer flow](execution-boundary.md)
-defines live execution placement and capture ownership. One prepared GPU request
-owns prefill, first selection, decoding and final-token consumption. Captures
-remain device-owned across model switches; GPU normalization and embedding
-replacement feed the AV. CPU output collection does not drive continuation.
-Explicit host reference and vector-export paths remain separate diagnostics.
+## Computation and execution
 
-The [project-site architecture](project-site.md) describes the implemented
-static site, publication boundary, and editorial structure.
+1. [NLA experiment](logical-overview.md): how a target generation becomes
+   retained captures, descriptions and steering trials.
+2. [Transformer execution](transformer-execution.md): the equations, tensor
+   shapes, rounding boundaries, cache lifetime and observation sites.
+3. [GPU execution boundary](execution-boundary.md): GPU-owned prefill, sampling,
+   decoding and capture; CPU setup, text encoding and completed-output collection.
+4. [Steering](steering.md): reconstruct the original and edited descriptions,
+   form their vector difference, and apply it at the selected residual row.
+5. [Metal implementation](metal-port.md): native resources, indirect execution,
+   kernels and unified-memory admission, informed by Vigil, Serenity, llama.cpp
+   and vLLM-Metal.
 
-The engine architecture starts with two algorithmic overlays, reviewed and
-accepted on 2026-10-17:
+The selected pair is **Qwen/Qwen3-8B** with **marco-bazzani/Qwen3-8B-nla**.
+Pinned revisions and file hashes live in [`config/models.json`](../../config/models.json).
+The verbalizer reads zero-based block 24 output. Shared hooks support the model's
+advertised block input/output sites; the pair chooses which site its trained NLA
+expects. The reconstructor uses 28 blocks and a separate value head.
 
-1. [NLA experiment](logical-overview.md): generation, capture alignment,
-   interpretation, optional reconstruction, and model/state lifetimes.
-2. [Transformer execution](transformer-execution.md): block computation,
-   prefill and decoding, NLA entry/exit paths, observation boundaries, and
-   backend variation to examine next.
+## Ownership and application
 
-The [change-axis design](change-axes.md) and revised
-[file and folder mapping](file-mapping.md) were accepted on 2026-10-17. Following
-Andrew's feedback, the mapping exposes model families, tokenizer kinds, tensor formats
-and representations, cache strategies, sampling mechanisms, NLA pairs and
-backends as explicit families with named initial implementations. It assigns
-ownership, dependencies and header contracts without treating the selected
-model as the entire architecture. The first forward-pass file-header designs
-are complete. The first full forward-pass sources now implement loading and
-binding, host preparation, CUDA resources and kernels, execution and completed-
-result comparison. See [build commands](../../tests/README.md) for the separate
-host, archive, device and target-to-AV scenarios; build success alone does not
-establish equivalence.
+The [change axes](change-axes.md) and [file mapping](file-mapping.md) separate
+model mathematics, tokenizer kinds, tensor formats, cache strategies, NLA pairs
+and backend implementations. The Metal port uses these existing boundaries.
 
-CUDA 13.2 compilation uses a digest-pinned Docker environment, with nlohmann/json
-3.12.0 and OpenSSL 3 supporting metadata and hashing. The build retains native
-Ampere code plus PTX. GPU execution supports the native Linux host and configured NVIDIA containers.
-Native and forced-PTX results cover the tested reference workloads; longer
-contexts, newer GPU generations and Metal still require their own evidence.
+`Run` schedules one model role at a time. It keeps idle weights loaded when there
+is room for the next model, its KV cache and working buffers, and evicts them
+when needed. On unified
+memory, admission also accounts for mapped checkpoints. Each sequence gets fresh
+KV and scratch storage. Captures and interpretation records outlive those
+sequence resources and model switches.
 
-The selected target is **Qwen/Qwen3-8B**, paired with
-**marco-bazzani/Qwen3-8B-nla**. The tested revisions and file hashes are in
-[`models-8b.json`](../../scripts/validation/models-8b.json); the numerical
-contracts and measurements are in the
-[comparison](../research/2026-10-16-nla-comparison/README.md).
+The [live application](live-application.md) uses one source launcher:
+`python3 scripts/run.py` selects Linux Docker or native macOS Metal. `Session`
+owns the worker and bounded event journal, HTTP owns transport, and the browser
+owns presentation. [Setup](../../app/README.md) explains requirements and access.
+The [project site](project-site.md) is a separate static Hugo site.
 
-The selected pairing requires zero-based block-24 output, but shared observation
-planning accepts any model-advertised block input/output. The full AV runs after
-target weights and sequence resources are released; the 28-block AR and its value head remain later
-work. Short sequential BF16 target/AV workflows fit the tested 24 GB 3090 Ti.
+## Verification
 
-The implemented scope includes full target forward execution, cached generation
-and [target-to-AV interpretation](file-mapping.md#target-to-av-interpretation-header-design).
-The pinned pair owns its source checks, trained prompt, normalization and output
-tags. Shared execution owns resident weights, fresh sequence caches and explicit
-embedding replacement. Run coordinates target release before AV loading; Record
-owns exact tokens, raw captures and separately retained interpretation attempts.
-AR reconstruction and matched steering replay extend the same device execution boundary.
+The [numerical checks](numerical-portability.md) compare GPU operations with
+independent reference calculations, reject non-finite values and malformed
+results, and require exact replay and full/cached agreement on each backend.
+Metal reports whole-model differences against the original fixture limits;
+CUDA enforces those limits. Both use the original oracle calculations.
 
-The accepted [live experiment application](live-application.md) implements
-source launch, live target progress, selection, AV variants and reconnect.
-Session owns the worker and bounded publication; HTTP owns transport; the
-browser owns presentation. These boundaries preserve the backend change axis.
+The existing five integration workflows cover site publication, the live
+application, device resources, tiny models and the pinned 8B pair. Both model
+workflows include interpretation and steering. [Verification commands](../../tests/README.md)
+cover those workflows, host units, strict builds, formatting and static analysis.

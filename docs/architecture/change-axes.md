@@ -219,9 +219,9 @@ Thus replacing the update law does not require changing tokenizer, model
 weights, presentation or the underlying block equations.
 
 Launch orchestration calls acquisition and build mechanisms; it does not copy
-their logic. The initial source-build path remains Linux/Docker/NVIDIA. A
-future native Metal launch path must not force NLA conversion or token
-progression to know which operating system launched them.
+their logic. The same entry point selects Linux/Docker/NVIDIA or native
+macOS/Metal without exposing operating-system selection to NLA conversion
+or token progression.
 
 Measurement defines what is timed or counted. X4 supplies GPU timing/completion
 primitives, while X1 and R3 supply operation/phase boundaries. Verification
@@ -293,7 +293,7 @@ consumers must not maintain competing copies of model semantics, capture
 alignment, cache layout or numerical-mode definitions.
 
 The accepted file mapping assigns those owners, dependencies and header contracts.
-It must preserve the accepted one-run, sequential-residency scope and leave
-Metal, quantization, additional pairs and resumable runs as extensions. This
-design creates no interfaces, source stubs or implementation requirements for
-those deferred features.
+It preserves one active experiment and sequential model execution, with
+budget-aware retention of idle model weights. CUDA and Metal are implemented.
+Quantization, additional pairs and resumable runs remain extensions; the mapping
+does not require empty source stubs for them.

@@ -30,8 +30,8 @@ source. `CLAUDE.md` points to the same entry path.
   rather than lowering correctness or quality within it.
 - Keep machine access details and local paths out of tracked project files.
   `brief.md` and `CLAUDE.local.md` are local, ignored planning/context files.
-- Implement Linux/NVIDIA first. Metal on macOS is planned afterward; AMD
-  support is undecided. Browser-only inference remains out of scope.
+- Linux/NVIDIA and native macOS/Metal are implemented. Native Windows/NVIDIA
+  remains planned; AMD support is undecided. Browser-only inference is out of scope.
 - Keep `app/` (the inference interface) separate from `web/` (the project site).
 - Report checks actually performed. A build is not evidence of GPU correctness
   or runtime performance.

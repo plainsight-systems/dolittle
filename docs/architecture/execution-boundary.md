@@ -1,16 +1,14 @@
 # GPU execution boundary and complete transformer flow
 
-**Reviewed, accepted and implemented for CUDA — 2026-10-20.**
-
-Native and forced-PTX numerical workflows, CUDA memory checks, application
-integration and execution traces pass on the RTX 3090 Ti. Independent references,
-precision and acceptance limits are unchanged. Metal and reconstruction remain
-future work; this evidence does not establish compatibility on untested hardware.
+CUDA and Metal keep transformer execution, sampling, activation capture and
+steering on the GPU. CUDA uses prepared conditional graphs; Metal uses prepared
+indirect command buffers and GPU-owned control. See the [Metal design](metal-port.md) for that
+mechanism and [numerical policy](numerical-portability.md) for backend comparisons.
 
 This design makes execution location, data ownership and continuation
 dependencies part of the algorithm. It covers target generation and activation
-verbalization (AV), including their handoff. Reconstruction (AR) is shown as a
-future extension, not included in implementation acceptance for this change.
+verbalization (AV), including their handoff. The reconstruction (AR) path uses
+the same ownership boundary and feeds the implemented steering flow.
 
 The [steering boundary](steering.md#full-transformer-flow-and-the-mutation-boundary)
 extends autonomous GPU execution with forward-only AR inference and a declared
@@ -41,7 +39,7 @@ Starting a later user-selected interpretation is a new request.
 | Oracle comparisons and explicit vector export | Separate diagnostic path | Named readback after the producing dependency completes |
 
 GPU-resident means owned for device access; mapped host RAM is not our CUDA
-activation store. A future unified-memory backend must preserve device ownership
+activation store. The Metal unified-memory backend preserves device ownership
 and asynchronous dependencies even if both processors share physical memory.
 
 The CPU can compute shapes, byte offsets and resource sizes during preparation.
@@ -456,7 +454,7 @@ use keys, positions and readiness, not activation bytes.
 flowchart TD
   RES["Target H1 producer<br/>X25[p], BF16 [4096]"]
   ARENA[("Experiment-owned GPU arena<br/>immutable row + identity + validity")]
-  RETIRE["After target completion:<br/>release target weights, KV and scratch<br/>keep capture arena alive"]
+  RETIRE["After target completion:<br/>release KV and scratch; retain weights if budget permits<br/>keep capture arena alive"]
   KEY["CPU selection: run / site / position<br/>resolve owner and validate pair"]
   ROW["Borrowed device row h<br/>no CPU dereference or download"]
   NORM["H2 GPU normalization<br/>n = sqrt(sum h_i squared)<br/>v_i = (h_i / n) × 150"]
@@ -594,20 +592,20 @@ Likely affected existing families are `inference/executor.*`,
 model-specific policy into the backend.
 
 The backend capability is **autonomous prepared sequence execution with
-device-resident observations**. A later Metal implementation must provide an
-equivalent contract or report it unsupported; a per-token host fallback cannot
-silently claim compliance. This proposal specifies CUDA's mechanism only.
+device-resident observations**. CUDA and Metal implement this contract.
+The CUDA graph mechanism is detailed above; the [Metal design](metal-port.md)
+describes native indirect execution and publication.
 
-### Future reconstruction branch
+### Reconstruction branch
 
-The AR path remains deferred. Its complete intended computation is:
+The implemented AR computation is:
 CPU formats description IDs → GPU embedding → 28 causal transformer blocks
 using AR weights → final-token residual `X_28[last]` → separate biasless
 `4096 × 4096` value head → reconstructed vector on GPU.
 It bypasses final RMSNorm, language head and sampling. Any reconstruction
 metric reads reconstructed and retained target vectors on-device; only the
-named metric/result or an explicit export reaches the host. No AR implementation
-or validation is claimed here.
+named metric/result or an explicit export reaches the host. The steering path
+keeps both reconstructed vectors and their normalized difference on the GPU.
 
 ## 8. Acceptance contract
 

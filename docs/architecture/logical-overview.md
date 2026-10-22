@@ -7,7 +7,7 @@ The accepted [GPU execution boundary](execution-boundary.md) defines device owne
 GPU normalization/injection and autonomous prefill through final-token
 consumption. Mathematical contracts and independent references remain fixed.
 
-**Reviewed and accepted — 2026-10-17.** This defines the planned computation
+**Reviewed and accepted — 2026-10-17.** This defines the computation
 and state flow for Dolittle. Change axes and file mapping precede engine
 implementation. The [transformer execution overlay](transformer-execution.md) expands
 the model computation inside these phases.
@@ -109,8 +109,9 @@ substitute the preceding token's vector.
 
 The first version has one active experiment on one GPU. Once generation and
 capture finalization finish, retain the transcript and captures independently
-of the target's temporary storage. Release its KV cache, workspaces, and
-weights before making the AV resident.
+of the target's temporary storage. Release its KV cache and workspaces. Retain
+idle weights when the next complete request fits the memory budget; otherwise
+release them before loading the next model role.
 
 | Retained information | Purpose |
 | --- | --- |
@@ -119,7 +120,7 @@ weights before making the AV resident.
 | Capture position, block, raw vector, dtype and availability | Bind an interpretation to an actual observation |
 | Target settings and seed | Record how the trajectory was generated |
 | AV input contract, settings, seed, output token IDs and completion status | Keep interpretation variants reproducible and inspectable |
-| AR description input, metric definition and result | Associate diagnostics with the exact description tested |
+| Original and edited descriptions, steering strength and matched continuations | Associate each steering comparison with the edit tested |
 | Phase/load timings and memory measurements | Separate inference cost from switching cost |
 
 These are logical record requirements, not a commitment to an on-disk format
@@ -152,25 +153,24 @@ the expected explanation tags are missing, and label truncation or failure.
 Repeated claims across a window may be informative but do not become a
 confidence score.
 
-## 5 Optionally reconstruct descriptions
+## 5 Reconstruct descriptions and steer
 
-Reconstruction is an explicit operation on one or more retained descriptions.
-Complete or cancel active AV work, release the AV and its cache, then load the
-AR and its separate value head. Format each description with the AR's trained
-template and suffix. Produce a reconstructed vector from the final token's
-residual after 28 blocks, bypassing final RMS normalization and the vocabulary
-projection. Apply the learned value head.
+The implemented [steering flow](steering.md) takes a retained explanation and
+an edited version. Complete or cancel active AV work, then acquire the AR and
+its separate value head under the same model-retention policy. Format each
+description with the AR's trained template and suffix. Process 28 blocks and
+apply the value head to the final token's residual, bypassing final RMSNorm,
+the vocabulary projection and sampling.
 
-Report a named metric against the corresponding capture, recording its
-normalization and formula. Raw cosine can retain continuity with the reference
-probe; it is a reconstruction diagnostic, not semantic confidence. It is not
-the paper's dataset-level fraction of variance explained, which also needs a
-defined dataset and mean baseline. Keep truncated descriptions identifiable
-if the user elects to reconstruct them.
+Form the edited-minus-original vector difference on the GPU. Replay the target
+prefix with fresh sequence state for each branch. The steered branch applies
+the norm-scaled difference at the selected block-24 output row; the baseline
+leaves it unchanged. Both branches use the same continuation settings and seed.
+The original generation and its captures remain intact.
 
-Returning to interpretation reloads the AV. Neither reconstruction nor model
-switching changes the recorded target run. Explanation editing and steering
-the target remain later extensions.
+The interface uses reconstruction for steering. Returning to interpretation
+reuses AV weights if still loaded, or reloads them when needed. Standalone
+reconstruction metrics and file export are not implemented.
 
 ## Resource and lifetime constraints
 
@@ -178,7 +178,9 @@ The [reference comparison](../research/2026-10-16-nla-comparison/README.md)
 measured sequential BF16 execution on a 24 GB RTX 3090 Ti. Target and AV
 weights each occupy about 15.256 GiB; AR weights and its head occupy about
 11.253 GiB. Target and AV cannot be simultaneously resident in that budget.
-The combined downloaded bundle is about 45 GB.
+The combined downloaded bundle is about 45 GB. On a larger unified-memory
+Mac, multiple roles can remain loaded; admission includes their mapped
+checkpoints, device weights and the upcoming request’s cache and scratch.
 
 For width `D`, retained positions `N`, and capture element size `b`, capture
 storage is `N × D × b`. At `D=4096` and BF16, that is 8 KiB per position or

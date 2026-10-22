@@ -17,22 +17,31 @@ original and steered versions of the response.
 
 Implementing the machinery is part of the interest for me, as it was with
 Charlotte and Serenity. The initial Python experiment could already capture
-activations and pass them to the NLA for description. Building our own engine
-lets us explore the computation underneath: how attention runs on the GPU,
-how we reuse memory between tokens, and where we capture or change an
+activations and pass them to the NLA for description. Building my own engine
+lets me explore the computation underneath: how attention runs on the GPU,
+how the engine reuses memory between tokens, and where it captures or changes an
 activation. The browser makes that machinery something people can try.
 
 Dolittle runs the published Qwen3 8B and
 [marco-bazzani NLA weights](https://huggingface.co/marco-bazzani/Qwen3-8B-nla)
-through a C++/CUDA engine. The GPU runs one model role at a time, which lets
-the experiment fit on a 24 GB RTX 3090 Ti. The launcher builds from source in
-Docker and downloads the models once.
+through a C++ engine with CUDA and Metal backends. The models take turns on the
+GPU. On a 24 GB card, loading the next model means unloading the previous one.
+With more memory, the engine can keep models loaded and avoid that cost when
+you switch between generating, interpreting and steering.
 
 ## Where it runs
 
-Linux/NVIDIA is available now. Native Metal on macOS is planned next, with a
-native Windows/NVIDIA build also planned. AMD support is undecided. A browser
-on a Mac can already connect to the Linux GPU host and run the interface.
+Dolittle runs on Linux with NVIDIA GPUs and natively on Apple Silicon with Metal.
+The experiment has run on a 24 GB RTX 3090 Ti and an M3 Max with 128 GB of unified
+memory.
+
+`python3 scripts/run.py` is the entry point on both platforms. It builds and
+runs through Docker on Linux, or builds and runs natively on Apple Silicon.
+The first launch downloads and verifies the model weights; later launches reuse
+them. Both backends serve the same browser interface, which can also connect
+from another machine.
+
+Native Windows/NVIDIA is planned. AMD support is undecided.
 
 [Try the rhyming experiment]({{< relref "/writing/running-an-investigation" >}})
 covers setup, reading an explanation and steering the next line of a poem.

@@ -210,11 +210,18 @@ checker, with a filesystem wrapper used after actual Hugo builds.
 
 ## Application launch
 
-`python3 scripts/run.py` builds from source: Docker Compose on Linux/NVIDIA,
-or the native `metal-release` CMake preset on Apple Silicon. It prepares pinned
-artifacts once, starts the service and opens its private browser link. Native
-Metal requires macOS 26+, Xcode 26 with the Metal toolchain, CMake and OpenSSL 3. Subsequent launches reuse the setup receipt when the
-manifest and file metadata match, without hashing weight payloads.
+| Host | `python3 scripts/run.py` selects |
+| --- | --- |
+| Linux/NVIDIA | Source-built Docker image and GPU-enabled Compose service |
+| macOS/Apple Silicon | Native `metal-release` CMake build and Metal service |
+
+Both paths serve the same UI and use the same pinned model cache. Native
+Windows/NVIDIA is planned; AMD support is undecided.
+
+The launcher prepares the model files, starts the service and opens its browser
+access link. Native Metal requires macOS 26+, Xcode 26 with the Metal toolchain,
+CMake and OpenSSL 3. Subsequent launches reuse the setup receipt when the manifest
+and file metadata match, without hashing weight payloads.
 `--verify-models` forces full verification/repair before launch.
 `scripts/models.py --offline` fully verifies an existing cache
 without downloads. Python 3.11+ is required. See [application setup](../app/README.md)

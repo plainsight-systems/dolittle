@@ -12,7 +12,9 @@ Use the same source launcher on Linux/NVIDIA or macOS/Apple Silicon:
   Metal toolchain with `xcodebuild -downloadComponent MetalToolchain`.
 
 On a Mac the launcher builds `metal-release` incrementally and runs natively.
-On Linux it builds and runs the Docker image.
+On Linux it builds and runs the Docker image. Native Windows/NVIDIA is planned;
+AMD support is undecided. The browser UI and experiment workflow are the same
+on both supported backends.
 
 ```sh
 python3 scripts/run.py
@@ -137,4 +139,4 @@ captures. Restarting the service loses them; disk export is not implemented.
 state reconciliation, and `view.js` renders using text nodes. Model control-token
 classification belongs to the C++ text protocol, not JavaScript. See the
 [application architecture](../docs/architecture/live-application.md) for ownership,
-limits, failure behavior and the future backend boundary.
+limits, failure behavior and the shared backend boundary.

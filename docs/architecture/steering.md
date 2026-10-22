@@ -374,9 +374,9 @@ transformer engine.
 | Interaction/presentation, A2/A3 | `app/index.html`, `app/app.css`, `app/view.js`, `app/controller.js`, `app/client.js` | Sample-anchored editor, matched result view, branch-scoped streaming and refresh recovery |
 | Independent verification, D3 | `scripts/validation/` reference and existing tiny/8B/application scenarios | Frozen AR/intervention fixtures and existing test inventory; no sixth integration scenario |
 
-A future Metal backend supplies device control and steering kernels under the
-existing backend families. Pair conventions, trial records, replay semantics
-and UI must not change for Metal. A different pair supplies another AR endpoint
+CUDA and Metal supply device control and steering kernels under the existing
+backend families. Pair conventions, trial records, replay semantics and UI are
+shared by both. A different pair supplies another AR endpoint
 and supported intervention site; block 24 and width 4096 remain pair data.
 
 Design references: Core **I.1** (`#ri-explicit`) for explicit mutation contracts;

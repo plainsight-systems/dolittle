@@ -4,11 +4,11 @@ The accepted [GPU execution boundary and complete flow](execution-boundary.md) d
 GPU normalization/injection and autonomous prefill through final-token
 consumption. Mathematical contracts and independent references remain fixed.
 
-**Reviewed and accepted — 2026-10-17.** This expands the planned model computation used by
+**Reviewed and accepted — 2026-10-17.** This expands the model computation used by
 the [NLA experiment overlay](logical-overview.md). It defines mathematical
 steps, observable boundaries, and state lifetimes before backend interfaces
-or source files are chosen. Linux/NVIDIA comes first, Metal on macOS follows,
-and AMD support remains undecided.
+or source files are chosen. CUDA and Metal now implement this computation;
+AMD support remains undecided.
 
 ## Three uses of the transformer
 
@@ -391,9 +391,9 @@ Changing a backend should not change the target capture location or AV prompt.
 Changing a model can require new mathematics even on the same backend. Keep
 those reasons to change distinct when deriving ownership later.
 
-BF16 is the initial NVIDIA reference mode. Metal precision and hardware
-requirements need validation when that backend is designed. Quantization is a
-separate future change with additional capture and NLA comparisons. Cross-backend
+CUDA and Metal use BF16 tensor storage and FP32 reductions. The
+[numerical contract](numerical-portability.md) defines operation accuracy and
+same-backend replay requirements. Quantization remains a separate extension. Cross-backend
 bitwise equality is not assumed; small numerical differences can change a
 sampled trajectory, so backend comparisons should first use fixed token inputs.
 

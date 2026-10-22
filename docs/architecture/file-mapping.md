@@ -15,15 +15,15 @@ It does not define the limits of the model, tokenizer or cache contracts.
 
 The layout names families of interchangeable implementations. Each family
 owns its contract; each kind has an explicit location beneath that family.
-Only the selected kinds are planned for initial implementation. Alternative
-kinds have documented destinations, without empty source files or claims that
-they work already.
+The selected Qwen3/NLA kinds and both CUDA and Metal are implemented. Other
+kinds have documented destinations without empty source files.
 
-## Planned layout
+## Family layout
 
-The tree covers the full planned engine/application layout. The first forward-
-pass sources are implemented; later-slice files remain planned. Existing site,
-documentation and reference files remain in place. `{h,cpp}` means a
+The tree records the original family layout. Generation, interpretation, AR
+steering and the application are implemented; standalone reconstruction metrics
+remain a possible extension. The sections below add the device-execution and
+application families introduced since the original mapping. `{h,cpp}` means a
 header/implementation pair; a contract-only header does not require an empty
 implementation file.
 
@@ -172,9 +172,9 @@ reference manifests remain unchanged.
 The extension rule is structural: adding a kind should not require editing
 the implementation of an existing kind. Selection/composition, new evidence,
 and genuine contract extensions may change. The following destinations are
-examples of future work, not implementation commitments.
+examples of extension points; the CUDA and Metal members are both implemented.
 
-| Family | Initial member | Example future destination | Consumers remain dependent on |
+| Family | Initial member | Additional member or extension | Consumers remain dependent on |
 | --- | --- | --- | --- |
 | Tensor container | `tensors/formats/safetensors.*` | `tensors/formats/gguf.*` | `tensors/formats/format.h` |
 | Model architecture and checkpoint binding | `models/qwen3/` | `models/<architecture>/` | `models/model.h` and `models/checkpoint.h` |
@@ -291,8 +291,8 @@ request owns prefill, first selection, decode and immutable metadata events.
 hook copies. `inference/injection/device.h` declares normalization/status storage;
 `kernels/cuda/injection.cu` performs FP32 L2, scale, cast and validation on GPU.
 Both contracts are backend-independent; native graph/kernel mechanisms stay in
-`kernels/cuda/`. Future Metal implementations must preserve autonomous progress
-and device residency rather than silently choosing host token scheduling.
+`kernels/cuda/` and `kernels/metal/`. Both backends preserve autonomous progress
+and device-owned captures.
 
 
 ## Axis ownership
@@ -363,38 +363,24 @@ concern. Safetensors and Qwen3 parsers accept in-memory inputs so unit tests do
 not have to launch a loader. Numerical array comparison is likewise separate
 from the integration harness that obtains completed model outputs.
 
-The forward-pass boundary covers loading through complete forward-result
-comparison. Target generation and AV interpretation extend it as described below.
-AR conventions, serving and application behavior remain subsequent slices.
-Do not generate those files ahead of their design.
-
-The first forward-pass source scope is now implemented: tensor/BF16 handling,
-observation and scratch planning, operation/recipe validation, Qwen3 recipes and
-checkpoint binding, verified safetensors loading, CUDA resources and kernels,
-execution, and completed-result comparison. See the
-[verification commands](../../tests/README.md) for scenario coverage.
-
-The forward, generation, AV pairing and experiment source families have implementation
-bodies; reconstruction and application destinations remain planned, with no generated stubs.
-The concrete additions stay within their existing axes:
+The implemented source scope covers loading and checkpoint binding, complete
+forward execution, cached generation, AV interpretation, AR reconstruction,
+matched steering and the browser application. CUDA and Metal occupy their own
+runtime and kernel families; the executor, experiment records and server are
+shared. See [verification commands](../../tests/README.md) for current coverage.
 
 - `tensors/formats/json_metadata.h` shares bounded metadata parsing between
-  the format reader and model binder; it introduces no model dependency into
-  the safetensors implementation.
-- `gpu/cuda/backend.h` exposes native resources only within CUDA preparation.
-- `kernels/cuda/operations.cpp`, `launch.h` and `common.cuh` keep prepared
-  dispatch and shared kernel primitives within the CUDA operation family.
-- Eleven isolated C++ unit executables cover preparation and comparison;
-  archive/device/forward drivers remain distinct integration workflows.
+  the format reader and model binder.
+- `gpu/cuda/` and `gpu/metal/` own native resources, commands and completion.
+- `kernels/cuda/` and `kernels/metal/` own prepared operations and device code.
+- `experiment/model_retention.*` owns memory-budget decisions for idle models.
+- `experiment/session.*`, `server/` and `app/` implement the live interaction.
 
-The host build requires C++20, CMake 3.24+ and OpenSSL 3. nlohmann/json 3.12.0 is
-hash-pinned for metadata; OpenSSL supplies SHA-256. CUDA 13.2 builds use a
-manifest-digest-pinned Docker image with explicit support package versions.
-The image builds successfully, while current GPU execution uses the native
-Linux host because NVIDIA Container Toolkit access is not configured. Native
-and forced-PTX checks pass for the recorded short-sequence workloads and explicit
-reference policy. Newer GPUs, long contexts and container GPU execution remain
-unverified. These changes introduce no alternative backend or new architecture axis.
+The build requires C++20, CMake 3.24+ and OpenSSL 3. CUDA 13.2 builds use the
+pinned Docker toolchain and run with NVIDIA Container Toolkit, or as a native
+Linux binary. Metal builds use Xcode 26 on macOS 26+ and pinned metal-cpp headers.
+The standard launcher selects the platform. Application tests pass with
+Docker/CUDA on the RTX 3090 Ti and native Metal on the M3 Max.
 
 ## Composition and dependency direction
 
@@ -629,14 +615,14 @@ from the retired executable is not claimed as preserved.
 
 ### Subsequent work
 
-The layout now exposes variation beyond the initial model selection. It does
-not expand the first release to multiple models, tokenizers, cache strategies
-or platforms. Add only the files needed by the current working slice, with
+The layout now exposes variation beyond the initial model selection. The implemented
+platforms are CUDA and Metal; additional models, tokenizers and cache strategies
+remain extension points. Add only the files needed by the current working slice, with
 reviewed headers and relevant checks; do not generate the tree as empty stubs.
 
 For each subsequent slice, select toolchain and support dependencies explicitly,
 define numerical comparison workloads/tolerances and derive resource costs.
-The current first-slice toolchain and helpers are implemented as described above.
+The current toolchains and helpers are implemented as described above.
 Preserve the independent reference experiments and separate build/non-GPU
 checks from device execution. The existing public site remains independent
 of model downloads and the live inference application.

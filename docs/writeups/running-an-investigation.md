@@ -2,6 +2,7 @@
 title = 'Try the rhyming experiment'
 description = 'Ask Qwen to finish a couplet, inspect an activation, then edit its explanation and compare what it writes.'
 date = '2026-10-21T00:00:00-07:00'
+lastmod = '2026-10-21T22:50:22+00:00'
 article_type = 'explanation'
 +++
 
@@ -13,18 +14,31 @@ That will determine the edit we try.
 This follows the process in
 [Anthropic’s natural language autoencoder paper](https://transformer-circuits.pub/2026/nla/index.html).
 In the paper’s example, the explanation describes a rabbit; changing it to a
-mouse steers the next line. Our Qwen runs have produced a variety of
+mouse steers the next line. My Qwen runs have produced a variety of
 descriptions, without consistently mentioning a rabbit. We’ll use the same
 prompt and method, then work with the sample we get.
 
 ## Build and open Dolittle
 
-Dolittle runs on Linux with an NVIDIA GPU. It has been tested on an RTX 3090 Ti
-with 24 GB of VRAM. You need Python 3.11 or later, Git, Docker Compose, a
-compatible NVIDIA driver, and the
-[NVIDIA Container Toolkit configured for Docker](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
-Allow about 45 GB for the model download, plus space for the build and container
-images.
+Dolittle runs on Linux with NVIDIA GPUs and natively on Apple Silicon with Metal.
+The steps below are the same on both.
+The tested machines are an RTX 3090 Ti with 24 GB VRAM and an M3 Max with 128 GB
+unified memory.
+
+You need Git and Python 3.11 or later on either platform, plus:
+
+| Host | Build and runtime requirements |
+| --- | --- |
+| Linux/NVIDIA | Docker Compose, a compatible NVIDIA driver and the [NVIDIA Container Toolkit configured for Docker](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). |
+| macOS/Apple Silicon | macOS 26+, Xcode 26 with its Metal toolchain, CMake 3.24+ and OpenSSL 3 development files. |
+
+On a Mac, `brew install cmake openssl@3` supplies the command-line dependencies.
+Select the installed Xcode with `xcode-select`, then install its shader toolchain
+with `xcodebuild -downloadComponent MetalToolchain`.
+
+Allow about 45 GB for the model files, plus space for the build and, on Linux,
+container images. Native Windows/NVIDIA is planned; AMD support is undecided.
+The launch command is the same on both supported hosts:
 
 ```sh
 git clone https://github.com/plainsight-systems/dolittle.git
@@ -32,10 +46,10 @@ cd dolittle
 python3 scripts/run.py
 ```
 
-The launcher builds the application from source, downloads the model weights
-and checks their hashes. Later launches reuse those files. The initial download
-is substantial, but rebuilding the application does not download the models
-again.
+The launcher chooses Docker on Linux or a native Metal build on macOS. It
+builds the application from source, downloads the model weights and checks their
+hashes. Later launches reuse the downloaded files and saved verification result,
+including when you rebuild the application.
 
 Open the full link beneath **Open Dolittle** in the terminal. Your browser
 remembers access for that address. If you restart the launcher, use its new
@@ -86,14 +100,16 @@ first line, where we want to look for a possible rhyme.
 {{< screenshot src="walkthrough/select-token.png" alt="Prompt tab with the final comma and newline selected at position 19. The right panel shows its context, nearby tokens and the Interpret this point button." caption="Select the end of the first line in Prompt. In this run, the comma and newline share token 19, shown as ,↵ in the nearby token strip. Interpret this point reads that activation." >}}
 
 Generate an interpretation. The NLA’s **activation verbalizer** takes the vector
-and produces a text explanation. Qwen and the verbalizer have separate weights;
-the loading message shows when Dolittle switches between them on the GPU.
+and produces a text explanation. Qwen and the verbalizer have separate weights.
+The first interpretation loads the verbalizer onto the GPU. With enough memory,
+Dolittle keeps both models loaded so later requests can skip that step.
+On a 24 GB card, it unloads one model to make room for the other.
 
 Read what the sample says about the line, its subject and an expected ending.
-In our investigations, some samples described a carrot or a rabbit. Others
+In my investigations, some samples described a carrot or a rabbit. Others
 focused on wording such as “wit” or “bit,” and many added invented classrooms,
 characters and locations. Those samples came from different token positions,
-giving us different starting points for an edit.
+giving me different starting points for an edit.
 
 Choose **Generate another sample** to get another description of the same
 vector. The samples stay under their position in **Investigated points**.

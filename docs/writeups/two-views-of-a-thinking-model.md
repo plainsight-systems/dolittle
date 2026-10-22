@@ -89,7 +89,7 @@ difference gives us a direction to add to the model’s activation before it
 continues generating.
 
 In Anthropic’s rhyming example, the edit changes rabbit-related words to
-mouse-related words. Our Qwen runs produced varied descriptions, including
+mouse-related words. My Qwen runs produced varied descriptions, including
 carrots, rabbits, invented classrooms and comments about the poem’s wording.
 Rabbit was not a consistent result. The useful edit depends on what the
 selected explanation actually says.
