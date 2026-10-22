@@ -219,7 +219,11 @@ does not automatically call for a public article. Write in `docs/writeups/`
 only when requested for publication. Integrate completed work into `main` by
 fast-forward. Publication follows the user's instructions.
 
-Record settled decisions in `MEMORY.md` and concise current work in `QUEUE.md`.
+Record current engineering decisions in `MEMORY.md` and remaining work in
+`QUEUE.md`. Both are public. Keep conversation summaries, editorial corrections,
+approval history, live-service details and completed-work chronology in ignored
+local notes. Update the tracked documents to describe the current system rather
+than appending a transcript of each work session.
 Reserve `docs/research/` for research and model investigations; implementation
 notes, validation logs, source snapshots and development chronology stay in
 gitignored `.local/`. Tracked documents must not link to those private files.

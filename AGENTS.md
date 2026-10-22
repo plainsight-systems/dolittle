@@ -4,7 +4,8 @@
 
 Read `docs/process/MEMORY.md`, `docs/process/QUEUE.md`, and
 `docs/process/workflow.md`, then the relevant architecture documents and
-source. `CLAUDE.md` points to the same entry path.
+source. `CLAUDE.md` points to the same entry path. If `CLAUDE.local.md` exists,
+read it for local session context; never commit it.
 
 ## Local rules
 
@@ -22,7 +23,9 @@ source. `CLAUDE.md` points to the same entry path.
   dispatch as performance-sensitive.
 - Implement the core computation directly. Reference implementations may
   supply verification evidence; dependency choices must remain explicit.
-- Keep settled decisions and concise work state in memory and the queue.
+- Keep current engineering decisions and remaining work in memory and the queue.
+  These are public documents. Conversation summaries, editorial corrections,
+  approval history and live-service details belong in ignored local notes.
   Implementation diaries, build logs, validation reports and development-cycle
   notes belong in gitignored `.local/`, not `docs/research/` or public writing.
   Reserve `docs/research/` for substantive research and model investigations.
