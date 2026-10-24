@@ -1,4 +1,18 @@
 /*
+ * SSH access contract (A1): allowed_host accepts configured authorities or
+ * exact loopback names with an optional valid TCP port. allowed_origin accepts
+ * configured origins, absent Origin, or http:// plus the accepted loopback
+ * Host. Both borrow inputs for the call and return a boolean without
+ * allocation. The HTTP caller rejects duplicate Host/Origin headers and still
+ * authenticates API requests. See live-application.md, Transport contract.
+ * Algorithm: compare configured values; otherwise split a recognized loopback
+ * name from its port, validate decimal range 1..65535, then compare Origin's
+ * HTTP authority with Host. No DNS lookup or network access occurs.
+ * Cost: linear in configured entries and header bytes, constant extra storage.
+ * Design corpus: Core I.1 (#ri-explicit), explicit predicates; SL.str.2
+ * (#rstr-view), borrowed character views; performance COPY.7, no temporary
+ * strings (guidelines/copy-move/COPY.7-eliminate-hidden-copies.md).
+ *
  * Steering transport contract: POST /api/v1/runs/{run}/steering carries a
  * variant, edited text, strength and matched generation settings. The session
  * resolves source capture/prefix; clients cannot provide activation vectors.
@@ -56,11 +70,18 @@
 #pragma once
 
 #include <filesystem>
+#include <span>
+#include <string>
 #include <string_view>
 
 #include "experiment/session.h"
 
 namespace dolittle::server {
+[[nodiscard]] bool allowed_host(std::string_view host,
+                                std::span<const std::string> configured);
+[[nodiscard]] bool allowed_origin(std::string_view origin,
+                                  std::string_view host,
+                                  std::span<const std::string> configured);
 using Command =
     std::variant<experiment::StartRequest, experiment::InterpretRequest,
                  experiment::SteerRequest, experiment::StopRequest>;

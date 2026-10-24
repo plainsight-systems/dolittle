@@ -60,16 +60,40 @@ The build runs in Docker; the second command executes on the Linux host and
 requires compatible CUDA runtime libraries. This path does not establish Docker
 GPU support. AMD remains undecided.
 
-The default listener is loopback. To use another machine's browser, either
-forward the same port over SSH or explicitly opt into a trusted LAN:
+### Connect over SSH
+
+Run the launcher on the GPU machine and leave it running:
+
+```sh
+python3 scripts/run.py --no-browser
+```
+
+In a separate terminal on the machine with your browser, forward the port using
+your SSH username and GPU machine's hostname:
+
+```sh
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8787:127.0.0.1:8787 USER@GPU-HOST
+```
+
+Open `http://127.0.0.1:8787/` and paste the full launcher link into **Connect to
+Dolittle**. The link can have a different hostname or port: the browser takes
+its access key and connects through the page you opened. `localhost` works too.
+If port 8787 is already in use locally, change the first port in the SSH command
+to 8877 and open `http://127.0.0.1:8877/`. Keep the remote port and launcher link
+unchanged. Leave both terminals running while using Dolittle.
+
+### Connect over a LAN
+
+The default listener is loopback. To make the service available on a trusted LAN,
+set the hostname that the browser will use:
 
 ```sh
 python3 scripts/run.py --bind 0.0.0.0 --host my-linux-host --no-browser
 ```
 
 Open the full link under **Open Dolittle** in the launcher terminal. You can
-also paste it into the connection panel at the regular app address. This browser
-remembers access for that address across tabs and browser restarts, so subsequent
+also paste it into the connection panel at the regular or forwarded app address.
+This browser remembers access for that address across tabs and browser restarts, so subsequent
 visits can use the regular URL. Restarting the launcher creates a new link; the
 page will ask for it when the previous access expires. Different browsers,
 profiles and addresses need their own initial connection. With browser storage

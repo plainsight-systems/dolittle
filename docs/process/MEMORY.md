@@ -61,6 +61,11 @@ reconnects, while a new generation or service restart clears the experiment.
 Interpretation samples and steering comparisons retain their inputs and settings.
 See [application ownership](../architecture/live-application.md).
 
+SSH access supports loopback hostnames and forwarded ports. The connection
+panel extracts the key from a launcher link even when its address differs;
+requests continue through the current browser address. API authentication and
+Origin checks remain enabled. See [connection setup](../../app/README.md).
+
 ## Setup and verification
 
 Setup downloads model files and verifies SHA-256 hashes, then saves a receipt

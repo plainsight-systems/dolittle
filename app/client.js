@@ -2,6 +2,8 @@
 // cursor/epoch reconciliation belongs to the controller. Access is remembered
 // per origin across tabs; blocked storage falls back to this page's lifetime.
 // Rejected credentials are discarded, not retried. No inference state here.
+// Launcher links may name another host/port (SSH forwarding). Extract their
+// fragment key only; never navigate to or send a request to the pasted address.
 export function requestId() {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
 }
@@ -58,7 +60,7 @@ export function createClient(browser = globalThis) {
     connect(link) {
       let url;
       try { url = new URL(link.trim()); } catch { throw new Error('Paste the full access link printed in the launcher terminal.'); }
-      if (url.origin !== browser.location.origin) throw new Error('This link is for a different address. Open it directly in your browser, or use a link for this address.');
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Paste the HTTP access link printed in the launcher terminal.');
       const token = new URLSearchParams(url.hash.slice(1)).get('token');
       if (!token) throw new Error('This link is missing its access key. Copy the complete link, including the part after #token=.');
       remember(token);

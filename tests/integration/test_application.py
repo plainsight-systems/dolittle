@@ -102,13 +102,14 @@ def run(binary, cache, port, report, hold=False):
             token = urllib.parse.parse_qs(parsed.fragment)['token'][0]
             epoch = None
 
-            def request(path, body=None, authenticated=True, expected=200):
+            def request(path, body=None, authenticated=True, expected=200, extra_headers=None):
                 headers = {'Authorization': 'Bearer ' + token} if authenticated else {}
                 if epoch:
                     headers['X-Dolittle-Epoch'] = epoch
                 data = json.dumps(body).encode() if body else None
                 if data:
                     headers['Content-Type'] = 'application/json'
+                headers.update(extra_headers or {})
                 req = urllib.request.Request(base + path, data=data, headers=headers)
                 try:
                     response = urllib.request.urlopen(req, timeout=15)
@@ -120,6 +121,14 @@ def run(binary, cache, port, report, hold=False):
                     return json.loads(content) if response.headers.get_content_type() == 'application/json' else content
 
             request('/api/v1/status', authenticated=False, expected=401)
+            for authority in ('localhost:8877', '127.0.0.1:8877', '[::1]:8877'):
+                forwarded = {'Host': authority, 'Origin': 'http://' + authority}
+                request('/', extra_headers=forwarded)
+                request('/api/v1/status', extra_headers=forwarded)
+                request('/api/v1/status', authenticated=False, expected=401, extra_headers=forwarded)
+            request('/api/v1/status', expected=403, extra_headers={'Host': 'evil.example'})
+            request('/api/v1/status', expected=403, extra_headers={'Origin': 'http://evil.example'})
+            request('/api/v1/status', expected=403, extra_headers={'Host': 'localhost:8877', 'Origin': 'http://localhost:8878'})
             assert b'What was present before the next word?' in request('/')
             status = request('/api/v1/status')
             epoch = status['epoch']

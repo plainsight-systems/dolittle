@@ -1,4 +1,11 @@
 /*
+ * A1 address units: configured hosts and loopback forwarded ports are accepted;
+ * malformed/lookalike hosts and unrelated origins are rejected. Exercise pure
+ * predicates on in-memory strings without a server. Cost O(test input bytes).
+ * Design/implementation corpus: Core I.1 (#ri-explicit), test public contracts;
+ * SL.str.2 (#rstr-view), borrowed inputs; performance COPY.7, view-based cases
+ * (guidelines/copy-move/COPY.7-eliminate-hidden-copies.md).
+ *
  * Steering units preserve full-width variant IDs and reject invalid strength
  * before typed admission. No session, socket or model execution occurs.
  * Steering corpus consultation, header design and implementation 2026-10-20:
@@ -26,6 +33,33 @@ using dolittle::tests::check;
 using dolittle::tests::expect_throws;
 using dolittle::tests::report_failure;
 int main() try {
+  const std::vector<std::string> hosts{"spark.example:8787"};
+  const std::vector<std::string> origins{"http://spark.example:8787"};
+  check(server::allowed_host(hosts.front(), hosts), "configured LAN host");
+  check(server::allowed_origin(origins.front(), hosts.front(), origins),
+        "configured LAN origin");
+  for (const auto host : {"localhost", "127.0.0.1", "[::1]", "localhost:8877",
+                          "127.0.0.1:1", "[::1]:65535"}) {
+    check(server::allowed_host(host, hosts), "loopback forwarded authority");
+    check(server::allowed_origin(std::string("http://") + host, host, origins),
+          "forwarded page origin matches Host");
+    check(server::allowed_origin("", host, origins), "absent Origin");
+    for (const auto origin :
+         {"null", "https://evil.example", "http://localhost:9",
+          "http://localhost.evil.example", "http://[::1]:9"}) {
+      check(!server::allowed_origin(origin, host, origins), "unrelated origin");
+    }
+  }
+  for (const auto host :
+       {"", "evil.example:8787", "localhost.evil.example:8787",
+        "127.0.0.1.evil.example", "localhost@evil.example",
+        "localhost:", "localhost:0", "localhost:65536", "localhost:-1",
+        "localhost:+80", "localhost:80/path", "localhost:80?x",
+        "localhost:80#x", "localhost:80 ", "127.0.0.2:8787", "::1",
+        "[::1]:", "localhost:1,evil"}) {
+    check(!server::allowed_host(host, hosts),
+          "malformed/unconfigured authority");
+  }
   const server::WireLimits limits{65536, 65536, 16, 128};
   const std::string body =
       R"({"request":"abc","prompt":{"user":"hello","thinking":"enabled"},"settings":{"mode":"greedy","temperature":1,"top_k":0,"top_p":1,"seed":"18446744073709551615","max_new_tokens":8}})";

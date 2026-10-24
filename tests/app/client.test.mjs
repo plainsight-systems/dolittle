@@ -46,9 +46,9 @@ test('missing and rejected access stops API retries and a fresh link recovers', 
   assert.equal(env.requests.at(-1).headers.Authorization, 'Bearer new-key');
 });
 
-test('access links stay on the current origin and transport failures retain access', async () => {
+test('invalid launcher links are rejected and transport failures retain access', async () => {
   const env = browser(), client = createClient(env);
-  for (const link of ['not a link', 'http://localhost:8787/', 'https://other.example/#token=key']) assert.throws(() => client.connect(link));
+  for (const link of ['not a link', 'http://localhost:8787/', 'file:///tmp/key#token=key', 'javascript:alert(1)#token=key', 'https://user:password@other.example/#token=key']) assert.throws(() => client.connect(link));
   assert.equal(env.requests.length, 0);
   client.connect('http://localhost:8787/#token=working-key');
   env.response = 503;
@@ -56,6 +56,22 @@ test('access links stay on the current origin and transport failures retain acce
   env.response = 200;
   await client.status();
   assert.equal(env.requests.at(-1).headers.Authorization, 'Bearer working-key');
+});
+
+test('remote launcher links authorize only the currently opened forwarded page', async () => {
+  for (const address of ['http://127.0.0.1:8877/', 'http://localhost:8877/', 'http://[::1]:8877/']) {
+    const env = browser(); env.location = new URL(address);
+    const client = createClient(env);
+    client.connect('http://spark.example:8787/#token=forwarded-key');
+    assert.equal(env.location.href, address);
+    assert.equal(env.requests.length, 0);
+    await client.status();
+    assert.equal(new URL(env.requests[0].path, env.location).origin, env.location.origin);
+    assert.equal(env.requests[0].headers.Authorization, 'Bearer forwarded-key');
+    const reopened = browser(env.localStorage); reopened.location = new URL(address);
+    await createClient(reopened).status();
+    assert.equal(reopened.requests[0].headers.Authorization, 'Bearer forwarded-key');
+  }
 });
 
 test('blocked storage still permits access for the page lifetime', async () => {

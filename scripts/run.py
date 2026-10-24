@@ -96,6 +96,11 @@ def main():
                 raise RuntimeError('Service did not become ready')
             access = url + '/#token=' + token
             print('Open Dolittle — use this full access link the first time in each browser:\n' + access, flush=True)
+            if args.no_browser and args.bind in {'127.0.0.1', 'localhost', '0.0.0.0'}:
+                print(f'Using SSH? On your browser machine run:\n'
+                      f'  ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:{args.port}:127.0.0.1:{args.port} USER@GPU-HOST\n'
+                      f'Then open http://127.0.0.1:{args.port}/ and paste the access link above.\n'
+                      'If the local port is busy, change the first port in the tunnel and browser URL; keep the launcher link as printed.', flush=True)
             print('After connecting, this browser remembers access at ' + url + '/\n'
                   'Keep this terminal running. If you restart the launcher, open its new access link.', flush=True)
             if not args.no_browser:

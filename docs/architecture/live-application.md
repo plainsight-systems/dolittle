@@ -175,14 +175,22 @@ paths. Model bytes/metadata are acquired only through the trusted launcher.
 
 Default published port binds host loopback. Docker may listen on all container
 interfaces while Compose publishes only `127.0.0.1`. Explicit LAN binding is an
-operator choice. Check allowed Host/Origin and a startup access token for API
-requests; no wildcard CORS. Hand the token to the local browser in a URL fragment,
+operator choice. Accept configured Host addresses and the exact loopback names
+`localhost`, `127.0.0.1` and `[::1]`, with an optional port from 1 through 65535.
+Loopback ports may differ from the service port for SSH forwarding. A supplied
+Origin must match a configured origin or the request's loopback HTTP address.
+Reject duplicate Host/Origin headers. API requests still require the startup
+access token; no wildcard CORS. The pure address predicates live with wire
+validation in `server/wire.cpp` and are declared in `server/http.h`.
+Hand the token to the local browser in a URL fragment,
 remove it after reading and retain it in origin-scoped local storage so the plain
 URL works across tabs and browser restarts. Migrate existing session credentials;
 fall back to memory if storage is blocked. Discard rejected tokens and show a
 connection panel instead of repeatedly sending unauthorized requests. The panel
-accepts a full same-origin launcher link; credentials are never sent to an address
-supplied by the user. A new launcher session requires its new link. Keep tokens
+accepts an HTTP(S) launcher link from another hostname or port and extracts only
+its token fragment. It neither navigates to nor fetches the pasted address;
+all requests continue to the current page's origin. This lets a forwarded page
+use the remote launcher's link directly. A new launcher session requires its new link. Keep tokens
 out of application logs and query strings; the launcher's private access link is
 the explicit handoff. Serve generated text as text nodes, never HTML. This is a local
 experiment service, not an internet-facing multi-user deployment.

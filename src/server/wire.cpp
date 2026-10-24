@@ -1,4 +1,15 @@
 /*
+ * A1 SSH address validation: borrow Host/Origin and configured lists, compare
+ * exact configured entries, or recognize localhost/127.0.0.1/[::1] followed by
+ * no port or a decimal port in 1..65535. A loopback Origin must be http:// plus
+ * that request's Host. Reject malformed suffixes without DNS or allocation.
+ * Algorithm: live-application.md, Transport contract. Cost is linear in header
+ * bytes and configured entries, with constant extra storage. Implementation
+ * corpus: Core I.1 (#ri-explicit), explicit policy inputs; SL.str.2
+ * (#rstr-view), borrowed views; performance COPY.7, avoid temporary header
+ * strings (guidelines/copy-move/COPY.7-eliminate-hidden-copies.md). Both
+ * corpora queried for design and implementation; rules retrieved in full.
+ *
  * Steering wire algorithm: validate bounded edit/strength/settings, decode
  * variant IDs without numeric loss, and preserve original/edited text plus
  * baseline/steered stream identities in reconnect pages. Serialize completed
@@ -63,6 +74,25 @@
 
 namespace dolittle::server {
 namespace {
+bool loopback_authority(std::string_view host) {
+  constexpr std::array<std::string_view, 3> names{"localhost", "127.0.0.1",
+                                                  "[::1]"};
+  constexpr std::size_t max_port_digits = 5;
+  for (const auto name : names) {
+    if (host == name) return true;
+    if (!host.starts_with(name)) continue;
+    auto suffix = host.substr(name.size());
+    if (!suffix.starts_with(':')) continue;
+    suffix.remove_prefix(1);
+    if (suffix.empty() || suffix.size() > max_port_digits) return false;
+    std::uint16_t port{};
+    const auto parsed = std::from_chars(std::to_address(suffix.begin()),
+                                        std::to_address(suffix.end()), port);
+    return parsed.ec == std::errc{} &&
+           parsed.ptr == std::to_address(suffix.end()) && port != 0;
+  }
+  return false;
+}
 constexpr auto bits_per_byte = 8;
 constexpr auto decimal_u64_digits = 20;
 constexpr auto metadata_expansion = 32;
@@ -338,6 +368,21 @@ std::string bounded(const Json& value, std::size_t cap) {
   return bytes;
 }
 }  // namespace
+bool allowed_host(std::string_view host,
+                  std::span<const std::string> configured) {
+  return std::find(configured.begin(), configured.end(), host) !=
+             configured.end() ||
+         loopback_authority(host);
+}
+bool allowed_origin(std::string_view origin, std::string_view host,
+                    std::span<const std::string> configured) {
+  constexpr std::string_view scheme = "http://";
+  return origin.empty() ||
+         std::find(configured.begin(), configured.end(), origin) !=
+             configured.end() ||
+         (loopback_authority(host) && origin.starts_with(scheme) &&
+          origin.substr(scheme.size()) == host);
+}
 Command decode_command(CommandInput input, WireLimits limits) {
   const auto& [method, path, body] = input;
   if (method != "POST" || body.size() > limits.max_request_bytes) {

@@ -1,4 +1,14 @@
 /*
+ * SSH access (A1): validate one Host and at most one Origin using the pure
+ * wire address predicates. Configured hosts and exact loopback names/valid
+ * forwarded ports reach the existing token check. Cross-origin requests stay
+ * rejected. Algorithm: live-application.md, Transport contract; no inference
+ * work or network lookup is added. Header checks borrow the owned request
+ * strings; cost is linear in header bytes/configured entries. Design and
+ * implementation corpus: Core I.1 (#ri-explicit), explicit policy; SL.str.2
+ * (#rstr-view), borrowed views; performance COPY.7, avoid copying configured
+ * entries (guidelines/copy-move/COPY.7-eliminate-hidden-copies.md).
+ *
  * Steering transport: route the authenticated versioned steering command
  * through the same bounded parser and session queue as interpretation. A
  * socket never waits for either continuation; event polling owns publication.
@@ -86,9 +96,6 @@ std::uint64_t decimal(std::string_view text) {
   }
   return value;
 }
-bool allowed(std::string_view value, const std::vector<std::string>& list) {
-  return std::find(list.begin(), list.end(), value) != list.end();
-}
 }  // namespace
 struct Server::Impl {
   std::reference_wrapper<experiment::Session> session;
@@ -121,13 +128,18 @@ struct Server::Impl {
           "base-uri 'none'; frame-ancestors 'none'");
       response.set_header("X-Content-Type-Options", "nosniff");
       response.set_header("Referrer-Policy", "no-referrer");
+      const auto host = request.get_header_value("Host");
       if (request.get_header_value_count("Host") != 1 ||
-          !allowed(request.get_header_value("Host"), options.allowed_hosts)) {
-        error(response, http_forbidden, "Host is not allowed.");
+          !allowed_host(host, options.allowed_hosts)) {
+        error(response, http_forbidden,
+              "This address is not configured. For SSH forwarding, open "
+              "http://127.0.0.1:<forwarded-port> in your browser. For LAN "
+              "access, set --host to the browser hostname when launching.");
         return httplib::Server::HandlerResponse::Handled;
       }
       const auto origin = request.get_header_value("Origin");
-      if (!origin.empty() && !allowed(origin, options.allowed_origins)) {
+      if (request.get_header_value_count("Origin") > 1 ||
+          !allowed_origin(origin, host, options.allowed_origins)) {
         error(response, http_forbidden, "Origin is not allowed.");
         return httplib::Server::HandlerResponse::Handled;
       }
